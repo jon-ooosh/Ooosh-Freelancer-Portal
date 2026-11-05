@@ -22,6 +22,11 @@ import {
   sendOohInfoEmailsForJob,
 } from '../services/ooh-return';
 import { getLatestPositionForReg } from '../services/traccar-server';
+import {
+  resolveFreelancerOohToken,
+  recordFreelancerOohSubmission,
+  setOohReturn,
+} from '../services/freelancer-ooh-return';
 import { getSystemSettings } from '../routes/system-settings';
 import {
   resolveJobId,
@@ -54,7 +59,10 @@ const publicLimiter = rateLimit({
 router.get('/by-token/:token', publicLimiter, async (req: Request, res: Response) => {
   const token = String(req.params.token);
   const ctx = await resolveParkingToken(token);
-  if (!ctx) {
+  // A freelancer's link (services/freelancer-ooh-return.ts): same page, their
+  // own record. The van may not be known (a backline run): the page asks.
+  const fctx = ctx ? null : await resolveFreelancerOohToken(token);
+  if (!ctx && !fctx) {
     res.status(404).json({ error: 'Link is no longer valid (van may already be checked in).' });
     return;
   }
@@ -69,11 +77,12 @@ router.get('/by-token/:token', publicLimiter, async (req: Request, res: Response
   ]);
   res.json({
     data: {
-      vehicleReg: ctx.vehicleReg,
-      jobNumber: ctx.hhJobNumber,
-      jobName: ctx.jobName,
-      driverName: ctx.driverName,
-      alreadySubmitted: ctx.alreadySubmitted,
+      vehicleReg: ctx ? ctx.vehicleReg : fctx!.vehicleReg,
+      jobNumber: ctx ? ctx.hhJobNumber : fctx!.hhJobNumber,
+      jobName: ctx ? ctx.jobName : fctx!.jobName,
+      driverName: ctx ? ctx.driverName : fctx!.personName,
+      alreadySubmitted: ctx ? ctx.alreadySubmitted : fctx!.alreadySubmitted,
+      isFreelancer: !ctx,
       info: {
         gateCode: s.ooh_gate_code || null,
         yardAddress: s.ooh_yard_address || null,
@@ -89,11 +98,14 @@ router.get('/by-token/:token', publicLimiter, async (req: Request, res: Response
 router.get('/by-token/:token/prefill', publicLimiter, async (req: Request, res: Response) => {
   const token = String(req.params.token);
   const ctx = await resolveParkingToken(token);
-  if (!ctx) {
+  const fctx = ctx ? null : await resolveFreelancerOohToken(token);
+  if (!ctx && !fctx) {
     res.status(404).json({ error: 'Link is no longer valid' });
     return;
   }
-  const position = await getLatestPositionForReg(ctx.vehicleReg);
+  const reg = ctx ? ctx.vehicleReg : fctx!.vehicleReg;
+  if (!reg) { res.json({ data: null }); return; }
+  const position = await getLatestPositionForReg(reg);
   res.json({
     data: position
       ? {
@@ -119,6 +131,8 @@ const submitSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
   notes: z.string().max(2000).optional().nullable(),
+  // A freelancer's van we didn't know (a backline run): the number plate they typed.
+  vehicle_reg: z.string().trim().max(20).optional().nullable(),
 });
 
 router.post(
@@ -128,12 +142,26 @@ router.post(
   async (req: Request, res: Response) => {
     const token = String(req.params.token);
     const ctx = await resolveParkingToken(token);
-    if (!ctx) {
+    const fctx = ctx ? null : await resolveFreelancerOohToken(token);
+    if (!ctx && !fctx) {
       res.status(404).json({ error: 'Link is no longer valid' });
       return;
     }
 
     const body = req.body as z.infer<typeof submitSchema>;
+    if (fctx) {
+      try {
+        await recordFreelancerOohSubmission(fctx, {
+          lat: body.latitude, lng: body.longitude, notes: body.notes ?? null, typedReg: body.vehicle_reg ?? null,
+        });
+        res.json({ success: true });
+      } catch (err) {
+        console.error('[ooh-return] freelancer submit error:', err);
+        res.status(500).json({ error: 'Failed to record submission' });
+      }
+      return;
+    }
+    if (!ctx) return;
     try {
       await recordOohParkingSubmission({
         assignmentId: ctx.assignmentId,
@@ -150,6 +178,29 @@ router.post(
     } catch (err) {
       console.error('[ooh-return] submit error:', err);
       res.status(500).json({ error: 'Failed to record submission' });
+    }
+  }
+);
+
+// ── Staff: a freelancer's job is coming back out of hours ───────────
+// services/freelancer-ooh-return.ts. Turning it on emails the job's freelancers
+// the procedure straight away if the job's last day has come, otherwise the
+// 10:00 run sends it on that day. Once per freelancer per job.
+const freelancerToggleSchema = z.object({ on: z.boolean() });
+router.patch(
+  '/quotes/:id',
+  authenticate,
+  authorize(...STAFF_ROLES),
+  validate(freelancerToggleSchema),
+  async (req: AuthRequest, res: Response) => {
+    if (!z.string().guid().safeParse(req.params.id).success) { res.status(404).json({ error: 'Job leg not found' }); return; }
+    try {
+      const result = await setOohReturn(String(req.params.id), (req.body as { on: boolean }).on);
+      if (!result) { res.status(404).json({ error: 'Job leg not found' }); return; }
+      res.json({ data: result });
+    } catch (err) {
+      console.error('[ooh-return] freelancer toggle error:', err);
+      res.status(500).json({ error: 'Failed to update' });
     }
   }
 );

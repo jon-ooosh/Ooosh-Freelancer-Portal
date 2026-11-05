@@ -4,6 +4,12 @@
  * Token-authenticated (no login). Driver opens the link from their email,
  * the page pre-fills the marker from Traccar, they confirm or drag, submit.
  *
+ * Also a FREELANCER's link (Nov 2026, backend services/freelancer-ooh-return.ts):
+ * `isFreelancer` adds "leave the backline in the van" and "never the grey
+ * cupboard", drops the hirer's "you remain responsible" line, and asks for the
+ * number plate when we don't know the van (a backline run). The copy here has
+ * no em dashes, because freelancers read it too.
+ *
  * Mounted outside the OP staff Layout (no nav shell). Mobile-friendly.
  */
 import { useEffect, useRef, useState } from 'react';
@@ -30,7 +36,9 @@ interface OohInfo {
   what3words: string | null;
 }
 interface FormContext {
-  vehicleReg: string;
+  vehicleReg: string | null;
+  /** A freelancer's link, not a hirer's. */
+  isFreelancer?: boolean;
   jobNumber: number | null;
   jobName: string | null;
   driverName: string | null;
@@ -56,6 +64,8 @@ export default function OohReturnParkingPage() {
   const [prefill, setPrefill] = useState<PrefillData | null>(null);
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [notes, setNotes] = useState('');
+  // A freelancer's van we don't know: the number plate they type.
+  const [typedReg, setTypedReg] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [submitted, setSubmitted] = useState(false);
@@ -156,6 +166,7 @@ export default function OohReturnParkingPage() {
           latitude: coords.lat,
           longitude: coords.lng,
           notes: notes.trim() || null,
+          ...(ctx && !ctx.vehicleReg && typedReg.trim() ? { vehicle_reg: typedReg.trim() } : {}),
         }),
       });
       if (!res.ok) {
@@ -184,7 +195,7 @@ export default function OohReturnParkingPage() {
       <div className="w-full max-w-lg bg-white rounded-2xl shadow-lg overflow-hidden">
         <div className="bg-ooosh-navy px-5 py-4 text-white">
           <h1 className="text-lg font-semibold">Returning your van</h1>
-          <p className="text-xs text-white/80 mt-0.5">Out-of-hours return — instructions + confirm parking</p>
+          <p className="text-xs text-white/80 mt-0.5">Out-of-hours return: instructions and confirm parking</p>
         </div>
 
         <div className="px-5 py-5 space-y-4">
@@ -205,7 +216,7 @@ export default function OohReturnParkingPage() {
           {submitted && ctx && (
             <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800 text-center">
               <p className="font-semibold text-base mb-1">✓ Thanks, {ctx.driverName || 'all done'}!</p>
-              <p>We've logged where you parked {ctx.vehicleReg}. Have a safe trip home.</p>
+              <p>We've logged where you parked {ctx.vehicleReg || typedReg.trim().toUpperCase() || 'the van'}. Have a safe trip home.</p>
             </div>
           )}
 
@@ -214,7 +225,7 @@ export default function OohReturnParkingPage() {
               <div className="rounded-lg bg-gray-50 border border-gray-200 p-3 text-sm">
                 <div className="flex justify-between items-baseline gap-2">
                   <span className="text-gray-500">Vehicle</span>
-                  <span className="font-semibold text-gray-900">{ctx.vehicleReg}</span>
+                  <span className="font-semibold text-gray-900">{ctx.vehicleReg || 'Tell us below'}</span>
                 </div>
                 {ctx.jobNumber && (
                   <div className="flex justify-between items-baseline gap-2 mt-1">
@@ -232,7 +243,7 @@ export default function OohReturnParkingPage() {
 
               {ctx.alreadySubmitted && (
                 <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-                  You've already submitted a location for this hire. Submitting again will update it.
+                  You've already submitted a location for this {ctx.isFreelancer ? 'job' : 'hire'}. Submitting again will update it.
                 </div>
               )}
 
@@ -262,13 +273,15 @@ export default function OohReturnParkingPage() {
                   <details className="rounded-lg border border-gray-200 bg-white p-3" open>
                     <summary className="text-sm font-medium text-gray-700 cursor-pointer">When you arrive</summary>
                     <ul className="mt-2 pl-5 list-disc text-sm text-gray-600 space-y-1.5">
-                      <li>Let yourself into the yard — line up the padlock numbers and pull the black knob to open.</li>
+                      <li>Let yourself into the yard: line up the padlock numbers and pull the black knob to open.</li>
                       <li>Drive as far into the yard as possible and as far to the left as you can. Leave room for other vehicles behind you.</li>
-                      <li>Double-check you haven't left anything in the van.</li>
+                      {ctx.isFreelancer
+                        ? <li>Leave any backline in the van. It doesn't need to come out.</li>
+                        : <li>Double-check you haven't left anything in the van.</li>}
                       <li>Close all windows / sunroofs and lock all doors.</li>
                       <li>Close the gates behind you and refit the padlock through the gate chain. Roll the numbers to scramble the code.</li>
                       <li>
-                        Place the keys in the secure key drop under the first window — <strong>not</strong> through the letterbox on the glass door.
+                        Place the keys in the secure key drop under the first window, <strong>not</strong> through the letterbox on the glass door{ctx.isFreelancer ? <>, and <strong>never</strong> in the grey cupboard</> : null}.
                         {ctx.info.keydropPhotoUrl && (
                           <> <a href={ctx.info.keydropPhotoUrl} target="_blank" rel="noreferrer" className="text-ooosh-navy underline">photo →</a></>
                         )}
@@ -280,10 +293,24 @@ export default function OohReturnParkingPage() {
                     <p className="font-medium">If the yard is full</p>
                     <p className="mt-1 text-amber-800">
                       Please do <strong>not</strong> park outside our gates, in front of our neighbour's gates, or on
-                      double-yellow lines — it can block HGV access and may incur extra costs. The nearest safe legal
+                      double-yellow lines: it can block HGV access and may incur extra costs. The nearest safe legal
                       parking is usually the seafront. <strong>Wherever you park, drop a pin below so we can find it.</strong>
                     </p>
                   </div>
+                </div>
+              )}
+
+              {ctx.isFreelancer && !ctx.vehicleReg && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Which van? Type its number plate</label>
+                  <input
+                    value={typedReg}
+                    onChange={e => setTypedReg(e.target.value)}
+                    maxLength={20}
+                    autoCapitalize="characters"
+                    placeholder="TE45 REG"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm uppercase focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+                  />
                 </div>
               )}
 
@@ -336,15 +363,17 @@ export default function OohReturnParkingPage() {
               <button
                 type="button"
                 onClick={handleSubmit}
-                disabled={submitting || !coords}
+                disabled={submitting || !coords || (!!ctx.isFreelancer && !ctx.vehicleReg && !typedReg.trim())}
                 className="w-full px-4 py-3 bg-ooosh-navy text-white text-sm font-semibold rounded-lg hover:opacity-90 disabled:opacity-50"
               >
                 {submitting ? 'Submitting…' : 'Confirm parking location'}
               </button>
 
-              <p className="text-[11px] text-gray-400 text-center">
-                You remain responsible for the vehicle until we open and check it in.
-              </p>
+              {!ctx.isFreelancer && (
+                <p className="text-[11px] text-gray-400 text-center">
+                  You remain responsible for the vehicle until we open and check it in.
+                </p>
+              )}
             </>
           )}
         </div>

@@ -2420,6 +2420,79 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Out-of-hours van return, for a FREELANCER (Nov 2026) ──────────────
+  // services/freelancer-ooh-return.ts. Sent on the job's last day when staff tick
+  // "Back out of hours" on the freelancer's job. Ignores the freelancer's email
+  // pause (an instruction for a job they've taken). Email only, never a text.
+  // British English, no em dashes: freelancers read this.
+  freelancer_ooh_return_info: {
+    variant: 'internal',
+    preheader: 'The gate code and what to do when you bring the van back',
+    subject: 'Bringing the van back out of hours: {{jobDate}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Bringing the van back out of hours</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{freelancerName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        You're bringing an Ooosh van back to our yard after we've closed ({{jobDate}}, job <strong>#{{jobNumber}}</strong>).
+        Here's what to do.
+      </p>
+
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Yard gate code</p>
+            <p style="margin:0;font-size:28px;color:#1e293b;font-weight:700;letter-spacing:2px;font-family:monospace;">{{gateCode}}</p>
+            <p style="margin:8px 0 0;font-size:13px;color:#64748b;">Yard: {{yardAddress}}</p>
+            {{#if yardMapsUrl}}<p style="margin:8px 0 0;font-size:13px;"><a href="{{yardMapsUrl}}" style="color:#7B5EA7;text-decoration:none;">Open in Google Maps</a></p>{{/if}}
+            {{#if what3words}}<p style="margin:4px 0 0;font-size:13px;color:#64748b;">what3words: <strong>{{what3words}}</strong></p>{{/if}}
+          </td>
+        </tr>
+      </table>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">When you arrive</h3>
+      <ul style="margin:0 0 16px;padding-left:20px;font-size:14px;color:#334155;line-height:1.7;">
+        <li>Let yourself into the yard: line up the padlock numbers and pull the black knob to open.</li>
+        <li>Drive as far into the yard and as far over to the left as you can. Leave room for other vans behind you.</li>
+        <li>Leave any backline in the van. It doesn't need to come out.</li>
+        <li>Close the windows and lock the van.</li>
+        <li>Close the gates behind you, put the padlock back through the chain and scramble the numbers.</li>
+      </ul>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">The keys</h3>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        Put the keys in the secure key drop under the first window on our building.
+        <strong>Not</strong> through the letterbox on the glass door, and <strong>never</strong> in the grey cupboard.
+      </p>
+      {{#if keydropPhotoUrl}}<p style="margin:0 0 16px;"><a href="{{keydropPhotoUrl}}" style="color:#7B5EA7;text-decoration:none;font-size:14px;">See a photo of the key drop</a></p>{{/if}}
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">If the yard is full</h3>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        Please don't park outside our gates, in front of our neighbour's gates, or on double yellow lines.
+        The nearest safe, legal parking is usually the seafront.
+      </p>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Tell us where you parked</h3>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        Wherever you leave it, tap the button when you've parked. It drops a pin where the van is: just check it's right and confirm.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td align="center" style="padding:8px;">
+            <a href="{{parkingFormUrl}}" style="display:inline-block;padding:14px 28px;background-color:#7B5EA7;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;font-size:15px;">
+              Tell us where you parked
+            </a>
+          </td>
+        </tr>
+      </table>
+
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">
+        Any problems, call or message one of us. The link is on your job in the portal too.
+      </p>
+    `,
+  },
+
   under_dispatched_warning: {
     variant: 'internal',
     subject: 'Check HireHop: {{jobName}} (#{{jobNumber}}) not dispatched',

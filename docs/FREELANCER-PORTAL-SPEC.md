@@ -421,8 +421,11 @@ and key lockbox codes show on a studio sitter's shift page on the day only, and 
 up (the keys go back in the lockbox). One place to change them: Settings › Out-of-Hours Returns. Not a
 Resources page (jon agreed): that would put the building's key code in front of every freelancer
 login, past ones included, at any time. Early van pick-ups before staff arrive stay arranged by hand.
-The **fire procedure** ("Fire: what to do", draft) is common sense from jon's paper risk assessment:
-a call point and an extinguisher in each room, leave everything, assembly point by the front gates.
+The **fire procedure** ("Fire: what to do") is common sense from jon's paper risk assessment:
+a call point and an extinguisher in each room, a fire blanket in each kitchen, the main alarm panel by
+the front doors downstairs (its own instructions beside it), go INTO every room and kitchen and knock
+on the toilets (the doors are soundproofed), leave everything, assembly point by the front gates on
+East Street.
 
 **"Have they read it?" (Nov 2026, migration 333, `services/freelancer-document-reads.ts`):** a Staff
 Document shared with freelancers can ask them to confirm they've read it ("Freelancers must confirm
@@ -436,11 +439,26 @@ card on the freelancer's Freelancer tab. Nothing is ever blocked: it's a reminde
 server-side, so they'd be the portal's own. The same PR folded the Staff Documents row actions into a
 ⋯ menu (View and a due review stay out; the status figures open who's done).
 
-Still to come: the shop-till guide in the new look, and out-of-hours returns for freelancers by email
-(jon, Nov 2026: any freelancer bringing an Ooosh van back after hours, a "Returning out of hours" tick
-on their job, email only, ignores their email pause, Van & Driver drivers included; a small table of
-its own, NOT the hirer's `return_overnight` flag, which would email, text and log violations against
-the hirer).
+**Out-of-hours returns for freelancers (Nov 2026, migration 335, `services/freelancer-ooh-return.ts`):**
+any freelancer bringing an Ooosh van back after we've closed (a van they collected, a backline run, a
+Van & Driver job). Staff click the "🌙 Back out of hours" pill on the freelancer's job on Job Detail
+(Crew & Transport); it shows "on the day", "emailed" or "parked". The email (`freelancer_ooh_return_info`)
+goes on the job's LAST day: at once if the tick lands on or after it, else at the 10:00 run. Once per
+freelancer per job, only stamped when the send worked; email only, never a text; it ignores the
+freelancer's email pause (an instruction for a job they took, like a cancellation). It carries the gate
+code, where to park, leave the backline in the van, the key drop (never the letterbox or the grey
+cupboard), the seafront if the yard is full, and a "Tell us where you parked" link to the hirers' own
+page (`/return-parking/:token`, which takes a freelancer token too). The same link is on the portal's
+job page, under the gate code. Which van: the one they soft-checked-in, or their Van & Driver van, looked
+up when the page opens; for a backline run the page asks for the number plate. A submission notes the
+job's timeline and emails info@ (first time only, `ooh_cc_info_email`). The link works until 2 days
+after the last day, while the job is live and ticked; ticking a job that ended more than 2 days ago is
+refused. Its own table (`freelancer_ooh_returns`) and `quotes.ooh_return`, NOT the hirer's
+`vehicle_hire_assignments.return_overnight`, which emails and texts the HIRER and logs violations
+against them. Found on the way: the hirer's "returning tonight" reminder email and text still went
+after a freelancer had already collected the van; both now skip a soft-checked-in van.
+
+Still to come: the shop-till guide in the new look.
 
 ## 9. The reskin (PR 3, Oct 2026)
 

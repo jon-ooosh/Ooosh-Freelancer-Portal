@@ -33,6 +33,7 @@ import { personalFee } from '../services/freelancer-fees';
 import { getFreelancerEarnings } from '../services/freelancer-earnings';
 import { sitterCodesFor, gateCodeForJob } from '../services/site-codes';
 import { unreadFor, readTimesFor, markRead } from '../services/freelancer-document-reads';
+import { portalParkingUrlFor } from '../services/freelancer-ooh-return';
 import { portalSecondsBlocked, recordPortalLoginFailure, clearPortalLoginFailures, deviceLabelFrom } from '../services/staff-login-security';
 import {
   isPortalEnforcedNow, portalEmailHint, signPortalPending, readPortalPending, sendPortalLoginCode,
@@ -2814,9 +2815,16 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
       return null;
     });
 
+    // Bringing the van back out of hours: the "tell us where you parked" link,
+    // once staff have ticked it and the email has gone (freelancer-ooh-return.ts).
+    const oohParkingUrl = isStaffShared ? null : await portalParkingUrlFor(String(quoteId), personId).catch((err) => {
+      console.error(`[portal] OOH parking link lookup failed for quote ${quoteId} (non-fatal):`, err);
+      return null;
+    });
+
     res.json({
       success: true,
-      job: { ...job, clientEmail, clientContacts, gateCode },
+      job: { ...job, clientEmail, clientContacts, gateCode, oohParkingUrl },
       venue,
       contactsVisible: venue ? !venue.phoneHidden : true,
       boardType: row.job_type === 'crewed' ? 'crew' : 'dc',

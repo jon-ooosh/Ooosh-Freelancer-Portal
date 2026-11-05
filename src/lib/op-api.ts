@@ -61,6 +61,10 @@ export interface PortalJob {
   // Job detail only: the yard gate code, from the job's day to the day after,
   // else null (OP services/site-codes.ts). Never on the job lists.
   gateCode?: string | null
+  // Job detail only: "tell us where you parked" when staff have asked this
+  // freelancer to bring the van back out of hours and the email has gone
+  // (OP services/freelancer-ooh-return.ts). Null otherwise.
+  oohParkingUrl?: string | null
   // D&C specific
   whatIsIt?: string
   clientEmail?: string | null

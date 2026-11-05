@@ -531,7 +531,9 @@ export function startScheduler() {
 
   // ── OOH Return Reminder ─────────────────────────────────────────────
   // Daily at 10:00 — send the day-before reminder for any vehicle with
-  // return_overnight=true and hire_end=tomorrow.
+  // return_overnight=true and hire_end=tomorrow. Then the freelancers' own
+  // out-of-hours email for every ticked job whose last day is today
+  // (services/freelancer-ooh-return.ts; a separate try so one can't stop the other).
   cron.schedule('0 10 * * *', async () => {
     try {
       const summary = await sendOohReminderEmails();
@@ -540,6 +542,12 @@ export function startScheduler() {
       }
     } catch (err) {
       console.error('Scheduler: OOH reminder run failed:', err);
+    }
+    try {
+      const { runFreelancerOohInfo } = await import('../services/freelancer-ooh-return');
+      await runFreelancerOohInfo();
+    } catch (err) {
+      console.error('Scheduler: freelancer OOH run failed:', err);
     }
   });
   console.log('Scheduler: OOH return reminders scheduled daily at 10:00');
