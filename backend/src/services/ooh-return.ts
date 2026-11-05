@@ -261,6 +261,9 @@ export async function sendOohReminderEmails(): Promise<{ sent: number; skipped: 
      WHERE vha.return_overnight = TRUE
        AND vha.ooh_reminder_sent_at IS NULL
        AND vha.status IN ('booked_out', 'active')
+       -- Collected by Ooosh (a freelancer's soft check-in): the hirer isn't
+       -- bringing it back, so don't remind them how to (Nov 2026).
+       AND vha.soft_checked_in_at IS NULL
        AND COALESCE(vha.hire_end, j.job_end::date) = (CURRENT_DATE + INTERVAL '1 day')::date
        AND vha.vehicle_id IS NOT NULL`
   );

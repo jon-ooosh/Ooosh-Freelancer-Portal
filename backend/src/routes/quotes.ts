@@ -554,7 +554,18 @@ router.get('/', async (req: AuthRequest, res: Response) => {
           FROM quote_assignments qa
           JOIN people ap ON ap.id = qa.person_id
           WHERE qa.quote_id = q.id
-        ), '[]'::json) as assignments
+        ), '[]'::json) as assignments,
+        -- Out-of-hours return for freelancers (services/freelancer-ooh-return.ts):
+        -- who has been emailed and who has said where they parked.
+        COALESCE(
+          (SELECT json_agg(json_build_object(
+            'person_id', fr.person_id,
+            'info_sent_at', fr.info_sent_at,
+            'returned_at', fr.returned_at
+          ))
+          FROM freelancer_ooh_returns fr
+          WHERE fr.quote_id = q.id
+        ), '[]'::json) as ooh_returns
        FROM quotes q
        LEFT JOIN users u ON u.id = q.created_by
        LEFT JOIN people p ON p.id = u.person_id

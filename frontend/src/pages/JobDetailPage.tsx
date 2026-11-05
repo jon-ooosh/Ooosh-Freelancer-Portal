@@ -216,6 +216,9 @@ interface QuoteExpenseLine {
 
 interface SavedQuote {
   id: string;
+  // A freelancer brings an Ooosh van back after hours (backend services/freelancer-ooh-return.ts)
+  ooh_return?: boolean;
+  ooh_returns?: { person_id: string; info_sent_at: string | null; returned_at: string | null }[];
   job_type: string;
   calculation_mode: string;
   venue_name: string | null;
@@ -2524,6 +2527,27 @@ function JobDetailContent() {
       await loadQuotes();
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to update client intro');
+    }
+  }
+
+  // "Back out of hours": a freelancer brings an Ooosh van back after we've closed.
+  // Turning it on emails the job's freelancers the out-of-hours procedure (gate
+  // code, key drop, where to park, tell us where), today if the job's last day
+  // has come, otherwise on that day at 10:00 (backend services/freelancer-ooh-return.ts).
+  async function toggleOohReturn(q: SavedQuote) {
+    const on = !q.ooh_return;
+    if (on && !window.confirm(
+      'Email the freelancer(s) on this job how to bring the van back out of hours?\n\n'
+      + 'They get the gate code, where the keys go, where to park if the yard is full, and a link to tell us where they parked. '
+      + 'If the job is today it goes now; otherwise on the day at 10am.'
+    )) return;
+    try {
+      const res = await api.patch<{ data: { due: boolean; sent: number; failed: number; tooLate?: boolean } }>(`/ooh-return/quotes/${q.id}`, { on });
+      if (on && res.data.tooLate) alert('This job finished more than 2 days ago, so there is nothing to send.');
+      if (on && res.data.failed > 0) alert(`${res.data.failed} email(s) didn't send. Try turning it off and on again.`);
+      await loadQuotes();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update');
     }
   }
 
@@ -5842,6 +5866,24 @@ function JobDetailContent() {
                               title="Click to cycle: n/a → to do → working on it → done"
                             >
                               Client intro: {label[intro] || intro}
+                            </button>
+                          );
+                        })()}
+                        {/* Back out of hours: a freelancer returns an Ooosh van after we've closed */}
+                        {(() => {
+                          const rows = q.ooh_returns || [];
+                          const emailed = rows.filter((r) => r.info_sent_at).length;
+                          const parked = rows.filter((r) => r.returned_at).length;
+                          const state = !q.ooh_return ? '' : parked ? ' · parked' : emailed ? ' · emailed' : ' · on the day';
+                          return (
+                            <button
+                              onClick={() => toggleOohReturn(q)}
+                              className={`text-xs px-2 py-0.5 rounded-full cursor-pointer hover:opacity-80 transition-opacity ${q.ooh_return ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-400'}`}
+                              title={q.ooh_return
+                                ? 'The freelancer(s) get the out-of-hours return email on the job\'s last day. Click to turn off.'
+                                : 'Is a freelancer bringing an Ooosh van back after we\'ve closed? Click to email them how.'}
+                            >
+                              🌙 Back out of hours{q.ooh_return ? state : ': no'}
                             </button>
                           );
                         })()}

@@ -125,6 +125,9 @@ export async function runOohApproachScan(): Promise<{
      LEFT JOIN drivers d ON d.id = vha.driver_id
      WHERE vha.return_overnight = TRUE
        AND vha.status IN ('booked_out', 'active')
+       -- Collected by Ooosh: it's our freelancer driving it into the yard, not
+       -- the hirer, so never text the hirer (Nov 2026).
+       AND vha.soft_checked_in_at IS NULL
        AND vha.ooh_returned_at IS NULL
        AND vha.ooh_sms_sent_at IS NULL
        AND vha.vehicle_id IS NOT NULL
