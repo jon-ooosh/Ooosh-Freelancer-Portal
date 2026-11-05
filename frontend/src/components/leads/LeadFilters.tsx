@@ -16,7 +16,7 @@ export interface LeadFilterState {
   month: string;
   /** '' | '6' | '8' — minimum AI score. */
   score: string;
-  /** '' | 'warm' | 'cold'. */
+  /** '' | 'warm' | 'cold' | 'watched' (a band watch's tour — TOUR-FINDER-SPEC §21). */
   type: string;
   /** '' | 'has' | 'none' | 'known'. */
   contacts: string;
@@ -41,7 +41,7 @@ export function filtersFromParams(p: URLSearchParams): LeadFilterState {
     run: /^[0-9a-f-]{36}$/i.test(run) ? run : '',
     month: /^\d{4}-\d{2}$/.test(month) ? month : '',
     score: pick(p.get('score'), ['6', '8']),
-    type: pick(p.get('type'), ['warm', 'cold']),
+    type: pick(p.get('type'), ['warm', 'cold', 'watched']),
     contacts: pick(p.get('contacts'), ['has', 'none', 'known']),
     intl: p.get('intl') === '1',
     started: p.get('started') === '1',
@@ -82,7 +82,7 @@ export function applyLeadFilters(leads: Lead[], f: LeadFilterState): Lead[] {
     if (f.run && l.first_run_id !== f.run) return false;
     if (f.month && String(l.first_date ?? '').slice(0, 7) !== f.month) return false;
     if (f.score && (l.relevance_score ?? -1) < Number(f.score)) return false;
-    if (f.type && l.stream !== f.type) return false;
+    if (f.type === 'watched') { if (!l.watch_id) return false; } else if (f.type && l.stream !== f.type) return false;
     if (f.contacts === 'has' && !(l.contacts?.length > 0)) return false;
     if (f.contacts === 'none' && l.contacts?.length > 0) return false;
     if (f.contacts === 'known' && !(l.known_contacts?.length > 0)) return false;
@@ -145,6 +145,7 @@ export default function LeadFilters({ value, onChange, leads, runs, showStale, s
         <option value="">Warm + cold</option>
         <option value="warm">Warm only (known bands)</option>
         <option value="cold">Cold only</option>
+        <option value="watched">Watched bands only</option>
       </select>
       <select value={value.contacts} onChange={(e) => set({ contacts: e.target.value })} className={SELECT}>
         <option value="">Any contacts</option>

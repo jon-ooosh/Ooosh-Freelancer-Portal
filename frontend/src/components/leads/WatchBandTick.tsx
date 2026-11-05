@@ -1,16 +1,20 @@
 /**
  * "Watch this band for their next tour" — the tick on the lost / completed /
- * cancelled close-outs (docs/TOUR-FINDER-SPEC.md §21). Ticked by default.
+ * cancelled close-outs (docs/TOUR-FINDER-SPEC.md §21).
  *
  * It offers the job's Band org, else its client (often the band itself), and
- * shows the name so it can be changed. It starts unticked for a band someone
- * stopped watching, and for a client that is plainly a company rather than a
- * band (a promoter, venue, management…) — then it asks for the band. The parent sends the chosen org as `watch_band_org_id` with the
- * status change; the backend starts the watch (band-watch.ts). `null` = don't.
+ * shows the name so it can be changed. Whether it starts ticked is the
+ * backend's call (band-watch.ts watchTargetForJob, §21.8): ticked when
+ * Ticketmaster knows the name (or couldn't be asked); unticked for a band
+ * someone stopped watching, a client that is a company type, or a name
+ * Ticketmaster has never heard of. The parent sends the chosen org as
+ * `watch_band_org_id` with the status change. `null` = don't.
  */
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../services/api';
 import { fmtDateYear } from './leadTypes';
+
+type TickWhy = 'watching' | 'stopped' | 'not_a_band' | 'tm_known' | 'tm_similar' | 'tm_unknown' | 'tm_unchecked';
 
 interface WatchTarget {
   organisation_id: string;
@@ -18,15 +22,13 @@ interface WatchTarget {
   type: string | null;
   source: 'band' | 'client';
   watch: { id: string; tm_match: string; started_at: string; stopped_at: string | null } | null;
+  tm_act_name: string | null;
+  tm_upcoming: number | null;
+  default_on: boolean;
+  why: TickWhy;
 }
 
 interface OrgOption { id: string; name: string; type: string | null }
-
-/** Org types that are a company, not a band — the client tick starts unticked for these. */
-const NOT_A_BAND_TYPES = [
-  'management', 'label', 'agency', 'promoter', 'venue', 'festival', 'supplier', 'hire_company', 'booking_agent',
-];
-const notABand = (t: WatchTarget) => t.source === 'client' && NOT_A_BAND_TYPES.includes(t.type ?? '');
 
 export default function WatchBandTick({ jobId, value, onChange }: {
   jobId: string;
@@ -52,9 +54,7 @@ export default function WatchBandTick({ jobId, value, onChange }: {
         setTarget(t);
         if (t) {
           setChosen({ id: t.organisation_id, name: t.name });
-          // Ticked by default — unless someone deliberately stopped watching
-          // them, or the client is a company rather than a band.
-          onChangeRef.current(t.watch?.stopped_at || notABand(t) ? null : t.organisation_id);
+          onChangeRef.current(t.default_on ? t.organisation_id : null);
         } else {
           onChangeRef.current(null);
         }
@@ -78,15 +78,22 @@ export default function WatchBandTick({ jobId, value, onChange }: {
 
   if (!loaded) return null;
 
-  const isTarget = chosen && target && chosen.id === target.organisation_id;
-  const watch = isTarget ? target!.watch : null;
+  const t = chosen && target && chosen.id === target.organisation_id ? target : null;
+  const weekly = 'We’ll check Ticketmaster every week and tell you when they next tour the UK or Europe.';
   let hint: string;
   if (!chosen) hint = 'Pick the band, and we’ll tell you when they next tour the UK or Europe.';
-  else if (watch && !watch.stopped_at) hint = `Already watching since ${fmtDateYear(watch.started_at)} — this job is noted against it.`;
-  else if (watch?.stopped_at) hint = `Someone stopped watching them on ${fmtDateYear(watch.stopped_at)}. Tick to watch again.`;
-  else if (isTarget && notABand(target!)) hint = `The client is a ${(target!.type ?? '').replace('_', ' ')}, not a band — pick the band to watch.`;
-  else if (isTarget && target!.source === 'client') hint = 'The client on this job — change it if the band is someone else.';
-  else hint = 'We’ll check Ticketmaster every week and tell you when they next tour the UK or Europe.';
+  else if (!t) hint = weekly;
+  else if (t.why === 'watching' && t.watch) hint = `Already watching since ${fmtDateYear(t.watch.started_at)} — this job is noted against it.`;
+  else if (t.why === 'stopped' && t.watch?.stopped_at) hint = `Someone stopped watching them on ${fmtDateYear(t.watch.stopped_at)}. Tick to watch again.`;
+  else if (t.why === 'not_a_band') hint = `The client is a ${(t.type ?? '').replace('_', ' ')}, not a band — pick the band to watch.`;
+  else if (t.why === 'tm_unknown') hint = `Ticketmaster has never heard of “${t.name}” — usually not a band. Tick to watch anyway, or pick the band.`;
+  else if (t.why === 'tm_similar') hint = `Ticketmaster has no act called exactly “${t.name}”, only similar names. Tick to watch anyway (you’ll pick the act on Leads).`;
+  else if (t.why === 'tm_known') {
+    const act = t.tm_act_name && t.tm_act_name.toLowerCase() !== t.name.toLowerCase() ? ` as “${t.tm_act_name}”` : '';
+    const events = t.tm_upcoming ? ` (${t.tm_upcoming} upcoming event${t.tm_upcoming === 1 ? '' : 's'})` : '';
+    hint = `Ticketmaster knows them${act}${events}. ${weekly}`;
+  } else if (t.source === 'client') hint = `The client on this job — change it if the band is someone else. ${weekly}`;
+  else hint = weekly;
 
   const pick = (o: { id: string; name: string }) => {
     setChosen(o);

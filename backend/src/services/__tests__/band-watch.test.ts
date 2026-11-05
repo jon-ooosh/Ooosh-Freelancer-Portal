@@ -1,4 +1,4 @@
-import { groupIntoTours, ukPosition, TourDate } from '../leads/watch-tours';
+import { groupIntoTours, ukPosition, actSearchNames, TourDate } from '../leads/watch-tours';
 
 const d = (date: string, country: string): TourDate => ({ date, venue: `${country} venue`, city: '', country });
 
@@ -36,3 +36,37 @@ describe('ukPosition', () => {
     expect(ukPosition([d('2027-03-01', 'IE'), d('2027-03-02', 'IE')])).toBe('none');
   });
 });
+
+describe('actSearchNames', () => {
+  it('drops company endings', () => {
+    expect(actSearchNames('Skindred LLP')).toEqual(['Skindred']);
+    expect(actSearchNames('Brother Strut Limited')).toEqual(['Brother Strut']);
+    expect(actSearchNames('Soundfangled Ltd')).toEqual(['Soundfangled']);
+    expect(actSearchNames('Big Band Music Ltd.')).toEqual(['Big Band Music']);
+    expect(actSearchNames('Acme Pty Ltd')).toEqual(['Acme']);
+    expect(actSearchNames('Night Owls, Inc.')).toEqual(['Night Owls']);
+  });
+
+  it('tries each side of " / "', () => {
+    expect(actSearchNames('TENDER / Bad Balloon Ltd')).toEqual(['TENDER', 'Bad Balloon']);
+  });
+
+  it('leaves a slash with no spaces alone', () => {
+    expect(actSearchNames('AC/DC')).toEqual(['AC/DC']);
+  });
+
+  it('keeps a plain name as it is', () => {
+    expect(actSearchNames('Sea Power')).toEqual(['Sea Power']);
+    expect(actSearchNames('Lambrini Girls')).toEqual(['Lambrini Girls']);
+  });
+
+  it('does not strip a word that only looks like an ending', () => {
+    expect(actSearchNames('The Limiteds')).toEqual(['The Limiteds']);
+    expect(actSearchNames('Incubus')).toEqual(['Incubus']);
+  });
+
+  it('falls back to the name when nothing is left', () => {
+    expect(actSearchNames('Ltd')).toEqual(['Ltd']);
+  });
+});
+

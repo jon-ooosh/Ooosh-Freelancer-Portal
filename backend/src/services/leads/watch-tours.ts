@@ -1,7 +1,8 @@
 /**
- * The band watch's tour rules (docs/TOUR-FINDER-SPEC.md §21) — pure, so they
- * can be tested without a database. Used by band-watch.ts.
+ * The band watch's tour and name rules (docs/TOUR-FINDER-SPEC.md §21) — pure,
+ * so they can be tested without a database. Used by band-watch.ts.
  */
+import { normaliseArtist } from './normalise';
 
 export interface TourDate { date: string; venue: string; city: string; country: string; }
 
@@ -50,3 +51,29 @@ export function ukPosition(tour: TourDate[]): UkPosition {
   if (last) return 'end';
   return 'middle';
 }
+
+/** A company ending a band's invoice name carries but its stage name doesn't. */
+const LEGAL_SUFFIX = /[\s,.-]+(ltd|limited|llp|plc|inc|incorporated|llc|gmbh|pty)\.?\s*$/i;
+
+/**
+ * The names to look a band up by on Ticketmaster. An org is often the band's
+ * company ("Skindred LLP", "Brother Strut Limited", "TENDER / Bad Balloon Ltd"),
+ * which Ticketmaster has never heard of: drop the company endings and try each
+ * side of " / " (spaces required, so "AC/DC" stays whole). Nothing to drop →
+ * just the name. At most three names, no duplicates.
+ */
+export function actSearchNames(orgName: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const part of orgName.split(/\s+\/\s+/)) {
+    let n = part.trim();
+    for (let i = 0; i < 3 && LEGAL_SUFFIX.test(n); i++) n = n.replace(LEGAL_SUFFIX, '').trim();
+    const key = normaliseArtist(n);
+    if (key.length < 2 || seen.has(key)) continue;
+    seen.add(key);
+    out.push(n);
+  }
+  const trimmed = orgName.trim();
+  return (out.length ? out : [trimmed]).slice(0, 3);
+}
+

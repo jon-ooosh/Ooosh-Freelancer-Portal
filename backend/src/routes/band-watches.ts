@@ -13,6 +13,9 @@
  *   POST /:id/stop             — stop watching                                                 STAFF
  *   POST /:id/match            — { tm_attraction_id, tm_attraction_name } | { not_on_ticketmaster }
  *                                | { look_again }                                              STAFF
+ *   GET  /back-catalogue       — bands from past jobs, with what Ticketmaster said (§21.8)    STAFF
+ *   POST /back-catalogue/look-up — look them up on Ticketmaster, in the background          MANAGER
+ *   POST /back-catalogue/watch — watch the chosen ones { organisation_ids }                    STAFF
  *
  * Watches started from a close-out arrive through the status change itself
  * (routes/pipeline.ts, routes/cancellations.ts → startWatchFromCloseOut()).
@@ -30,6 +33,9 @@ import {
   startWatch, stopWatch, setWatchMatch, resetWatchMatch, matchWatch, watchTargetForJob,
   getWatchForOrg, searchTicketmasterActs, runBandWatchCheck, isBandWatchCheckRunning,
 } from '../services/leads/band-watch';
+import {
+  listBackCatalogue, startBackCatalogueLookup, watchFromBackCatalogue, getLookupProgress, WATCH_BATCH_LIMIT,
+} from '../services/leads/back-catalogue';
 
 const router = Router();
 router.use(authenticate);
@@ -84,6 +90,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       `SELECT COUNT(*) FILTER (WHERE bw.stopped_at IS NULL AND o.is_deleted = false)::int AS active,
               COUNT(*) FILTER (WHERE bw.stopped_at IS NULL AND o.is_deleted = false
                                  AND bw.tm_match = 'needs_match')::int AS needs_match,
+              COUNT(*) FILTER (WHERE bw.stopped_at IS NULL AND o.is_deleted = false
+                                 AND bw.tm_match IN ('unknown', 'not_found'))::int AS not_on_ticketmaster,
               COUNT(*) FILTER (WHERE bw.stopped_at IS NOT NULL)::int AS stopped
          FROM band_watches bw JOIN organisations o ON o.id = bw.organisation_id`,
     );
@@ -212,6 +220,7 @@ router.post('/check-now', authorize(...MANAGER_ROLES), async (_req: AuthRequest,
       return res.status(503).json({ error: 'Ticketmaster isn’t set up on the server' });
     }
     if (isBandWatchCheckRunning()) return res.status(409).json({ error: 'A check is already running' });
+    if (getLookupProgress().running) return res.status(409).json({ error: 'The past-bands look-up is running — try again when it finishes' });
     if (await isRunActive()) return res.status(409).json({ error: 'A lead search is running — try again when it finishes' });
     setImmediate(() => {
       runBandWatchCheck({ manual: true }).catch((err) => console.error('[band-watches] check-now failed:', err));
@@ -220,6 +229,46 @@ router.post('/check-now', authorize(...MANAGER_ROLES), async (_req: AuthRequest,
   } catch (error) {
     console.error('[band-watches] check-now error:', error);
     res.status(500).json({ error: 'Failed to start the check' });
+  }
+});
+
+// GET /api/band-watches/back-catalogue — bands from past jobs to watch in bulk.
+router.get('/back-catalogue', async (_req: AuthRequest, res: Response) => {
+  try {
+    const { rows, counts } = await listBackCatalogue();
+    res.json({ data: rows, counts, lookup: getLookupProgress(), ticketmaster: isTicketmasterConfigured() });
+  } catch (error) {
+    console.error('[band-watches] back catalogue error:', error);
+    res.status(500).json({ error: 'Failed to load past bands' });
+  }
+});
+
+// POST /api/band-watches/back-catalogue/look-up — look the list up on Ticketmaster.
+router.post('/back-catalogue/look-up', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
+  try {
+    const why = await startBackCatalogueLookup();
+    if (why) return res.status(409).json({ error: why });
+    res.status(202).json({ data: { started: true } });
+  } catch (error) {
+    console.error('[band-watches] back catalogue look-up error:', error);
+    res.status(500).json({ error: 'Failed to start the look-up' });
+  }
+});
+
+// POST /api/band-watches/back-catalogue/watch — watch the ticked bands.
+const bulkSchema = z.object({
+  organisation_ids: z.array(z.string().guid()).min(1).max(WATCH_BATCH_LIMIT),
+});
+router.post('/back-catalogue/watch', validate(bulkSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { organisation_ids } = req.body as z.infer<typeof bulkSchema>;
+    const r = await watchFromBackCatalogue(organisation_ids, req.user!.id);
+    await logAudit(req.user!.id, 'band_watches', req.user!.id, 'bulk_watch', null,
+      { source: 'back_catalogue', asked: organisation_ids.length, watched: r.watched });
+    res.json({ data: r });
+  } catch (error) {
+    console.error('[band-watches] back catalogue watch error:', error);
+    res.status(500).json({ error: 'Failed to watch those bands' });
   }
 });
 

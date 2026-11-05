@@ -11,7 +11,7 @@ import { fmtDateYear } from './leadTypes';
 
 interface OrgWatch {
   id: string;
-  tm_match: 'pending' | 'auto' | 'confirmed' | 'needs_match' | 'not_found';
+  tm_match: 'pending' | 'auto' | 'confirmed' | 'needs_match' | 'unknown' | 'not_found';
   tm_attraction_name: string | null;
   started_at: string;
   stopped_at: string | null;
@@ -73,7 +73,7 @@ export default function WatchBandButton({ orgId, orgType }: { orgId: string; org
 
   const note = watch.tm_match === 'needs_match'
     ? 'pick their Ticketmaster act'
-    : watch.tm_match === 'not_found'
+    : watch.tm_match === 'not_found' || watch.tm_match === 'unknown'
       ? 'not on Ticketmaster'
       : watch.tm_match === 'pending'
         ? 'looking them up'

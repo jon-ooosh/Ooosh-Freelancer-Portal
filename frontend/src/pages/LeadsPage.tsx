@@ -538,7 +538,7 @@ export default function LeadsPage() {
                       {started && <div className="text-[10px] text-gray-400">already started</div>}
                       {l.watch_id && (l.tour_dates?.length ?? 0) > 0 && (
                         <div className="text-[10px] text-gray-500" title={UK_POSITION_LABEL[l.uk_position ?? 'none']}>
-                          {l.tour_dates!.length} dates · {tourCountries(l.tour_dates)}
+                          {l.tour_dates!.length} date{l.tour_dates!.length === 1 ? '' : 's'} · {tourCountries(l.tour_dates)}
                         </div>
                       )}
                     </td>
