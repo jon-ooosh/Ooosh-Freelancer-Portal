@@ -22,7 +22,7 @@ import { getClient, query } from '../config/database';
 import { buildForecast } from '../services/cashflow-forecast';
 import {
   RECEIPT_SPEND_DAYS, SETTING_FIELDS, cardReceiptSpend, forgetXeroBillsCache, loadAccounts, loadCardReceipts, loadBillFlags, loadCards, loadPlannedItems,
-  loadOutcomeHistory, loadSettings, loadXeroBills, measureStripeShare, readStripe,
+  loadOutcomeHistory, loadRecurringSuggestions, loadSettings, loadXeroBills, measureStripeShare, readStripe, readWise,
 } from '../services/cashflow-sources';
 import { addDays, isIsoDate, nextDates } from '../services/cashflow-schedule';
 import { MIN_SAMPLE } from '../services/cashflow-pipeline';
@@ -110,7 +110,7 @@ router.put('/settings', validate(settingsSchema), async (req: AuthRequest, res: 
 
 router.get('/check-in', async (_req: AuthRequest, res: Response) => {
   try {
-    const [accounts, cards, stripe] = await Promise.all([loadAccounts(), loadCards(), readStripe(true)]);
+    const [accounts, cards, stripe, wise] = await Promise.all([loadAccounts(), loadCards(), readStripe(true), readWise(true)]);
     res.json({
       data: {
         today: ukToday(),
@@ -119,6 +119,7 @@ router.get('/check-in', async (_req: AuthRequest, res: Response) => {
         stripe: stripe.ok
           ? { live: true, available: stripe.available, pending: stripe.pending.reduce((s, p) => s + p.amount, 0) }
           : { live: false, reason: stripe.reason },
+        wise: wise.ok ? { live: true, gbp: wise.gbp, others: wise.others } : { live: false, reason: wise.reason },
       },
     });
   } catch (err) {
@@ -529,6 +530,33 @@ router.put('/excluded-contacts/:id', validate(z.object({ id: z.string().min(1).m
     res.json({ data: { ok: true } });
   } catch (err) {
     fail(res, 'excluded contact', err);
+  }
+});
+
+// ── Regular payments Xero has seen (Phase 3, §13.3) ────────────────────────
+
+router.get('/xero/recurring', async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await loadRecurringSuggestions(ukToday(), req.query.fresh === '1') });
+  } catch (err) {
+    fail(res, 'recurring suggestions', err);
+  }
+});
+
+const dismissSchema = z.object({ contactId: z.string().min(1).max(100), contactName: z.string().max(200).optional() });
+
+// "Not this one" — never suggested again (a planned item linked to it also hides it).
+router.post('/xero/recurring/dismiss', validate(dismissSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const b = req.body as z.infer<typeof dismissSchema>;
+    await query(
+      `INSERT INTO cashflow_recurring_dismissed (xero_contact_id, contact_name, dismissed_by) VALUES ($1, $2, $3)
+       ON CONFLICT (xero_contact_id) DO NOTHING`,
+      [b.contactId, b.contactName || null, req.user!.id],
+    );
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    fail(res, 'recurring dismiss', err);
   }
 });
 

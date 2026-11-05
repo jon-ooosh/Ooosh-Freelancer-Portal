@@ -306,3 +306,46 @@ export function youlendPayoffEstimate(remainingAtEnd: number, rate: number, avgW
   if (perWeek <= 0) return null;
   return addDays(horizonEnd, Math.ceil(remainingAtEnd / perWeek) * 7);
 }
+
+// ── The card check (§13.3) ─────────────────────────────────────────────────
+
+export interface CardCheck {
+  from: string;
+  to: string;
+  checkIns: number;
+  spent: number;          // what went on the card between the check-ins
+  receipts: number;       // what receipts logged in Costs explain
+  explained: number | null;   // receipts ÷ spent, when spent is meaningful
+  assumedPayments: number;
+  interest: number;
+}
+
+/**
+ * How much was really spent on a card between its first and last check-in in
+ * the window, against the receipts logged for it. Spent = balance change +
+ * payments − interest, where payments are what the card's PLAN says were made
+ * (OP doesn't see the real ones) — so a week paid differently from the plan
+ * shows up here too, which is worth knowing either way. Needs two check-ins at
+ * least a week apart; null before then.
+ */
+export function cardSpendCheck(
+  card: Omit<CardInput, 'balance' | 'balanceAsOf' | 'typicalMonthlySpend' | 'spendFrom'>,
+  checkIns: Array<{ date: string; balance: number }>,
+  receipts: Array<{ date: string; amount: number }>,
+): CardCheck | null {
+  if (checkIns.length < 2) return null;
+  const sorted = [...checkIns].sort((a, b) => a.date.localeCompare(b.date));
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  if (daysBetween(first.date, last.date) < 7) return null;
+  const sim = simulateCard({ ...card, typicalMonthlySpend: null, balance: first.balance, balanceAsOf: first.date }, last.date);
+  const assumedPayments = round2(sim.payments.filter((p) => p.date <= last.date).reduce((s, p) => s + p.amount, 0));
+  const interest = round2(sim.interest.filter((i) => i.date <= last.date).reduce((s, i) => s + i.amount, 0));
+  const spent = round2(last.balance - first.balance + assumedPayments - interest);
+  const logged = round2(receipts.filter((r) => r.date > first.date && r.date <= last.date).reduce((s, r) => s + r.amount, 0));
+  return {
+    from: first.date, to: last.date, checkIns: sorted.length, spent, receipts: logged,
+    explained: spent > 1 ? Math.round((logged / spent) * 100) / 100 : null,
+    assumedPayments, interest,
+  };
+}

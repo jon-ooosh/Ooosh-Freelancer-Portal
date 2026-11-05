@@ -371,6 +371,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '329_telephony.sql',
         '330_cashflow_enquiry_weights.sql',
         '331_call_transcripts.sql',
+        '332_cashflow_wise_and_recurring.sql',
       ];
 
       for (const migration of migrations) {

@@ -24,6 +24,35 @@ export interface FlowItem {
   tier?: 'likely' | 'possible';
 }
 
+/** A card's real spend between check-ins against the receipts logged for it (backend cardSpendCheck). */
+export interface CardCheck {
+  from: string;
+  to: string;
+  checkIns: number;
+  spent: number;
+  receipts: number;
+  explained: number | null;
+  assumedPayments: number;
+  interest: number;
+}
+
+/** A supplier Xero has seen paid on a pattern (backend cashflow-recurring.ts). */
+export interface RecurringSuggestion {
+  key: string;
+  contactId: string | null;
+  contactName: string;
+  frequency: 'monthly' | 'quarterly';
+  amount: number;
+  steady: boolean;
+  range: { min: number; max: number };
+  day: number;
+  count: number;
+  lastDate: string;
+  nextDate: string;
+  recent: Array<{ date: string; amount: number }>;
+  countedAs: 'card' | 'van_hp' | null;
+}
+
 export interface FixAction {
   key: 'chase_overdue' | 'ask_early' | 'nudge_enquiries' | 'move_bills' | 'card_headroom' | 'bank_transfer';
   title: string;
@@ -87,7 +116,7 @@ export interface Forecast {
   opening: {
     total: number;
     mainAccount: number | null;
-    accounts: Array<{ id: string; name: string; kind: string; balance: number | null; asOf: string | null; source: 'check_in' | 'stripe_live' | 'missing' }>;
+    accounts: Array<{ id: string; name: string; kind: string; balance: number | null; asOf: string | null; source: 'check_in' | 'stripe_live' | 'wise_live' | 'missing' }>;
   };
   yours: { total: number; excessHeld: number; refundsOwed: number; vatOwed: number; vatDue: string | null; depositsOnFutureJobs: number };
   settings: CashflowSettings;
@@ -104,8 +133,10 @@ export interface Forecast {
     checkInBalance: number | null; loggedSince: number; loggedSinceCount: number;
     typicalMonthlySpend: number | null; spendSource: 'typed' | 'receipts' | 'none';
     receiptsMonthly: number; receiptsCount: number; costPaymentMethod: string | null;
+    check: CardCheck | null;
   }>;
   youlend: { rate: number; remaining: number; asOf: string | null; withheldInForecast: number; remainingAtEnd: number; paidOffOn: string | null; estimatedPayoff: string | null };
+  wise: { live: boolean; reason?: string; others: Array<{ currency: string; value: number }> };
   stripe: { live: boolean; reason?: string; available: number; feeRate: number; feeRateSource: 'stripe' | 'setting'; payoutDays: number; share: number };
   xero: { ok: boolean; reason?: string; unpaidBills: number };
   planned: Array<{ id: string; label: string; message: string }>;
@@ -124,7 +155,7 @@ export interface Forecast {
 export interface Account {
   id: string;
   name: string;
-  kind: 'bank' | 'savings' | 'cash' | 'stripe';
+  kind: 'bank' | 'savings' | 'cash' | 'stripe' | 'wise';
   isMain: boolean;
   isActive: boolean;
   balance: number | null;

@@ -558,3 +558,38 @@ forecast-vs-actual).
 
 **Also in this PR:** `scripts/record-hh-excess-refund.ts` — a one-off to record an excess refund made directly
 in HireHop as a payment application (jobs 12150, 15145; run after the claim sweep).
+
+### 13.3 Phase 3 — what shipped (5 Nov 2026), and what changed from the plan
+
+**Xero can't give the statement balance, so the Monday check-in stays** (jon, 5 Nov: typing the figures is
+"ownership" of them, not a chore). Xero does not expose unreconciled bank data through its API (Xero, again
+in May 2026); the Bank Summary report (`accounting.reports.banksummary.read`) only has the reconciled "balance
+in Xero" — the lagging figure (−£21,657 against a +£30,391 statement on 3 Nov). Not read; no re-authorisation.
+
+**Regular payments Xero has seen** (`cashflow-recurring.ts` `findRecurring()`, `xero-broker.ts`
+`getSpendTransactionsSince()`, `loadRecurringSuggestions()`): a year of SPEND bank transactions (the existing
+`accounting.banktransactions` scope — no new permission), grouped by Xero contact. Monthly = 6+ months, about
+once a month, ±5 days on the usual day for 70%, paid in the last 45 days; quarterly = 3+ payments 75–105 days
+apart, paid in the last 120. Amount within ±15% for 70% = steady; ±40% = "varies"; looser (fuel, parts) is
+never suggested. Shown at the top of Planned items; "Add…" opens the editor filled in (linked to the Xero
+contact, so a bill from them later replaces the occurrence — §5.4); "Not this one" is remembered
+(`cashflow_recurring_dismissed`). Suppliers already linked to a planned item or left out of the forecast
+aren't offered; card repayments and van HP lenders are flagged as counted elsewhere. Cached six hours
+(a few dozen Xero calls).
+
+**The card check** (`cashflow-schedule.ts` `cardSpendCheck()`): from the first to the last Monday check-in in
+the last 35 days (at least a week apart): spent = balance change + the PLAN's payments − interest; against
+the receipts logged in Costs on that card. Under 80% explained is amber. It assumes the planned payments were
+made — a week paid differently shows up here too.
+
+**Wise read live** (`config/wise.ts` `getWiseBalances()`, `readWise()`): with a read-only Wise API token
+(`WISE_API_TOKEN`, `WISE_ENV=live`, optional `WISE_PROFILE_ID`) the Wise account (now kind `wise`, migration
+332) is read from Wise's balances endpoint (GBP; other currencies shown, not counted) and drops off the
+check-in, like Stripe. Balances are allowed on a read-only token; balance STATEMENTS are not (PSD2 extra
+authentication for UK/EU), and nothing here uses them. No token or an error → typed on the check-in, with a
+warning when a token is set but failing.
+
+**Also:** Money › Excess "Clients with Balance" counted every client ever on the Client Ledger tab (521) —
+now only those holding money.
+
+**Next:** Phase 4 — the Monday email and the "last week we said X, it was Y" line.

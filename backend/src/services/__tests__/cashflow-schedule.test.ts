@@ -1,6 +1,6 @@
 import {
   addDays, addWorkingDays, dayInMonth, daysBetween, expandRule, isIsoDate, isoWeekday, mondayOf,
-  nextDates, simulateCard, youlendPayoffEstimate, youlendWithholding, CardInput,
+  nextDates, simulateCard, youlendPayoffEstimate, youlendWithholding, CardInput, cardSpendCheck,
 } from '../cashflow-schedule';
 
 describe('dates', () => {
@@ -145,5 +145,25 @@ describe('YouLend', () => {
     expect(youlendPayoffEstimate(28000, 0.28, 10000, '2027-01-31')).toBe('2027-04-11');  // 10 weeks
     expect(youlendPayoffEstimate(0, 0.28, 10000, '2027-01-31')).toBeNull();
     expect(youlendPayoffEstimate(1000, 0.28, 0, '2027-01-31')).toBeNull();
+  });
+});
+
+describe('cardSpendCheck', () => {
+  const cot = {
+    monthlyRate: 0, statementDay: 27, paymentDay: 3, plan: 'fixed' as const, minPct: 10,
+    fixedAmount: 1000, fixedEvery: 'week' as const, fixedWeekday: 1,
+  };
+
+  it('needs two check-ins a week apart', () => {
+    expect(cardSpendCheck(cot, [{ date: '2026-11-02', balance: 38899 }], [])).toBeNull();
+    expect(cardSpendCheck(cot, [{ date: '2026-11-02', balance: 38899 }, { date: '2026-11-05', balance: 39000 }], [])).toBeNull();
+  });
+
+  it('works out the spend from the balance and the plan, and how much the receipts explain', () => {
+    // 2 Nov → 30 Nov: four £1,000 Mondays (9, 16, 23, 30), no interest; balance went up £400.
+    const c = cardSpendCheck(cot, [{ date: '2026-11-02', balance: 38899 }, { date: '2026-11-16', balance: 38500 }, { date: '2026-11-30', balance: 39299 }],
+      [{ date: '2026-11-02', amount: 999 }, { date: '2026-11-10', amount: 2600 }, { date: '2026-11-25', amount: 500 }]);
+    expect(c).toMatchObject({ from: '2026-11-02', to: '2026-11-30', checkIns: 3, assumedPayments: 4000, interest: 0, spent: 4400, receipts: 3100 });
+    expect(c?.explained).toBeCloseTo(0.7, 2);
   });
 });

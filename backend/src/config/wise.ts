@@ -144,3 +144,30 @@ export async function wiseHealth(): Promise<WiseHealth> {
     };
   }
 }
+
+export interface WiseBalance {
+  currency: string;
+  value: number;
+}
+
+/**
+ * The business profile's balances (one per currency) — read-only, allowed on a
+ * read-only personal API token. NOT the balance STATEMENT endpoint, which Wise
+ * gates behind extra authentication for UK/EU profiles (PSD2). Used by the cash
+ * forecast (docs/CASHFLOW-FORECAST-SPEC.md §13.3).
+ */
+export async function getWiseBalances(): Promise<WiseBalance[]> {
+  let profileId = process.env.WISE_PROFILE_ID ? Number(process.env.WISE_PROFILE_ID) : null;
+  if (!profileId) {
+    const business = (await getWiseProfiles()).find((p) => p.type === 'business');
+    if (!business) throw new WiseApiError(404, 'This Wise token has no business profile.');
+    profileId = business.id;
+  }
+  const rows = await wiseFetch<Array<{ currency?: string; amount?: { value?: number; currency?: string } }>>(
+    'GET', `/v4/profiles/${profileId}/balances`, { query: { types: 'STANDARD' } },
+  );
+  return (rows || []).map((r) => ({
+    currency: String(r.amount?.currency || r.currency || ''),
+    value: Number(r.amount?.value) || 0,
+  }));
+}

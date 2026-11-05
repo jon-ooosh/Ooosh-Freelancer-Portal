@@ -12,6 +12,8 @@
 import { query } from '../config/database';
 import { isXeroConfigured } from '../config/xero';
 import { getStripeClient, isStripeConfigured } from '../config/stripe';
+import { getWiseBalances, isWiseConfigured, wiseEnv } from '../config/wise';
+import { RecurringSuggestion, SpendTxn, alreadyCountedAs, findRecurring } from './cashflow-recurring';
 import { xeroBroker } from './xero-broker';
 import { xeroDateToISO } from './cost-xero-payment-sync';
 import { ukDateOf } from './uk-date';
@@ -108,7 +110,7 @@ export async function loadSettings(): Promise<CashflowSettings> {
 export interface AccountRow {
   id: string;
   name: string;
-  kind: 'bank' | 'savings' | 'cash' | 'stripe';
+  kind: 'bank' | 'savings' | 'cash' | 'stripe' | 'wise';
   isMain: boolean;
   isActive: boolean;
   balance: number | null;    // the latest check-in, null when never typed
@@ -747,6 +749,130 @@ export async function loadBillFlags(): Promise<BillFlags> {
     byBill: new Map(f.rows.map((r: { xero_invoice_id: string; flag: 'paid_xero_behind' | 'paid_by_card' | 'ignore' }) => [r.xero_invoice_id, r.flag])),
     excludedContacts: new Map(c.rows.map((r: { xero_contact_id: string; contact_name: string | null }) => [r.xero_contact_id, r.contact_name || ''])),
   };
+}
+
+// ── Card balance history (the card check, §13.3) ───────────────────────────
+
+/** Every card check-in since `from`, oldest first, one per day (the last typed that day). */
+export async function loadCardSnapshots(from: string): Promise<Map<string, Array<{ date: string; balance: number }>>> {
+  const r = await query(
+    `SELECT DISTINCT ON (card_id, as_of) card_id, to_char(as_of, 'YYYY-MM-DD') AS d, balance
+     FROM cashflow_balance_snapshots
+     WHERE card_id IS NOT NULL AND as_of >= $1::date
+     ORDER BY card_id, as_of, created_at DESC`,
+    [from],
+  );
+  const out = new Map<string, Array<{ date: string; balance: number }>>();
+  for (const row of r.rows as Array<{ card_id: string; d: string; balance: string }>) {
+    out.set(row.card_id, [...(out.get(row.card_id) || []), { date: row.d, balance: num(row.balance) }]);
+  }
+  return out;
+}
+
+// ── Wise (read live when a token is set, §13.3) ────────────────────────────
+
+export interface WiseSnapshot { ok: boolean; reason?: string; gbp: number; others: Array<{ currency: string; value: number }> }
+
+let wiseCache: { at: number; snap: WiseSnapshot } | null = null;
+
+/** The Wise GBP balance, read live. Without a token (or on any error) the Monday check-in figure is used. */
+export async function readWise(fresh = false): Promise<WiseSnapshot> {
+  if (!fresh && wiseCache && Date.now() - wiseCache.at < 5 * 60 * 1000) return wiseCache.snap;
+  let snap: WiseSnapshot;
+  if (!isWiseConfigured()) {
+    snap = { ok: false, reason: 'No Wise API token on this server.', gbp: 0, others: [] };
+  } else if (wiseEnv() !== 'live') {
+    snap = { ok: false, reason: 'The Wise token is a sandbox (test) one — set WISE_ENV=live with a live token.', gbp: 0, others: [] };
+  } else {
+    try {
+      const balances = await getWiseBalances();
+      snap = {
+        ok: true,
+        gbp: Math.round(balances.filter((b) => b.currency === 'GBP').reduce((s, b) => s + b.value, 0) * 100) / 100,
+        others: balances.filter((b) => b.currency !== 'GBP' && Math.abs(b.value) >= 0.01),
+      };
+    } catch (err) {
+      console.error('[cashflow] Wise read failed:', err);
+      snap = { ok: false, reason: `Wise couldn't be read (${err instanceof Error ? err.message : 'unknown error'}).`, gbp: 0, others: [] };
+    }
+  }
+  wiseCache = { at: Date.now(), snap };
+  return snap;
+}
+
+// ── Regular payments in Xero's bank history (§5.4, §13.3) ──────────────────
+
+export interface RecurringResult {
+  ok: boolean;
+  reason?: string;
+  suggestions: Array<RecurringSuggestion & { countedAs: 'card' | 'van_hp' | null }>;
+  readAt: string | null;
+}
+
+let recurringCache: { at: number; result: RecurringResult } | null = null;
+const RECURRING_CACHE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Suppliers Xero has seen paid on a pattern over the last 12 months, less the
+ * ones already a planned item (linked to the same Xero contact), the ones jon
+ * said "not this one" to, and suppliers left out of the forecast. Card
+ * repayments and van HP lenders are flagged — they're counted elsewhere.
+ * Reading a year of bank history is a few dozen Xero calls, so it's cached for
+ * six hours.
+ */
+export async function loadRecurringSuggestions(today: string, fresh = false): Promise<RecurringResult> {
+  let base: RecurringResult;
+  if (!fresh && recurringCache && Date.now() - recurringCache.at < RECURRING_CACHE_MS) {
+    base = recurringCache.result;
+  } else if (!isXeroConfigured()) {
+    base = { ok: false, reason: 'Xero is not connected on this server.', suggestions: [], readAt: null };
+  } else {
+    try {
+      const rows = await xeroBroker.getSpendTransactionsSince(addDaysIso(today, -366));
+      const txns: SpendTxn[] = rows
+        .filter((b) => String(b.CurrencyCode || 'GBP') === 'GBP')
+        .map((b) => {
+          const contact = (b.Contact || {}) as Record<string, unknown>;
+          return {
+            contactId: contact.ContactID ? String(contact.ContactID) : null,
+            contactName: String(contact.Name || 'Unknown'),
+            date: xeroDateToISO((b.DateString as string) || (b.Date as string)) || '',
+            amount: num(b.Total),
+          };
+        })
+        .filter((t) => t.date);
+      const vans = await loadVanFinance();
+      const lenders = [...new Set(vans.map((v) => v.lender))];
+      base = {
+        ok: true,
+        suggestions: findRecurring(txns, today).map((sug) => ({ ...sug, countedAs: alreadyCountedAs(sug.contactName, lenders) })),
+        readAt: new Date().toISOString(),
+      };
+    } catch (err) {
+      console.error('[cashflow] Xero bank history read failed:', err);
+      base = { ok: false, reason: `Xero couldn't be read (${err instanceof Error ? err.message : 'unknown error'}).`, suggestions: [], readAt: null };
+    }
+    recurringCache = { at: Date.now(), result: base };
+  }
+  if (!base.ok) return base;
+
+  // Filtered on every read (not cached), so adding or dismissing one shows at once.
+  const [planned, dismissed, excluded] = await Promise.all([
+    query(`SELECT DISTINCT xero_contact_id FROM cashflow_planned_items WHERE is_active = TRUE AND xero_contact_id IS NOT NULL`),
+    query(`SELECT xero_contact_id FROM cashflow_recurring_dismissed`),
+    query(`SELECT xero_contact_id FROM cashflow_excluded_contacts`),
+  ]);
+  const skip = new Set<string>([
+    ...planned.rows.map((r: { xero_contact_id: string }) => r.xero_contact_id),
+    ...dismissed.rows.map((r: { xero_contact_id: string }) => r.xero_contact_id),
+    ...excluded.rows.map((r: { xero_contact_id: string }) => r.xero_contact_id),
+  ]);
+  return { ...base, suggestions: base.suggestions.filter((sug) => !skip.has(sug.key)) };
+}
+
+function addDaysIso(iso: string, n: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 }
 
 // ── Stripe ─────────────────────────────────────────────────────────────────
