@@ -180,22 +180,17 @@ export async function sendIdentityReviewAlert(
     if (res.rows.length === 0) throw new Error(`Driver ${driverId} not found`);
     const d = res.rows[0];
 
-    const detail: string[] = [];
-    if (d.idenfy_overall) detail.push(`iDenfy result: <strong>${d.idenfy_overall}</strong>`);
-    if (d.idenfy_face_result) detail.push(`Face check: <strong>${d.idenfy_face_result}</strong>`);
-    if (d.idenfy_doc_result) detail.push(`Document check: ${d.idenfy_doc_result}`);
-    for (const tag of asStringList(d.idenfy_mismatch_tags)) detail.push(`Mismatch: ${tag}`);
-    for (const reason of asStringList(d.idenfy_suspicion_reasons)) detail.push(`Flag: ${reason}`);
-
     const targets = await getVehicleNotificationTargets();
     await emailService.send('identity_review_required', {
       to: targets.to,
       cc: targets.cc,
       variables: {
-        driverName: d.full_name || 'Unknown driver',
+        // No name when iDenfy couldn't read the document (Steve Claes, 16831).
+        driverName: d.full_name || 'Name not read from the document',
         driverEmail: d.email || 'N/A',
         jobNumber: d.current_job_number ? String(d.current_job_number) : '',
-        checkDetail: detail.map(line => `• ${line}`).join('<br/>'),
+        headline: identityAlertHeadline(d.idenfy_face_result, d.idenfy_doc_result),
+        checkDetail: identityAlertDetail(d),
         driverUrl: `${getFrontendUrl()}/drivers/${driverId}`,
       },
     });
@@ -212,6 +207,45 @@ export async function sendIdentityReviewAlert(
     console.error('[identity-review] Failed to send identity review alert:', err);
     return { sent: false, reason: 'send_failed' };
   }
+}
+
+/**
+ * The alert's opening line, from what actually failed. It used to say "could
+ * not match this driver's selfie" every time — wrong for most reviews since the
+ * Sep 2026 widening, which catch a rejected DOCUMENT with a perfect face match.
+ */
+export function identityAlertHeadline(
+  faceResult: string | null | undefined,
+  docResult: string | null | undefined,
+): string {
+  if (faceNeedsReview(faceResult)) {
+    return 'iDenfy could not match this driver’s selfie to the photo on their licence.';
+  }
+  if ((docResult || '').toUpperCase().trim() === 'DOC_NOT_SUPPORTED') {
+    return 'iDenfy did not recognise the document this driver used — usually an old paper licence it cannot read.';
+  }
+  return 'iDenfy did not accept this driver’s photo ID check.';
+}
+
+/**
+ * What iDenfy reported, one PLAIN-TEXT line each. The email escapes every
+ * variable, so HTML in here printed as literal `<strong>` / `<br/>` (Nov 2026);
+ * the template shows the lines with `white-space: pre-line` instead.
+ */
+export function identityAlertDetail(d: {
+  idenfy_overall?: string | null;
+  idenfy_face_result?: string | null;
+  idenfy_doc_result?: string | null;
+  idenfy_mismatch_tags?: unknown;
+  idenfy_suspicion_reasons?: unknown;
+}): string {
+  const detail: string[] = [];
+  if (d.idenfy_overall) detail.push(`iDenfy result: ${d.idenfy_overall}`);
+  if (d.idenfy_face_result) detail.push(`Face check: ${d.idenfy_face_result}`);
+  if (d.idenfy_doc_result) detail.push(`Document check: ${d.idenfy_doc_result}`);
+  for (const tag of asStringList(d.idenfy_mismatch_tags)) detail.push(`Mismatch: ${tag}`);
+  for (const reason of asStringList(d.idenfy_suspicion_reasons)) detail.push(`Flag: ${reason}`);
+  return detail.map(line => `• ${line}`).join('\n');
 }
 
 /** JSONB columns arrive as arrays, strings, or null depending on the writer. */

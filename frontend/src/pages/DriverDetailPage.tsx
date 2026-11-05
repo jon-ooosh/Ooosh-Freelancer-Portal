@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { EvidenceGroup, type EvidenceGroupSpec, type EvidenceFile } from '../components/drivers/EvidenceGroup';
+import { DocumentThumb } from '../components/drivers/DocumentThumb';
 import { StageTracker, WhatNeedsDoing, type DriverVerificationState, type VerificationAction } from '../components/drivers/VerificationCockpit';
 import { deriveDriverStatus, isNiLicence } from '../lib/driverStatus';
 import { hasManagerRole, roleAllowed } from '../lib/roles';
@@ -244,7 +245,30 @@ const IDENFY_VERDICT_PLAIN: Record<string, string> = {
   DOC_NAME_ERROR: 'The name on the document didn\u2019t match what the driver entered.',
   DOC_NUMBER_ERROR: 'The document number could not be read or did not validate.',
   DOC_ANALYSIS_ERROR: 'iDenfy could not analyse the document images.',
+  DOC_NOT_SUPPORTED: 'iDenfy doesn\u2019t recognise this kind of document \u2014 usually an old paper licence it can\u2019t read. Check the images yourself: the photo, the name, and that it looks genuine.',
+  VIRTUAL_CAMERA: 'iDenfy detected a virtual camera \u2014 software feeding the camera instead of a real one. Sometimes harmless, but it is also how faked selfies are made: consider asking the driver to redo the check on their own phone.',
 };
+
+/**
+ * Images from a check iDenfy did NOT accept. The hire-form app uploads them
+ * under their own tags (Nov 2026, Steve Claes / 16831 — the unknown-document
+ * path used to upload nothing), so they are never mistaken for an accepted
+ * licence or passport "on file": they are deliberately absent from the
+ * evidence slots and from services/driver-documents.ts, and shown only here.
+ */
+const REVIEW_IMAGE_TAGS: Array<{ tag: string; label: string }> = [
+  { tag: 'idenfy_review_front', label: 'Document front' },
+  { tag: 'idenfy_review_back', label: 'Document back' },
+  { tag: 'selfie', label: 'Selfie' },
+];
+const REVIEW_ONLY_TAGS = new Set(['idenfy_review_front', 'idenfy_review_back']);
+
+function newestTagged(files: FileAttachment[], tag: string): FileAttachment | null {
+  const matching = files.filter(f => ((f as { tag?: string }).tag || '') === tag);
+  if (matching.length === 0) return null;
+  return matching.reduce((a, b) =>
+    new Date(a.uploaded_at || 0) > new Date(b.uploaded_at || 0) ? a : b);
+}
 
 function plainVerdict(code: string | null | undefined): string | null {
   if (!code) return null;
@@ -282,6 +306,12 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
   const uniquePlainReasons = Array.from(new Set(plainReasons));
   const faceMatched = (driver.idenfy_face_result || '').toUpperCase() === 'FACE_MATCH';
 
+  // The rejected check's own images, when the hire-form app sent them.
+  const reviewImages = REVIEW_IMAGE_TAGS
+    .map(({ tag, label }) => ({ label, file: newestTagged(driver.files || [], tag) }))
+    .filter((x): x is { label: string; file: FileAttachment } => !!x.file);
+  const hasReviewDocument = reviewImages.some(x => x.label !== 'Selfie');
+
   async function resolve(outcome: 'accepted' | 'rejected') {
     setBusy(outcome);
     setError('');
@@ -315,9 +345,11 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
           <p className="text-sm text-gray-700">
             iDenfy did not accept this check
             {driver.idenfy_overall ? <> (<strong>{driver.idenfy_overall}</strong>)</> : null}.
-            Look at the <strong>Licence Front</strong>, <strong>Licence Back</strong> and{' '}
-            <strong>Selfie</strong> images on this page and decide. Until you do, this driver
-            can&rsquo;t be assigned to a hire and won&rsquo;t be sent a hire agreement.
+            {hasReviewDocument
+              ? <> Look at the images from this check below and decide.</>
+              : <> Look at the <strong>Licence Front</strong>, <strong>Licence Back</strong> and{' '}
+                  <strong>Selfie</strong> images on this page and decide.</>}
+            {' '}Until you do, this driver can&rsquo;t be assigned to a hire and won&rsquo;t be sent a hire agreement.
           </p>
           {uniquePlainReasons.length > 0 && (
             <ul className="mt-2 text-sm text-gray-700 space-y-1">
@@ -330,16 +362,36 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
               iDenfy objected to, it wasn&rsquo;t the driver&rsquo;s appearance.
             </p>
           )}
-          <button
-            type="button"
-            onClick={() => {
-              const el = document.getElementById('evidence-identity');
-              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }}
-            className="mt-3 text-sm font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline"
-          >
-            Show the licence &amp; selfie images &darr;
-          </button>
+          {!hasReviewDocument && (
+            <button
+              type="button"
+              onClick={() => {
+                const el = document.getElementById('evidence-identity');
+                if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }}
+              className="mt-3 text-sm font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline"
+            >
+              Show the licence &amp; selfie images &darr;
+            </button>
+          )}
+        </div>
+      )}
+
+      {hasReviewDocument && (
+        <div className="mb-3">
+          <p className="text-xs font-medium text-gray-600 mb-1.5">Images from this check</p>
+          <div className="flex flex-wrap gap-3">
+            {reviewImages.map(({ label, file }) => (
+              <div key={label} className="flex flex-col items-center gap-1">
+                <DocumentThumb
+                  fileKey={file.url}
+                  filename={file.name}
+                  onOpen={() => { openR2Key(file.url, file.name || undefined).catch(() => { /* ignore */ }); }}
+                />
+                <span className="text-[11px] text-gray-500">{label}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -2213,6 +2265,8 @@ function DetailsTab({
         const tokenOf = (v?: string) => (v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
         const uncategorised = (driver.files || []).filter(f =>
           !known.has(tokenOf(f.label)) && !known.has(tokenOf((f as { tag?: string }).tag))
+          // A rejected check's images are shown on the ID review panel instead.
+          && !(driver.identity_check_status && REVIEW_ONLY_TAGS.has((f as { tag?: string }).tag || ''))
         );
         // Render nothing at all when there's nothing to show — an empty card is
         // just a mystery box on the page.

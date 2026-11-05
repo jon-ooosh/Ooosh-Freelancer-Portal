@@ -1134,14 +1134,14 @@ const templates: Record<string, EmailTemplate> = {
 
   identity_review_required: {
     variant: 'internal',
-    preheader: 'A driver\u2019s selfie did not match their licence photo',
+    preheader: 'iDenfy did not accept a driver\u2019s photo ID check',
     subject: 'Photo ID check needs review \u2014 {{driverName}}{{#if jobNumber}} (job #{{jobNumber}}){{/if}}',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Photo ID Check Needs Review</h2>
       <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
-        iDenfy could not match this driver&rsquo;s selfie to the photo on their licence{{#if jobNumber}}, on job <strong>#{{jobNumber}}</strong>{{/if}}.
-        This is often innocent &mdash; an older licence photo, or a change in appearance &mdash; so it needs a
-        person to compare the two images rather than an automatic rejection.
+        {{headline}}{{#if jobNumber}} Job <strong>#{{jobNumber}}</strong>.{{/if}}
+        This is often innocent &mdash; an older licence photo, glare on the card, or a document iDenfy
+        can&rsquo;t read &mdash; so it needs a person to look at the images rather than an automatic rejection.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
@@ -1150,13 +1150,13 @@ const templates: Record<string, EmailTemplate> = {
             <p style="margin:0 0 4px;font-size:15px;color:#1e293b;font-weight:600;">{{driverName}}</p>
             <p style="margin:0 0 12px;font-size:13px;color:#64748b;">{{driverEmail}}</p>
             <p style="margin:0 0 4px;font-size:13px;color:#9a3412;font-weight:600;">What iDenfy reported</p>
-            <p style="margin:0;font-size:14px;color:#1e293b;">{{checkDetail}}</p>
+            <p style="margin:0;font-size:14px;color:#1e293b;white-space:pre-line;">{{checkDetail}}</p>
           </td>
         </tr>
       </table>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
-        The driver&rsquo;s selfie and licence images are both on their record. Until someone accepts or
-        rejects the match, this driver cannot be assigned to a hire and will not be sent a hire agreement.
+        The images from this check are on the driver&rsquo;s record. Until someone accepts or
+        rejects it, this driver cannot be assigned to a hire and will not be sent a hire agreement.
       </p>
       <p style="margin:0;font-size:14px;color:#334155;">
         <a href="{{driverUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Review the photos in Ooosh &rarr;</a>
