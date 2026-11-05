@@ -2,8 +2,8 @@
 
 > **Status (Oct 2026): LIVE under Jobs → Leads.** §1–13 are the original design; §14–19 are
 > what was built on top of it, in order. **§20 is the current state and what's left — read
-> that first.** §21 is the band watch: watching a known band for its next tour (steps 1–2
-> built Nov 2026 — §21.7 is what shipped).
+> that first.** §21 is the band watch: watching a known band for its next tour (steps 1–3
+> built Nov 2026 — §21.7 and §21.8 are what shipped).
 
 ## 1. Motivation
 
@@ -504,18 +504,19 @@ jon asked whether the Leads date bug existed elsewhere. Findings:
   FROM a lead (`converted_job_id`), never linked tour jobs.
 
 **Open / next candidates:**
-- **Band watch** (§21) — watch a known band and get a warm lead when it next tours. Steps 1–2
-  built (§21.7); next is step 3, the back catalogue, then step 4, the Claude web check.
+- **Band watch** (§21) — watch a known band and get a warm lead when it next tours. Steps 1–3
+  built (§21.7–21.8); next is step 4, the Claude web check.
 - **Outreach email drafting** (§6 Phase 7) — folds into the auto-chase "voice" work on the
   Enquiries pipeline (AUTO-CHASE-SPEC) rather than being built separately.
 - **MusicBrainz value check** — jon expects little from it. Look at how often `external_links`
   carries MusicBrainz-only links; drop it if it adds nothing.
 - **SQL `CURRENT_DATE` in UK terms** — only if a midnight–1am BST edge ever bites (§19.1).
 
-## 21. Band watch — "tell me when they're next over" (steps 1–2 BUILT, Nov 2026)
+## 21. Band watch — "tell me when they're next over" (steps 1–3 BUILT, Nov 2026)
 
 Agreed with jon, 26–29 Oct 2026. Build steps 1–2 (the watch list and the Ticketmaster check)
-shipped in Nov 2026 — §21.7 is what was built and where it differs from this design.
+shipped in Nov 2026 — §21.7. Step 3 (the back catalogue) and a matching fix from the first
+week live followed — §21.8, which also changes §21.2 items 2 and 5.
 
 ### 21.1 Why
 
@@ -697,4 +698,47 @@ Migration 324 (`band_watches`; `leads.watch_id`, `tour_dates`, `uk_position`; se
 - **Org merge** moves a watch to the kept org (unless it already has one).
 - Off switch: `UPDATE system_settings SET value = 'false' WHERE key = 'band_watch_enabled';`
   (the tick still records watches; Check now still works).
+
+### 21.8 Better matching and the back catalogue (step 3, Nov 2026)
+
+**What the first week showed** (jon's query, 5 Nov 2026 — 15 watches): only 6 matched their
+Ticketmaster act on their own. Every one that didn't had found NOTHING on Ticketmaster — not
+several acts:
+- three were bands filed under their company name ("Skindred LLP", "Brother Strut Limited",
+  "TENDER / Bad Balloon Ltd"), which a person then matched by hand;
+- four were not bands (F&H Audio, Soundfangled Ltd, Subfrantic Production Services Ltd — all typed
+  "client" — and a person), watched because the tick was on by default;
+- one (Exhume) is probably a band Ticketmaster doesn't sell.
+
+**Decided with jon (changes §21.2 items 2 and 5):**
+1. **Names are cleaned before searching** (`watch-tours.ts` `actSearchNames()`, tested): company
+   endings dropped (Ltd, Limited, LLP, Plc, Inc, LLC, GmbH, Pty) and each side of " / " tried
+   (spaces required — "AC/DC" stays whole); up to three names. On the 15 above, 10 would have
+   matched on their own. `findActForName()` searches each and pools the results.
+2. **"Ticketmaster has never heard of this name" no longer asks a person.** New state `unknown`
+   (migration 334): not on "Match these", looked up again every 30 days in case the act appears
+   (`tm_looked_up_at`). `not_found` stays what a PERSON says, never looked up again. Only "several
+   possible acts" (several with the exact name, or only similar names) goes to "Match these".
+3. **The close-out tick is on by default only when Ticketmaster knows the name** — one look-up when
+   the modal opens, capped at 4 seconds (no answer → ticked, as before). Unticked, with the reason,
+   for a stopped watch, a company-type client, a name Ticketmaster has never heard of, or only
+   similar names. The backend decides (`watchTargetForJob()` → `default_on` + `why`); the modal
+   just words it.
+4. **The back catalogue** (`services/leads/back-catalogue.ts`, Leads › Watched bands › "＋ Past
+   bands"): per lost / cancelled / completed job of the last 3 years, its Band org else its client —
+   never internal jobs, alternative-quote losses, company types, deleted orgs, or orgs with any
+   watch (watching or stopped). A manager's "Look them up" runs in the background (shares the band
+   watch's Ticketmaster lock, never beside a lead search, up to 1,400 bands a run, answers kept 30
+   days in `band_watch_candidates`). "Ticketmaster knows them" (exactly one act) is listed to tick in
+   bulk, newest job or most booked first; the rest sit behind "Show the others". A bulk watch takes
+   its look-up with it (no second search) and starts from the band's latest closed job.
+5. The waiting "Match these" watches were set back to `pending` by migration 334 and looked up
+   again with the new rule at the next run.
+
+**Also:**
+- **Bells are bundled**: more than 3 new tours for one person in one run → one bell naming the
+  bands, linking to Leads filtered to **"Watched bands only"** (new option on the warm/cold filter,
+  `?type=watched`). The back catalogue's first check can find a lot at once.
+- The Watched bands list says how many aren't on Ticketmaster ("usually not bands") with "show
+  only those", and those rows have "Find on Ticketmaster" and "Not a band — stop".
 

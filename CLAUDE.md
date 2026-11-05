@@ -338,9 +338,10 @@ one unmatched review surface, a gated `calls/` R2 prefix, recordings from Twilio
 tour search, AI scoring that weighs OOOSH history, address-book matching, contact research,
 outreach → chased Cold enquiry, jobs-for-this-tour linking. **§20 is the current state and what's
 left.** Searches are run by hand on purpose (no scheduler). Contact research wants management /
-the band / tour managers — not promoters or agents. **§21 is the band watch** (steps 1–2 built Nov
-2026) — "tell me when this band is next over", ticked by default on the close-out modals; the one
-Leads part that runs on a timer. §21.7 is what shipped.
+the band / tour managers — not promoters or agents. **§21 is the band watch** (steps 1–3 built Nov
+2026) — "tell me when this band is next over", ticked on the close-out modals when Ticketmaster
+knows the name, plus a back catalogue of past bands to watch in bulk; the one Leads part that runs
+on a timer. §21.7–21.8 are what shipped.
 
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access|absence`. The person is
@@ -436,7 +437,7 @@ existing definition:
 | Did this job book, get lost, get cancelled? (history views) | `services/job-outcomes.ts` `JOB_OUTCOME_SQL` — org Hire History tab + Leads client history |
 | What does OP know about a lead's band (enquiries, losses, retros)? | `services/leads/history.ts` `getClientHistory()` |
 | Which leads go on the dashboard? | `services/leads/attention.ts` `getLeadAttention()` |
-| Is this band watched for its next tour? Start / stop a watch, its Ticketmaster act, the weekly check | `services/leads/band-watch.ts` — one watch per org; `startWatchFromCloseOut()` from the close-outs (never fails them, never on an alternative-quote loss); a tour becomes a warm lead with `watch_id` (TOUR-FINDER-SPEC §21) |
+| Is this band watched for its next tour? Start / stop a watch, its Ticketmaster act, the weekly check | `services/leads/band-watch.ts` — one watch per org; `startWatchFromCloseOut()` from the close-outs (never fails them, never on an alternative-quote loss); a tour becomes a warm lead with `watch_id`; names looked up by `watch-tours.ts` `actSearchNames()` (company endings dropped); the back catalogue is `back-catalogue.ts` (TOUR-FINDER-SPEC §21) |
 | Recording what happened to a lead (who, when) | `services/leads/events.ts` `logLeadEvent()` — never fails the action; read by the Leads timeline + Last activity |
 | Which existing jobs belong to a lead's tour? Is it already quoted / booked? | `services/leads/tour-jobs.ts` — `syncTourJobs()`, `liveTourJobSql()` (drives the In pipeline stage + the dashboard card), `TOUR_JOB_OUTCOME_SQL` |
 | A DATE column as `YYYY-MM-DD` in Leads code | `services/leads/dates.ts` `dateOnly()` — never `toISOString()` on a DATE (node-postgres gives local midnight; UK summer time shifts it a day) |

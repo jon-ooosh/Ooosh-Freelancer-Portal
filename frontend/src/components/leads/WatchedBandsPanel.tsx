@@ -11,8 +11,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import { fmtDate, fmtDateYear, UK_POSITION_LABEL, UkPosition } from './leadTypes';
+import BackCatalogueModal from './BackCatalogueModal';
 
-type TmMatch = 'pending' | 'auto' | 'confirmed' | 'needs_match' | 'not_found';
+type TmMatch = 'pending' | 'auto' | 'confirmed' | 'needs_match' | 'unknown' | 'not_found';
 
 interface TmCandidate {
   id: string;
@@ -66,7 +67,7 @@ interface WatchRow {
 
 interface ListResponse {
   data: WatchRow[];
-  counts: { active: number; needs_match: number; stopped: number };
+  counts: { active: number; needs_match: number; not_on_ticketmaster: number; stopped: number };
   checking: boolean;
   ticketmaster: boolean;
 }
@@ -75,7 +76,8 @@ const JOB_STATUS_WORD: Record<string, string> = { lost: 'lost', cancelled: 'canc
 
 /** What the last check found, in a few words. */
 function lastCheckText(r: WatchRow): string {
-  if (r.tm_match === 'not_found') return 'Not on Ticketmaster — not checked';
+  if (r.tm_match === 'not_found') return 'Not on Ticketmaster (you said) — not checked';
+  if (r.tm_match === 'unknown') return 'Ticketmaster has never heard of this name — looked up again monthly';
   if (r.tm_match === 'pending') return 'Looking up their Ticketmaster act…';
   if (r.tm_match === 'needs_match') return 'Waiting for you to match them';
   const res = r.last_tm_result;
@@ -160,6 +162,8 @@ export default function WatchedBandsPanel({ canManage }: { canManage: boolean })
   const [notice, setNotice] = useState<string | null>(null);
   const [fixing, setFixing] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [onlyOffTm, setOnlyOffTm] = useState(false);
+  const [showPast, setShowPast] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -212,7 +216,8 @@ export default function WatchedBandsPanel({ canManage }: { canManage: boolean })
   };
 
   const toMatch = (rows ?? []).filter((r) => r.tm_match === 'needs_match');
-  const others = (rows ?? []).filter((r) => view === 'stopped' || r.tm_match !== 'needs_match');
+  const offTm = (r: WatchRow) => r.tm_match === 'unknown' || r.tm_match === 'not_found';
+  const others = (rows ?? []).filter((r) => view === 'stopped' || (r.tm_match !== 'needs_match' && (!onlyOffTm || offTm(r))));
 
   return (
     <div>
@@ -230,6 +235,13 @@ export default function WatchedBandsPanel({ canManage }: { canManage: boolean })
               Stopped {meta ? meta.counts.stopped : ''}
             </button>
           </div>
+          {view === 'active' && (
+            <button onClick={() => setShowPast(true)}
+              className="px-3 py-1.5 rounded-lg border border-[#7B5EA7] text-xs text-[#7B5EA7] hover:bg-purple-50"
+              title="Bands from past lost, cancelled and completed jobs — watch them in bulk">
+              ＋ Past bands
+            </button>
+          )}
           {canManage && view === 'active' && (
             <button onClick={checkNow} disabled={!meta?.ticketmaster || meta?.checking}
               className="px-3 py-1.5 rounded-lg border border-gray-300 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
@@ -245,6 +257,14 @@ export default function WatchedBandsPanel({ canManage }: { canManage: boolean })
       )}
       {error && <div className="rounded-lg bg-red-50 text-red-800 px-4 py-2 mb-3 text-sm">{error}</div>}
       {notice && <div className="rounded-lg bg-green-50 text-green-800 px-4 py-2 mb-3 text-sm">{notice}</div>}
+      {view === 'active' && (meta?.counts.not_on_ticketmaster ?? 0) > 0 && (
+        <div className="text-xs text-gray-500 mb-2">
+          {meta!.counts.not_on_ticketmaster} not on Ticketmaster — usually not bands ·{' '}
+          <button onClick={() => setOnlyOffTm((v) => !v)} className="text-[#7B5EA7] hover:underline">
+            {onlyOffTm ? 'show everyone' : 'show only those'}
+          </button>
+        </div>
+      )}
 
       {rows === null ? (
         <div className="text-center text-gray-400 py-12">Loading…</div>
@@ -259,7 +279,7 @@ export default function WatchedBandsPanel({ canManage }: { canManage: boolean })
           {view === 'active' && toMatch.length > 0 && (
             <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50/60 p-3">
               <div className="text-sm font-medium text-amber-800 mb-1">Match these ({toMatch.length})</div>
-              <p className="text-xs text-amber-800/80 mb-2">Ticketmaster has none, or more than one, act by exactly this name. Pick the right one so we can watch them.</p>
+              <p className="text-xs text-amber-800/80 mb-2">Ticketmaster has several possible acts for these names. Pick the right one so we can watch them.</p>
               <div className="space-y-3">
                 {toMatch.map((r) => (
                   <div key={r.id}>
@@ -324,7 +344,7 @@ export default function WatchedBandsPanel({ canManage }: { canManage: boolean })
                         ) : <span className="text-gray-400">—</span>}
                         {(() => {
                           const t = r.last_tm_result?.tours?.find((x) => x.lead_id === r.next_lead_id);
-                          return t ? <div className="text-gray-400">{t.dates} dates · {t.countries} · {UK_POSITION_LABEL[t.uk_position]}</div> : null;
+                          return t ? <div className="text-gray-400">{t.dates} date{t.dates === 1 ? '' : 's'} · {t.countries} · {UK_POSITION_LABEL[t.uk_position]}</div> : null;
                         })()}
                       </td>
                       <td className="px-3 py-2 text-xs text-gray-600">{lastCheckText(r)}</td>
@@ -333,16 +353,18 @@ export default function WatchedBandsPanel({ canManage }: { canManage: boolean })
                           <button disabled={busyId === r.id} onClick={() => watchAgain(r)} className="text-[#7B5EA7] hover:underline disabled:opacity-50">Watch again</button>
                         ) : (
                           <div className="flex flex-col items-end gap-1">
-                            {(r.tm_match === 'auto' || r.tm_match === 'confirmed' || r.tm_match === 'not_found') && fixing !== r.id && (
+                            {(r.tm_match === 'auto' || r.tm_match === 'confirmed' || offTm(r)) && fixing !== r.id && (
                               <button onClick={() => setFixing(r.id)} className="text-gray-500 hover:text-[#7B5EA7]"
                                 title="Pick a different Ticketmaster act">
-                                {r.tm_match === 'not_found' ? 'Find on Ticketmaster' : 'Wrong band?'}
+                                {offTm(r) ? 'Find on Ticketmaster' : 'Wrong band?'}
                               </button>
                             )}
                             {r.tm_match === 'pending' && (
                               <button disabled={busyId === r.id} onClick={() => lookAgain(r)} className="text-gray-500 hover:text-[#7B5EA7] disabled:opacity-50">Look up now</button>
                             )}
-                            <button disabled={busyId === r.id} onClick={() => stop(r)} className="text-gray-400 hover:text-red-600 disabled:opacity-50">Stop</button>
+                            <button disabled={busyId === r.id} onClick={() => stop(r)} className="text-gray-400 hover:text-red-600 disabled:opacity-50">
+                              {offTm(r) ? 'Not a band — stop' : 'Stop'}
+                            </button>
                           </div>
                         )}
                       </td>
@@ -353,6 +375,9 @@ export default function WatchedBandsPanel({ canManage }: { canManage: boolean })
             </div>
           )}
         </>
+      )}
+      {showPast && (
+        <BackCatalogueModal canManage={canManage} onClose={(changed) => { setShowPast(false); if (changed) void load(); }} />
       )}
     </div>
   );
