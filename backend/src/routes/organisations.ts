@@ -5,7 +5,7 @@ import { recentlyViewedOrderSql, recordAddressBookView } from '../services/addre
 import { phoneDigitsForSearch } from '../services/address-book-search';
 import { DISPLAY_NAME_SQL } from '../services/display-name';
 import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
-import { validate } from '../middleware/validate';
+import { validate, partialForUpdate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { JOB_OUTCOME_SQL, JOB_LOST_OR_CANCELLED_SQL } from '../services/job-outcomes';
 import { ukToday } from '../services/uk-date';
@@ -53,7 +53,7 @@ const createOrgSchema = z.object({
   ai_research: z.string().optional().nullable(),
 });
 
-const updateOrgSchema = createOrgSchema.partial();
+const updateOrgSchema = partialForUpdate(createOrgSchema);
 
 // GET /api/organisations
 router.get('/', async (req: AuthRequest, res: Response) => {

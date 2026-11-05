@@ -17,7 +17,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
-import { validate } from '../middleware/validate';
+import { validate, partialForUpdate } from '../middleware/validate';
 import { getClient, query } from '../config/database';
 import { buildForecast } from '../services/cashflow-forecast';
 import {
@@ -196,7 +196,7 @@ router.post('/accounts', validate(accountSchema), async (req: AuthRequest, res: 
   }
 });
 
-router.patch('/accounts/:id', validate(idParam, 'params'), validate(accountSchema.partial()), async (req: AuthRequest, res: Response) => {
+router.patch('/accounts/:id', validate(idParam, 'params'), validate(partialForUpdate(accountSchema)), async (req: AuthRequest, res: Response) => {
   try {
     const b = req.body as Partial<z.infer<typeof accountSchema>>;
     const r = await query(

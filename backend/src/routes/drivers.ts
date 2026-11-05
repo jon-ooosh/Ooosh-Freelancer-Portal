@@ -9,7 +9,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
-import { validate } from '../middleware/validate';
+import { validate, partialForUpdate } from '../middleware/validate';
 import { generateDriverSnapshot, loadDriverDocuments, type DriverSnapshotData } from '../services/driver-snapshot-pdf';
 import { uploadToR2 } from '../config/r2';
 import { fetchLogo } from '../services/hire-form-pdf';
@@ -113,7 +113,7 @@ const createDriverSchema = z.object({
   source: z.string().max(30).optional().default('hire_form'),
 });
 
-const updateDriverSchema = createDriverSchema.partial();
+const updateDriverSchema = partialForUpdate(createDriverSchema);
 
 // ── GET /api/drivers — List drivers ──
 

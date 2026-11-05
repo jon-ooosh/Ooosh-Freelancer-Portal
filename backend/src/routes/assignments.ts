@@ -12,7 +12,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
-import { validate } from '../middleware/validate';
+import { validate, partialForUpdate } from '../middleware/validate';
 import {
   findOverlappingAssignments,
   buildConflictPayload,
@@ -55,7 +55,7 @@ const createAssignmentSchema = z.object({
   allocated_by_name: z.string().max(200).nullable().optional(),
 });
 
-const updateAssignmentSchema = createAssignmentSchema.partial();
+const updateAssignmentSchema = partialForUpdate(createAssignmentSchema);
 
 const statusTransitionSchema = z.object({
   status: z.enum(['soft', 'confirmed', 'booked_out', 'active', 'returned', 'cancelled']),

@@ -106,7 +106,7 @@ const addressSchema = z.object({
   city: z.string().optional().nullable(),
   postcode: z.string().optional().nullable(),
   country: z.string().optional().nullable(),
-}).partial();
+}).partial(); // partial-ok: not an edit schema, and no field has a .default()
 
 const intakeSchema = z.object({
   name: z.string().min(1),
