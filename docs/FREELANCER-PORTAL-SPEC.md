@@ -424,10 +424,23 @@ login, past ones included, at any time. Early van pick-ups before staff arrive s
 The **fire procedure** ("Fire: what to do", draft) is common sense from jon's paper risk assessment:
 a call point and an extinguisher in each room, leave everything, assembly point by the front gates.
 
-Still to come: the shop-till guide in the new look, the "have they read it?" tick for freelancer
-documents (with the Staff Documents row actions folded into a ⋯ menu), and out-of-hours returns for
-freelancers by email (a small table of its own, NOT the hirer's `return_overnight` flag, which would
-email, text and log violations against the hirer).
+**"Have they read it?" (Nov 2026, migration 333, `services/freelancer-document-reads.ts`):** a Staff
+Document shared with freelancers can ask them to confirm they've read it ("Freelancers must confirm
+they've read it", under "Share with freelancers"). The portal shows it under "To read" in Resources and
+on the Jobs page until they tap "I've read and understood this" on the document's page (a PDF gets an
+Open button there first). A read belongs to a version: "New version" asks everyone again, an edit
+doesn't. Asked of approved freelancers with a portal login; never the office's shared account. Staff
+see "Freelancers: 3 of 12 read" on the Staff Documents list (click for who), and a "Documents to read"
+card on the freelancer's Freelancer tab. Nothing is ever blocked: it's a reminder and a dated record
+(it proves they tapped it, not that they read it). No IP or browser is stored: the portal calls OP
+server-side, so they'd be the portal's own. The same PR folded the Staff Documents row actions into a
+⋯ menu (View and a due review stay out; the status figures open who's done).
+
+Still to come: the shop-till guide in the new look, and out-of-hours returns for freelancers by email
+(jon, Nov 2026: any freelancer bringing an Ooosh van back after hours, a "Returning out of hours" tick
+on their job, email only, ignores their email pause, Van & Driver drivers included; a small table of
+its own, NOT the hirer's `return_overnight` flag, which would email, text and log violations against
+the hirer).
 
 ## 9. The reskin (PR 3, Oct 2026)
 

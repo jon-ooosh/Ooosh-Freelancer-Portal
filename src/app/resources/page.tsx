@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { BookOpen, ArrowUpRight } from 'lucide-react'
 import BottomNav from '@/components/BottomNav'
-import { cls, IconTile, Chevron, SectionLabel, Banner, ICON } from '@/components/ui'
+import { cls, IconTile, Chevron, SectionLabel, Banner, Chip, ICON } from '@/components/ui'
 
 // =============================================================================
 // TYPES
@@ -26,6 +26,10 @@ interface Resource {
   fileName: string | null
   fileType: string | null
   url: string | null
+  /** Asks you to confirm you've read it (OP services/freelancer-document-reads.ts). */
+  readRequired?: boolean
+  /** When you confirmed the current version, or null. */
+  readAt?: string | null
 }
 
 interface ResourcesApiResponse {
@@ -88,24 +92,27 @@ function ResourceRow({ resource, onOpen }: { resource: Resource; onOpen: (r: Res
       )}
       <div className="flex-1 min-w-0 flex flex-col gap-0.5">
         <span className="text-[16px] font-semibold text-hf-ink">{resource.title}</span>
-        <span className="text-[14px] text-hf-muted">
+        <span className="text-[14px] text-hf-muted flex items-center gap-1.5 flex-wrap">
           {categoryLabel(resource.category)}
           {isRead && ' · read'}
           {unavailable && ' · temporarily unavailable'}
+          {resource.readRequired && (resource.readAt
+            ? <Chip tone="green">Read</Chip>
+            : <Chip tone="amber">To read</Chip>)}
         </span>
       </div>
-      {!unavailable && (isRead
+      {!unavailable && (isRead || resource.readRequired
         ? <Chevron />
         : <ArrowUpRight size={18} strokeWidth={2} className="text-hf-chevron flex-none" aria-label="Opens in a new tab" />)}
     </button>
   )
 }
 
-function Group({ label, items, onOpen }: { label: string; items: Resource[]; onOpen: (r: Resource) => void }) {
+function Group({ label, items, onOpen, tone }: { label: string; items: Resource[]; onOpen: (r: Resource) => void; tone?: 'muted' | 'amber' }) {
   if (items.length === 0) return null
   return (
     <section className="flex flex-col gap-2.5">
-      <SectionLabel>{label}</SectionLabel>
+      <SectionLabel tone={tone}>{label}</SectionLabel>
       <div className={`${cls.card} overflow-hidden flex flex-col`}>
         {items.map((r, i) => (
           <div key={r.id}>
@@ -181,7 +188,9 @@ export default function ResourcesPage() {
   }, [router])
 
   const handleOpen = (resource: Resource) => {
-    if (resource.kind === 'markdown') {
+    // A document that asks you to confirm opens on its own page, with the
+    // "I've read and understood this" button.
+    if (resource.kind === 'markdown' || resource.readRequired) {
       router.push(`/resources/${resource.id}`)
       return
     }
@@ -190,8 +199,11 @@ export default function ResourcesPage() {
     }
   }
 
-  const guides = resources.filter((r) => GUIDE_CATEGORIES.has(r.category))
-  const papers = resources.filter((r) => !GUIDE_CATEGORIES.has(r.category))
+  // Still to read first; everything else in its usual group.
+  const toRead = resources.filter((r) => r.readRequired && !r.readAt)
+  const rest = resources.filter((r) => !(r.readRequired && !r.readAt))
+  const guides = rest.filter((r) => GUIDE_CATEGORIES.has(r.category))
+  const papers = rest.filter((r) => !GUIDE_CATEGORIES.has(r.category))
 
   return (
     <div className="min-h-screen bg-hf-page safe-top pb-32">
@@ -214,6 +226,14 @@ export default function ResourcesPage() {
           !error && <EmptyState />
         ) : (
           <>
+            {toRead.length > 0 && (
+              <div className="flex flex-col gap-2">
+                <Group label="To read" tone="amber" items={toRead} onOpen={handleOpen} />
+                <p className="px-1 text-[14px] text-hf-muted leading-[1.4]">
+                  Please read {toRead.length === 1 ? 'this' : 'these'}, then tap <b className="text-hf-body">I&apos;ve read and understood this</b> at the end.
+                </p>
+              </div>
+            )}
             <Group label="Guides" items={guides} onOpen={handleOpen} />
             <Group label="Policies & agreements" items={papers} onOpen={handleOpen} />
           </>
