@@ -716,7 +716,7 @@ several acts:
    (spaces required — "AC/DC" stays whole); up to three names. On the 15 above, 10 would have
    matched on their own. `findActForName()` searches each and pools the results.
 2. **"Ticketmaster has never heard of this name" no longer asks a person.** New state `unknown`
-   (migration 333): not on "Match these", looked up again every 30 days in case the act appears
+   (migration 334): not on "Match these", looked up again every 30 days in case the act appears
    (`tm_looked_up_at`). `not_found` stays what a PERSON says, never looked up again. Only "several
    possible acts" (several with the exact name, or only similar names) goes to "Match these".
 3. **The close-out tick is on by default only when Ticketmaster knows the name** — one look-up when
@@ -732,7 +732,7 @@ several acts:
    days in `band_watch_candidates`). "Ticketmaster knows them" (exactly one act) is listed to tick in
    bulk, newest job or most booked first; the rest sit behind "Show the others". A bulk watch takes
    its look-up with it (no second search) and starts from the band's latest closed job.
-5. The waiting "Match these" watches were set back to `pending` by migration 333 and looked up
+5. The waiting "Match these" watches were set back to `pending` by migration 334 and looked up
    again with the new rule at the next run.
 
 **Also:**

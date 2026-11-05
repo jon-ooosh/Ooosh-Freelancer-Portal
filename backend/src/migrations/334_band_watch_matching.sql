@@ -1,4 +1,4 @@
--- 333: Band watch — better matching and the back catalogue (TOUR-FINDER-SPEC §21.8).
+-- 334: Band watch — better matching and the back catalogue (TOUR-FINDER-SPEC §21.8).
 --
 -- From the first week live (5 Nov 2026): every watch Ticketmaster couldn't
 -- match had found NOTHING at all — three bands filed under their company name

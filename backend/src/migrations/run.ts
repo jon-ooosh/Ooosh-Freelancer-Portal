@@ -372,7 +372,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '330_cashflow_enquiry_weights.sql',
         '331_call_transcripts.sql',
         '332_cashflow_wise_and_recurring.sql',
-        '333_band_watch_matching.sql',
+        '333_freelancer_document_reads.sql',
+        '334_band_watch_matching.sql',
       ];
 
       for (const migration of migrations) {

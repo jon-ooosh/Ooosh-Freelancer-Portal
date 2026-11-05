@@ -11,7 +11,7 @@
  *
  * The look-up is a background job a manager starts (one to three Ticketmaster
  * calls a band — actSearchNames); its answers are kept in
- * `band_watch_candidates` (migration 333) for 30 days so the list opens fast.
+ * `band_watch_candidates` (migration 334) for 30 days so the list opens fast.
  * It shares the band watch's Ticketmaster lock and never runs beside a lead
  * search.
  */
