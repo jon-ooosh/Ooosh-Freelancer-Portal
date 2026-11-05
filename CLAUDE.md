@@ -445,6 +445,7 @@ existing definition:
 | Opening a private-bucket file in a new tab | `frontend/src/lib/openAuthedFile.ts` |
 | Bank holiday or company day? | `frontend/src/lib/companyCalendar.ts` |
 | Verifying an API key | `middleware/api-key.ts` |
+| An edit (PUT/PATCH) schema from a create schema | `middleware/validate.ts` `partialForUpdate()` — never a bare `.partial()` (zod 4 fills in defaults; see Dependencies) |
 | Is this a STAFF access token? | `middleware/auth.ts` `verifyStaffToken()` — `authenticate` and the Socket.io handshake both use it; never a second `jwt.verify` for staff |
 | Is this login allowed in, does this device skip the code, is this account slowed down? | `services/staff-login-security.ts` — the second factor, trusted devices, the per-account slowdown; `routes/auth.ts` decides, this answers |
 | A FREELANCER's portal sign-in: is the code on, does this phone skip it, a code (emailed or read out by staff), sign out everywhere | `services/portal-login-security.ts` — `routes/portal.ts` decides, this answers; the office's card is `PortalSignInCard.tsx` on the Freelancer tab (`docs/FREELANCER-PORTAL-SPEC.md` §7.1) |
@@ -570,6 +571,18 @@ Six roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, 
   shipped**. Don't panic over the severity label.
 - Dependabot is live. **Always let a Dependabot PR build in the affected dir before
   merging** — a bump occasionally needs a code tweak.
+- **Upgrading zod: check what `.default()` does on EDIT schemas before merging.** Zod 3 → 4
+  (2 Nov 2026) made `.partial()` fill in every field's default, so for three days the edit
+  routes saved starting values over fields the screen hadn't sent: "Mark as Referred to
+  Insurer" cleared the referral and wiped a TT99 to 0 points (Willoughby Robinson, 5 Nov 2026);
+  person edits unticked freelancers and dropped their files; tenancy notes reset billing settings;
+  held-item edits dropped photos. Edit schemas go through `middleware/validate.ts`
+  `partialForUpdate()`, never a bare `.partial()`. On any zod bump: run
+  `middleware/__tests__/partial-for-update.test.ts` (it also fails if zod's partial/default
+  behaviour changes again, and on any bare `.partial()`), and read the changelog for changes to
+  default / optional / partial / coerce / catch — the upgrade's own checks tested `.default()`
+  on its own and missed it inside `.partial()`. The repair for that incident is
+  `scripts/repair-zod4-update-defaults.ts`.
 
 ## Product policy
 

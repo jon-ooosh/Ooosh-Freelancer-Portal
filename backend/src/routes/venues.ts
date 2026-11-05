@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
-import { validate } from '../middleware/validate';
+import { validate, partialForUpdate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 
 const router = Router();
@@ -53,7 +53,7 @@ const createVenueSchema = z.object({
   ai_research: z.string().optional().nullable(),
 });
 
-const updateVenueSchema = createVenueSchema.partial();
+const updateVenueSchema = partialForUpdate(createVenueSchema);
 
 // GET /api/venues
 router.get('/', async (req: AuthRequest, res: Response) => {

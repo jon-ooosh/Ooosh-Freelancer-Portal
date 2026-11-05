@@ -14,6 +14,7 @@ import { z } from 'zod';
 import multer from 'multer';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, isManagerTier } from '../middleware/auth';
+import { partialForUpdate } from '../middleware/validate';
 import { resolveRemittanceContact, getCostForRemittance, sendRemittance } from '../services/remittance';
 import { fetchCostLines, validateCostLines, replaceCostLines, headerVatFromLines, type CostLineInput } from '../services/cost-lines';
 import { listFreelancerWork, getInvoiceTolerance, planWorkLinks, writeWorkLinks, WorkLinkError, type WorkLinkRow } from '../services/freelancer-work';
@@ -199,7 +200,7 @@ const createSchema = z.object({
 });
 
 // Update accepts the same fields, all optional.
-const updateSchema = createSchema.partial();
+const updateSchema = partialForUpdate(createSchema);
 
 const rechargeSchema = z.object({
   recharge_mode: z.enum(['full', 'partial']),

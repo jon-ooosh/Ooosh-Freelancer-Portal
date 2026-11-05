@@ -17,7 +17,7 @@ import rateLimit from 'express-rate-limit';
 import { randomBytes } from 'node:crypto';
 import { query, getClient } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
-import { validate } from '../middleware/validate';
+import { validate, partialForUpdate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { isR2Configured, uploadToR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
@@ -308,7 +308,7 @@ router.post('/rooms', authorize(...ADMIN_MANAGER), validate(roomSchema), async (
   res.status(201).json({ data: result.rows[0] });
 });
 
-router.put('/rooms/:id', authorize(...ADMIN_MANAGER), validate(roomSchema.partial()), async (req: AuthRequest, res: Response) => {
+router.put('/rooms/:id', authorize(...ADMIN_MANAGER), validate(partialForUpdate(roomSchema)), async (req: AuthRequest, res: Response) => {
   const b = req.body as Partial<z.infer<typeof roomSchema>>;
   const fields: string[] = [];
   const params: unknown[] = [];
@@ -469,7 +469,7 @@ async function retireTenancyBells(tenancyId: string): Promise<void> {
   await retireDoneBells('storage_rate_review', tenancyId);
 }
 
-router.put('/tenancies/:id', validate(tenancySchema.partial()), async (req: AuthRequest, res: Response) => {
+router.put('/tenancies/:id', validate(partialForUpdate(tenancySchema)), async (req: AuthRequest, res: Response) => {
   const allowed = ['organisation_id', 'lead_contact_person_id', 'status', 'move_in_date', 'billing_mode',
     'billing_cadence', 'billing_custom_interval_value', 'billing_custom_interval_unit',
     'next_bill_date', 'bill_reminder_person_id', 'bill_reminder_lead_days',

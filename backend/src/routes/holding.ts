@@ -15,7 +15,7 @@ import { z } from 'zod';
 import rateLimit from 'express-rate-limit';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
-import { validate } from '../middleware/validate';
+import { validate, partialForUpdate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { isR2Configured, uploadToR2, getFromR2 } from '../config/r2';
 import type { Readable } from 'stream';
@@ -444,7 +444,7 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
 
 // ════════════════════════ UPDATE ════════════════════════
 
-router.put('/:id', validate(createSchema.partial()), async (req: AuthRequest, res: Response) => {
+router.put('/:id', validate(partialForUpdate(createSchema)), async (req: AuthRequest, res: Response) => {
   const b = req.body as Partial<z.infer<typeof createSchema>>;
   const fields: string[] = [];
   const params: unknown[] = [];

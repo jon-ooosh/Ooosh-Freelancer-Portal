@@ -5,7 +5,7 @@ import { recentlyViewedOrderSql, recordAddressBookView } from '../services/addre
 import { phoneDigitsForSearch } from '../services/address-book-search';
 import { authenticate, authorize, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import { redactPrivateFields, redactPrivateFieldsAll } from '../services/people-private-fields';
-import { validate } from '../middleware/validate';
+import { validate, partialForUpdate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { getSitterJobsByDate, type ShiftJobRef } from '../services/studio-sitter';
 import { ukToday } from '../services/uk-date';
@@ -76,7 +76,7 @@ const createPersonSchema = z.object({
   ai_research: z.string().optional().nullable(),
 });
 
-const updatePersonSchema = createPersonSchema.partial();
+const updatePersonSchema = partialForUpdate(createPersonSchema);
 
 const personOrgRoleSchema = z.object({
   organisation_id: z.string().guid(),

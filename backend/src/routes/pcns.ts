@@ -17,7 +17,7 @@ import multer from 'multer';
 import crypto from 'crypto';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
-import { validate } from '../middleware/validate';
+import { validate, partialForUpdate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { getSystemSettings } from './system-settings';
 import { isAnthropicConfigured } from '../config/anthropic';
@@ -542,7 +542,7 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
 // Update (status / action / notes / corrections)
 // ─────────────────────────────────────────────────────────────────────────
 
-const updateSchema = createSchema.partial().extend({
+const updateSchema = partialForUpdate(createSchema).extend({
   status: z.enum([
     'received', 'awaiting_driver_id', 'driver_notified_pay', 'paid_by_driver',
     'liability_transferred', 'paid_recharged', 'internal_ooosh',
