@@ -266,15 +266,30 @@ as a separate system). Same idea, on what OP has now. Nothing here is built unti
 `telephony_retention_months` (default 24, like email): after it, the audio and full transcript are
 deleted and the summary kept. Runs nightly.
 
-### I7. To decide (jon)
+### I7. Decided (jon, 5 Nov 2026)
 
-1. **Who can read a full transcript?** Recommendation: admins only, like the audio; everyone sees the
-   summary.
-2. **Calls screen for everyone, or managers up?** Recommendation: everyone (missed calls need calling
-   back by whoever's in); playing a call recording stays admin-only.
-3. **A missed call with no voicemail — tell anyone?** Recommendation: no email (every hang-up would
-   send one); it shows on the Calls screen and the dashboard counts today's unreturned missed calls.
-4. **The job suggestion** — happy with "person always, job only with evidence, otherwise one click"?
+1. **Full transcripts: admins only**, like the call audio. Everyone sees the summary.
+2. **The Calls screen is for every staff login** (missed calls need calling back by whoever's in).
+   Playing a call recording stays admin-only; voicemails anyone.
+3. **A missed call with no voicemail sends no email**; it shows on the Calls screen, and the dashboard
+   counts today's unreturned missed calls.
+4. **Job linking: the person always, a job only with evidence**, otherwise one click.
+
+Follow-ups jon raised, folded into I-b:
+- **Several jobs on one call:** the call goes on EVERY job that has evidence (a job number said on the call
+  that belongs to that person or their organisation), the same summary on each, with "Also discussed:
+  #16234" so one call isn't read as the whole story on any single job.
+- **Wrongly matched calls get the email controls:** "Not this person / not this job" (a tombstone, re-attachable,
+  out of every AI read), move to another person or job, and hide (admins). Same rules as
+  `/api/auto-chase/emails/:id/*`.
+- **Personal calls:** Claude's `personal` category = no obvious business reason → no timeline, admins only.
+- **Who's calling, while it rings:** worth trying in I-b. OP already looks the number up at ring time (one
+  query), and for a `<Sip>` dial Twilio lets the caller ID be a name — so the handset could show
+  "Josh Law" instead of the number. The catch: the handset's missed-call list would then hold a name
+  that can't be called back. To test on the Gigaset before deciding (a name AND number, if it can show both).
+- **Where the Calls screen lives:** proposed **Operations › Calls**, with a count of today's unreturned
+  missed calls, since it's a to-do list, not a contact book; each call also shows on the person's and
+  organisation's timeline. jon to confirm.
 
 ### I8. Build order
 
@@ -283,10 +298,24 @@ deleted and the summary kept. Runs nightly.
 - **I-b:** matching + timelines + the Calls screen.
 - **I-c:** brief / chase drafts / suggested To Dos (§I5).
 
-To set up in Twilio when I-a is built (jon): an Intelligence Service (UK English, auto-transcribe OFF,
-data logging OFF, webhook = `https://staff.oooshtours.co.uk/api/telephony/transcript`), and its SID in
-`.env` as `TWILIO_INTELLIGENCE_SERVICE_SID`. To confirm then: that UK English is offered, and the
-"data logging" (Twilio using our calls to train) opt-out.
+**I-a BUILT (6 Nov 2026):** `services/call-intelligence.ts`, migration 331, scheduler (poll every 2 min,
+retention 03:40). How it differs from the plan above:
+- **No webhook — OP polls.** Twilio's "transcript ready" message format couldn't be confirmed from its
+  docs, so a 2-minute poll asks each pending transcript whether it's done. Nothing to set up for it, and a
+  lost webhook can never strand a recording in Twilio. Given up after an hour (the recording is then
+  deleted anyway).
+- Off until `TWILIO_INTELLIGENCE_SERVICE_SID` is in `.env`; without it the phones behave exactly as in §T8.
+- Speakers: a dual recording's channel 1 is the PARENT leg — the caller on an incoming call, our handset
+  on an outgoing one — so lines read "Caller:" / "Them:" and "Ooosh:".
+- Summary: Sonnet, structured output, effort low: summary, category, sentiment, job numbers said,
+  suggested next step, urgent. Nothing reads it yet except the voicemail email (I-b puts it on screens).
+
+**Twilio setup (jon), once:** Console → Conversational Intelligence (or Voice → Intelligence) → Services →
+Create service: name `OP calls`, language **English (UK)** if offered (else English), **auto-transcribe
+OFF** (OP asks per recording), **data logging / "use data to improve" OFF**, no webhook, no Language
+Operators. Copy its SID (starts `GA`) into `.env` as `TWILIO_INTELLIGENCE_SERVICE_SID`, restart.
+To check on the first test calls: the transcript is the right way round (Caller / Ooosh), the voicemail
+email carries the summary, and the recording disappears from Twilio's Recordings list.
 
 ---
 

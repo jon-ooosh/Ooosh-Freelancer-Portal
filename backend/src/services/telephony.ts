@@ -19,7 +19,7 @@
 
 import crypto from 'crypto';
 import { query } from '../config/database';
-import { uploadToR2 } from '../config/r2';
+import { uploadToR2, getFromR2 } from '../config/r2';
 import { getSystemSettings } from '../routes/system-settings';
 import { normaliseMsisdn } from './sms-service';
 import { emailService } from './email-service';
@@ -194,7 +194,7 @@ export async function markDuration(callSid: string, seconds: number | null): Pro
 
 // ── Recordings ──────────────────────────────────────────────────────────────
 
-function twilioAuthHeader(): string {
+export function twilioAuthHeader(): string {
   const keySid = process.env.TWILIO_API_KEY_SID;
   const keySecret = process.env.TWILIO_API_KEY_SECRET;
   if (!keySid || !keySecret) throw new Error('TWILIO_API_KEY_SID / TWILIO_API_KEY_SECRET not set');
@@ -210,15 +210,15 @@ export interface RecordingCallback {
 }
 
 /**
- * Copy a finished recording to R2, email it if it's a voicemail, then delete it
- * from Twilio. IDEMPOTENT — it is retried: the upload overwrites the same key,
- * the email is guarded by voicemail_emailed_at, and a recording already gone
- * from Twilio (404) counts as deleted.
+ * Copy a finished recording to R2, then EITHER hand it to transcription
+ * (TWILIO_INTELLIGENCE_SERVICE_SID set — services/call-intelligence.ts deletes it
+ * from Twilio and emails a voicemail once the transcript is back) OR email it if
+ * it's a voicemail and delete it from Twilio straight away.
+ * IDEMPOTENT — it is retried: the upload overwrites the same key, the email is
+ * guarded by voicemail_emailed_at, a transcript is asked for once per recording,
+ * and a recording already gone from Twilio (404) counts as deleted.
  */
 export async function processRecording(cb: RecordingCallback): Promise<void> {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  if (!accountSid) throw new Error('TWILIO_ACCOUNT_SID not set');
-
   // A recording for a call OP never logged (shouldn't happen) still gets a row.
   await recordCallStart({
     callSid: cb.callSid, callType: 'inbound', callerNumber: null, destNumber: null, otherParty: null,
@@ -233,56 +233,95 @@ export async function processRecording(cb: RecordingCallback): Promise<void> {
   const key = `${prefix}${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${cb.callSid}-${cb.recordingSid}.mp3`;
   await uploadToR2(key, audio, 'audio/mpeg');
 
-  const updated = await query(
+  await query(
     `UPDATE call_records
         SET recording_sid = $2, audio_r2_key = $3, status = 'stored', last_error = NULL,
             kind = CASE WHEN $4 = 'voicemail' THEN 'voicemail' ELSE kind END,
             duration_seconds = COALESCE(duration_seconds, $5),
             updated_at = NOW()
-      WHERE unique_call_id = $1
-      RETURNING caller_number, other_party_number, recorded_at, voicemail_emailed_at`,
+      WHERE unique_call_id = $1`,
     [cb.callSid, cb.recordingSid, key, cb.kind, cb.durationSeconds],
   );
-  const row = updated.rows[0];
 
-  if (cb.kind === 'voicemail' && row && !row.voicemail_emailed_at) {
-    await emailVoicemail({
-      from: row.other_party_number || row.caller_number || 'an unknown number',
-      at: new Date(row.recorded_at),
-      seconds: cb.durationSeconds,
-      audio,
-      filename: `voicemail-${cb.recordingSid}.mp3`,
-    });
-    await query(`UPDATE call_records SET voicemail_emailed_at = NOW() WHERE unique_call_id = $1`, [cb.callSid]);
+  // Loaded here, not at the top: call-intelligence imports this file.
+  const ci = await import('./call-intelligence');
+  if (ci.isTranscriptionOn()) {
+    try {
+      await ci.requestTranscript(cb.callSid);
+      return; // the transcript poll finishes the job (email, delete from Twilio)
+    } catch (err) {
+      // Transcription is a bonus, never a reason to lose the voicemail email.
+      console.warn(`[telephony] transcript request failed for ${cb.callSid}:`, (err as Error).message);
+      await query(
+        `UPDATE call_records SET transcript_status = 'failed', last_error = $2, updated_at = NOW() WHERE unique_call_id = $1`,
+        [cb.callSid, `transcript request: ${(err as Error).message}`.slice(0, 500)],
+      );
+    }
   }
 
+  if (cb.kind === 'voicemail') await emailVoicemailForCall(cb.callSid, audio);
+  await deleteTwilioRecording(cb.callSid, cb.recordingSid);
+}
+
+/** Delete a recording from Twilio (404 = already gone) and note when. */
+export async function deleteTwilioRecording(callSid: string, recordingSid: string): Promise<void> {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  if (!accountSid) throw new Error('TWILIO_ACCOUNT_SID not set');
   const del = await fetch(
-    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Recordings/${encodeURIComponent(cb.recordingSid)}.json`,
+    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Recordings/${encodeURIComponent(recordingSid)}.json`,
     { method: 'DELETE', headers: { Authorization: twilioAuthHeader() } },
   );
   if (!del.ok && del.status !== 404) throw new Error(`Twilio recording delete failed: HTTP ${del.status}`);
+  await query(
+    `UPDATE call_records SET twilio_recording_deleted_at = COALESCE(twilio_recording_deleted_at, NOW()) WHERE unique_call_id = $1`,
+    [callSid],
+  );
 }
 
-async function emailVoicemail(v: { from: string; at: Date; seconds: number | null; audio: Buffer; filename: string }): Promise<void> {
+/**
+ * Email a voicemail to the Settings address — once (voicemail_emailed_at), with
+ * the summary when there is one. `audio` saves a trip to R2 when the caller has it.
+ */
+export async function emailVoicemailForCall(callSid: string, audio?: Buffer): Promise<void> {
+  const r = await query(
+    `SELECT caller_number, other_party_number, recorded_at, duration_seconds, recording_sid,
+            audio_r2_key, voicemail_emailed_at, summary, suggested_action, urgent
+       FROM call_records WHERE unique_call_id = $1`,
+    [callSid],
+  );
+  const row = r.rows[0];
+  if (!row || row.voicemail_emailed_at || !row.audio_r2_key) return;
+
+  let bytes = audio;
+  if (!bytes) {
+    const obj = await getFromR2(row.audio_r2_key);
+    bytes = Buffer.from(await (obj.Body as { transformToByteArray: () => Promise<Uint8Array> }).transformToByteArray());
+  }
+
+  const from: string = row.other_party_number || row.caller_number || 'an unknown number';
   const { voicemailTo } = await getTelephonySettings();
-  const when = v.at.toLocaleString('en-GB', {
+  const when = new Date(row.recorded_at).toLocaleString('en-GB', {
     timeZone: 'Europe/London', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
   });
-  const length = v.seconds != null ? `${v.seconds} seconds` : 'unknown length';
+  const length = row.duration_seconds != null ? `${row.duration_seconds} seconds` : 'unknown length';
+  const summary = row.summary
+    ? `<p>${xmlEscape(row.summary)}</p>${row.suggested_action ? `<p><strong>Next step:</strong> ${xmlEscape(row.suggested_action)}</p>` : ''}`
+    : '<p>No written summary for this one. The recording is attached.</p>';
   const html = `<!doctype html><html><body style="font-family:Arial,sans-serif;font-size:14px;color:#111">
-<p><strong>New voicemail</strong> from <strong>${xmlEscape(v.from)}</strong></p>
+<p><strong>${row.urgent ? 'URGENT: ' : ''}New voicemail</strong> from <strong>${xmlEscape(from)}</strong></p>
 <p>${xmlEscape(when)} · ${xmlEscape(length)}</p>
-<p>The recording is attached. A written summary will follow once call transcription is switched on.</p>
+${summary}
 </body></html>`;
   const result = await emailService.sendRaw({
     to: voicemailTo,
-    subject: `Voicemail from ${v.from}`,
+    subject: `${row.urgent ? 'URGENT ' : ''}Voicemail from ${from}`,
     html,
     skipLayout: true,
-    attachments: [{ filename: v.filename, content: v.audio, contentType: 'audio/mpeg' }],
+    attachments: [{ filename: `voicemail-${row.recording_sid || callSid}.mp3`, content: bytes, contentType: 'audio/mpeg' }],
   });
-  // sendRaw resolves { success: false } rather than throwing — throw so the hook retries.
+  // sendRaw resolves { success: false } rather than throwing — throw so the caller retries.
   if (!result.success) throw new Error(`Voicemail email failed: ${result.error || 'unknown error'}`);
+  await query(`UPDATE call_records SET voicemail_emailed_at = NOW() WHERE unique_call_id = $1`, [callSid]);
 }
 
 export async function markRecordingFailed(callSid: string, error: unknown): Promise<void> {
