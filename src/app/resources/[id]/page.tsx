@@ -4,13 +4,16 @@
  * Resource Reader Page
  *
  * In-portal read-only reader for a markdown-backed staff document shared with
- * freelancers. File-backed docs never land here (the list opens their presigned
- * url directly); if one does, we redirect to its url.
+ * freelancers. A file-backed doc normally opens straight from the list (its
+ * presigned url); one that asks you to confirm you've read it lands here
+ * instead, with an Open button and "I've read and understood this" (OP
+ * services/freelancer-document-reads.ts). Any other file doc bounces to its url.
  */
 
 import { useEffect, useState, Fragment, type ReactNode } from 'react'
 import { useRouter, useParams } from 'next/navigation'
 import Link from 'next/link'
+import { ArrowUpRight, Check } from 'lucide-react'
 import { cls, BackLink, Banner } from '@/components/ui'
 
 interface ResourceDetail {
@@ -20,6 +23,54 @@ interface ResourceDetail {
   kind: 'file' | 'markdown'
   body?: string
   url?: string | null
+  fileName?: string | null
+  readRequired?: boolean
+  readAt?: string | null
+}
+
+/** "5 November 2026". */
+function longDate(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/London' })
+}
+
+/**
+ * "I've read and understood this", or when they did. Recorded against the
+ * document's current version: a new version asks again.
+ */
+function ConfirmRead({ id, readAt, onConfirmed }: { id: string; readAt: string | null; onConfirmed: (at: string) => void }) {
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  if (readAt) {
+    return (
+      <Banner tone="success">
+        <span className="inline-flex items-center gap-1.5"><Check size={16} strokeWidth={2.4} />You confirmed you&apos;d read this on {longDate(readAt)}.</span>
+      </Banner>
+    )
+  }
+  async function confirm() {
+    setSaving(true); setError(null)
+    try {
+      const res = await fetch(`/api/resources/${id}/read`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok || !data.success) throw new Error(data.error || 'That did not save. Please try again.')
+      onConfirmed(data.readAt)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'That did not save. Please try again.')
+    } finally {
+      setSaving(false)
+    }
+  }
+  return (
+    <div className={`${cls.card} p-4 flex flex-col gap-3`}>
+      <p className="text-[15px] text-hf-body leading-[1.45]">When you&apos;ve read it all, let us know:</p>
+      <button type="button" onClick={confirm} disabled={saving} className={`${cls.btnPrimary} w-full`}>
+        {saving ? 'Saving...' : 'I\u2019ve read and understood this'}
+      </button>
+      {error && <p className="text-[14px] text-hf-error">{error}</p>}
+    </div>
+  )
 }
 
 // =============================================================================
@@ -146,8 +197,9 @@ export default function ResourceReaderPage() {
           throw new Error(data.error || 'Failed to load document')
         }
         const r: ResourceDetail = data.resource
-        // A file-backed doc shouldn't reach the reader — bounce to its url.
-        if (r.kind === 'file' && r.url) { window.location.href = r.url; return }
+        // A file-backed doc that doesn't ask for a read has nothing to do
+        // here: bounce to its url.
+        if (r.kind === 'file' && r.url && !r.readRequired) { window.location.href = r.url; return }
         setResource(r)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load document')
@@ -182,9 +234,32 @@ export default function ResourceReaderPage() {
             <div className="h-4 bg-hf-track rounded w-5/6" />
           </div>
         ) : resource && resource.kind === 'markdown' ? (
-          <article className={`${cls.card} p-5 flex flex-col gap-3.5`}>
-            {renderMarkdown(resource.body || '')}
-          </article>
+          <div className="flex flex-col gap-4">
+            <article className={`${cls.card} p-5 flex flex-col gap-3.5`}>
+              {renderMarkdown(resource.body || '')}
+            </article>
+            {resource.readRequired && (
+              <ConfirmRead id={resource.id} readAt={resource.readAt ?? null}
+                onConfirmed={(at) => setResource({ ...resource, readAt: at })} />
+            )}
+          </div>
+        ) : resource && resource.kind === 'file' && resource.readRequired ? (
+          <div className="flex flex-col gap-4">
+            <div className={`${cls.card} p-4 flex flex-col gap-3`}>
+              <p className="text-[15px] text-hf-body leading-[1.45]">
+                We&apos;d like you to read this one. It opens in a new tab: come back here when you&apos;ve finished.
+              </p>
+              {resource.url ? (
+                <a href={resource.url} target="_blank" rel="noopener noreferrer" className={`${cls.btnSecondary} w-full`}>
+                  Open {resource.fileName ? 'the document' : 'it'} <ArrowUpRight size={18} strokeWidth={2} />
+                </a>
+              ) : (
+                <p className="text-[14px] text-hf-muted">It isn&apos;t available just now. Please try again later.</p>
+              )}
+            </div>
+            <ConfirmRead id={resource.id} readAt={resource.readAt ?? null}
+              onConfirmed={(at) => setResource({ ...resource, readAt: at })} />
+          </div>
         ) : !error ? (
           <div className={`${cls.card} p-8 text-center text-hf-muted text-[15px]`}>
             This document isn&apos;t available to read here.

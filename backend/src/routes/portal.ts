@@ -32,6 +32,7 @@ import { isVanLegDone } from '../services/quote-completion';
 import { personalFee } from '../services/freelancer-fees';
 import { getFreelancerEarnings } from '../services/freelancer-earnings';
 import { sitterCodesFor, gateCodeForJob } from '../services/site-codes';
+import { unreadFor, readTimesFor, markRead } from '../services/freelancer-document-reads';
 import { portalSecondsBlocked, recordPortalLoginFailure, clearPortalLoginFailures, deviceLabelFrom } from '../services/staff-login-security';
 import {
   isPortalEnforcedNow, portalEmailHint, signPortalPending, readPortalPending, sendPortalLoginCode,
@@ -2005,10 +2006,14 @@ function fileTypeFromName(name: string | null): string | null {
   return ext ? ext.toUpperCase() : null;
 }
 
-router.get('/resources', async (_req: PortalRequest, res: Response) => {
+router.get('/resources', async (req: PortalRequest, res: Response) => {
   try {
+    // "Have they read it?" (services/freelancer-document-reads.ts). The office's
+    // shared account is staff: it is never asked.
+    const asked = !req.portalUser!.isStaffShared;
+    const readTimes = asked ? await readTimesFor(req.portalUser!.id) : new Map<string, string>();
     const result = await query(
-      `SELECT d.id, d.title, d.category,
+      `SELECT d.id, d.title, d.category, d.freelancer_read_required,
               v.file_r2_key, v.file_name
          FROM staff_documents d
          JOIN staff_document_versions v
@@ -2038,6 +2043,8 @@ router.get('/resources', async (_req: PortalRequest, res: Response) => {
           fileName: r.file_name || null,
           fileType: isFile ? fileTypeFromName(r.file_name) : null,
           url,
+          readRequired: asked && r.freelancer_read_required === true,
+          readAt: readTimes.get(r.id) ?? null,
         };
       }),
     );
@@ -2049,11 +2056,39 @@ router.get('/resources', async (_req: PortalRequest, res: Response) => {
   }
 });
 
+// GET /api/portal/resources/unread — the documents this freelancer still has
+// to read (the dashboard's reminder). Never the shared office account.
+router.get('/resources/unread', async (req: PortalRequest, res: Response) => {
+  try {
+    if (req.portalUser!.isStaffShared) { res.json({ documents: [] }); return; }
+    res.json({ documents: await unreadFor(req.portalUser!.id) });
+  } catch (error) {
+    console.error('Portal unread resources error:', error);
+    res.status(500).json({ error: 'Failed to load documents to read' });
+  }
+});
+
+// POST /api/portal/resources/:id/read — "I've read and understood this":
+// recorded against the document's current version (a new version asks again).
+router.post('/resources/:id/read', async (req: PortalRequest, res: Response) => {
+  try {
+    if (!isUuidLike(req.params.id)) { res.status(404).json({ error: 'Not found' }); return; }
+    if (req.portalUser!.isStaffShared) { res.status(403).json({ error: 'The office account is not asked to confirm documents' }); return; }
+    const result = await markRead(req.portalUser!.id, String(req.params.id));
+    if (!result.ok) { res.status(404).json({ error: 'That document is not asking to be confirmed' }); return; }
+    res.json({ success: true, readAt: result.readAt });
+  } catch (error) {
+    console.error('Portal resource read error:', error);
+    res.status(500).json({ error: 'That did not save. Please try again.' });
+  }
+});
+
 router.get('/resources/:id', async (req: PortalRequest, res: Response) => {
   try {
     if (!isUuidLike(req.params.id)) { res.status(404).json({ error: 'Not found' }); return; }
+    const asked = !req.portalUser!.isStaffShared;
     const result = await query(
-      `SELECT d.id, d.title, d.category,
+      `SELECT d.id, d.title, d.category, d.freelancer_read_required,
               v.body, v.file_r2_key, v.file_name
          FROM staff_documents d
          JOIN staff_document_versions v
@@ -2066,6 +2101,8 @@ router.get('/resources/:id', async (req: PortalRequest, res: Response) => {
     );
     const doc = result.rows[0];
     if (!doc) { res.status(404).json({ error: 'Not found' }); return; }
+    const readRequired = asked && doc.freelancer_read_required === true;
+    const readAt = readRequired ? ((await readTimesFor(req.portalUser!.id)).get(doc.id) ?? null) : null;
 
     if (doc.file_r2_key) {
       // File-backed: hand back a fresh presigned url, not a body.
@@ -2079,6 +2116,7 @@ router.get('/resources/:id', async (req: PortalRequest, res: Response) => {
         resource: {
           id: doc.id, title: doc.title, category: doc.category, kind: 'file',
           fileName: doc.file_name || null, fileType: fileTypeFromName(doc.file_name), url,
+          readRequired, readAt,
         },
       });
       return;
@@ -2088,6 +2126,7 @@ router.get('/resources/:id', async (req: PortalRequest, res: Response) => {
       resource: {
         id: doc.id, title: doc.title, category: doc.category, kind: 'markdown',
         body: doc.body || '',
+        readRequired, readAt,
       },
     });
   } catch (error) {

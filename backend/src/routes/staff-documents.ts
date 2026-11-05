@@ -28,6 +28,7 @@ import { getFrontendUrl } from '../config/app-urls';
 import { retireDoneBells } from '../services/notification-resolve';
 import type { BellKey } from '../services/bell-rules';
 import { AI_TOPICS } from '../services/house-knowledge';
+import { readersOf, documentsForPerson, READ_AUDIENCE_SQL } from '../services/freelancer-document-reads';
 
 const router = Router();
 router.use(authenticate);
@@ -387,7 +388,12 @@ router.get('/', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Resp
               COALESCE(NULLIF(TRIM(CONCAT(ap.first_name, ' ', ap.last_name)), ''), au.email) AS author_name,
               COALESCE(s.pending, 0)   AS pending_count,
               COALESCE(s.completed, 0) AS completed_count,
-              COALESCE(s.lapsed, 0)    AS lapsed_count
+              COALESCE(s.lapsed, 0)    AS lapsed_count,
+              -- Freelancers who've read the current version (services/freelancer-document-reads.ts).
+              CASE WHEN d.freelancer_read_required THEN (
+                SELECT COUNT(*) FROM freelancer_document_reads fr JOIN people p ON p.id = fr.person_id
+                 WHERE fr.version_id = v.id AND ${READ_AUDIENCE_SQL}
+              ) END AS freelancer_read_count
          FROM staff_documents d
          LEFT JOIN staff_document_versions v ON v.document_id = d.id AND v.is_current = true
          LEFT JOIN users au ON au.id = d.created_by
@@ -401,7 +407,14 @@ router.get('/', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Resp
          ) s ON s.document_id = d.id
         ORDER BY (d.approval_status = 'pending_approval') DESC, d.is_active DESC, d.category, d.title`,
     );
-    res.json({ data: r.rows });
+    // How many freelancers are asked: one figure for every document that asks.
+    const audience = await query(`SELECT COUNT(*)::int AS n FROM people p WHERE ${READ_AUDIENCE_SQL}`);
+    const audienceCount = audience.rows[0]?.n ?? 0;
+    res.json({ data: r.rows.map((row) => ({
+      ...row,
+      freelancer_read_count: row.freelancer_read_count == null ? null : Number(row.freelancer_read_count),
+      freelancer_audience_count: row.freelancer_read_required ? audienceCount : null,
+    })) });
   } catch (error) {
     console.error('[staff-documents] list error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -412,6 +425,8 @@ const createSchema = z.object({
   slug: z.string().trim().min(2).max(80).regex(/^[a-z0-9-]+$/, 'lowercase-hyphen only').optional(),
   title: z.string().trim().min(1).max(200),
   shareable_with_freelancers: z.boolean().optional(),
+  // Freelancers must confirm they've read it (only with shareable_with_freelancers).
+  freelancer_read_required: z.boolean().optional(),
   category: z.enum(['policy', 'agreement', 'training', 'official_doc', 'contract', 'other']).default('policy'),
   completion_mode: z.enum(['read_only', 'tick', 'sign']).default('read_only'),
   tick_label: z.string().trim().max(200).nullable().optional(),
@@ -460,8 +475,9 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
           target_roles, target_user_ids, chase_interval_days, escalate_after_days,
           review_interval_months, created_by, approval_status,
           approved_by, approved_at, shareable_with_freelancers,
-          tags, owner_user_ids, content_review_interval_months, content_review_due_date)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`,
+          tags, owner_user_ids, content_review_interval_months, content_review_due_date,
+          freelancer_read_required)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
       [slug, d.title, d.category, d.completion_mode, d.tick_label || null, d.visibility,
        d.target_type, d.target_roles || null, d.target_user_ids || null,
        d.chase_interval_days || null, d.escalate_after_days || null, d.review_interval_months || null,
@@ -469,7 +485,8 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
        approvalStatus === 'approved' ? req.user!.id : null,
        approvalStatus === 'approved' ? new Date() : null, shareable,
        d.tags && d.tags.length ? d.tags : null, d.owner_user_ids && d.owner_user_ids.length ? d.owner_user_ids : null,
-       d.content_review_interval_months || null, contentReviewDue],
+       d.content_review_interval_months || null, contentReviewDue,
+       shareable && !!d.freelancer_read_required],
     );
     const doc = docRes.rows[0];
     await client.query(
@@ -513,6 +530,7 @@ const patchSchema = z.object({
   content_review_interval_months: z.number().int().positive().nullable().optional(),
   is_active: z.boolean().optional(),
   shareable_with_freelancers: z.boolean().optional(),
+  freelancer_read_required: z.boolean().optional(),
 });
 
 // PATCH /api/staff-documents/:id — update config. Managers: any document.
@@ -535,6 +553,16 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
       const cat = fields.category ?? cur.rows[0].category;
       if (!SHAREABLE_CATEGORIES.includes(cat)) {
         res.status(400).json({ error: `Only ${SHAREABLE_CATEGORIES.join(' / ')} documents can be shared with freelancers` });
+        return;
+      }
+    }
+    // Asking freelancers to read it only makes sense while it's shared with them.
+    if (fields.shareable_with_freelancers === false) fields.freelancer_read_required = false;
+    if (fields.freelancer_read_required === true) {
+      const shared = fields.shareable_with_freelancers ?? (await query(
+        `SELECT shareable_with_freelancers FROM staff_documents WHERE id = $1`, [req.params.id])).rows[0]?.shareable_with_freelancers;
+      if (!shared) {
+        res.status(400).json({ error: 'Share it with freelancers first, then ask them to confirm they have read it' });
         return;
       }
     }
@@ -716,6 +744,28 @@ router.get('/:id/matrix', authorize(...MANAGER_ROLES), async (req: AuthRequest, 
     res.json({ data: r.rows });
   } catch (error) {
     console.error('[staff-documents] matrix error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/staff-documents/:id/freelancer-reads — which freelancers have read
+// the current version, and who hasn't yet (services/freelancer-document-reads.ts)
+router.get('/:id/freelancer-reads', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await readersOf(String(req.params.id)) });
+  } catch (error) {
+    console.error('[staff-documents] freelancer reads error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/staff-documents/freelancer-reads/person/:personId — the documents a
+// freelancer is asked to read, and when they read each (their Freelancer tab).
+router.get('/freelancer-reads/person/:personId', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await documentsForPerson(String(req.params.personId)) });
+  } catch (error) {
+    console.error('[staff-documents] person freelancer reads error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

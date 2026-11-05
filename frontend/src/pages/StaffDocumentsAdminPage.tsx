@@ -5,6 +5,7 @@ import { openAuthedFile } from '../lib/openAuthedFile';
 import { ukToday } from '../lib/ukDate';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { AI_TOPICS, AI_TOPIC_LABELS, type AiTopic } from '../lib/aiTopics';
+import RecordActionsMenu, { type RecordAction } from '../components/RecordActionsMenu';
 
 export type Mode = 'read_only' | 'tick' | 'sign';
 export type Category = 'policy' | 'agreement' | 'training' | 'official_doc' | 'contract' | 'other';
@@ -20,6 +21,11 @@ export interface DocRow {
   is_active: boolean; current_version: number | null;
   approval_status: ApprovalStatus; review_notes: string | null;
   shareable_with_freelancers: boolean;
+  // Freelancers must confirm they've read it (backend services/freelancer-document-reads.ts).
+  freelancer_read_required?: boolean;
+  /** Approved freelancers with a portal login who have read the current version / are asked. */
+  freelancer_read_count?: number | null;
+  freelancer_audience_count?: number | null;
   // Shared with the Claude that drafts client emails (admin-only switch, AI-KNOWLEDGE-SPEC §4).
   ai_shared?: boolean;
   ai_topics?: string[] | null;
@@ -185,6 +191,7 @@ export function DocFormModal({ doc, users, canPublish = true, tagSuggestions = [
   const [escalate, setEscalate] = useState<string>(doc ? (doc.escalate_after_days?.toString() || '') : '14');
   const [review, setReview] = useState<string>(doc ? (doc.review_interval_months?.toString() || '') : '12');
   const [shareable, setShareable] = useState<boolean>(doc?.shareable_with_freelancers ?? false);
+  const [readRequired, setReadRequired] = useState<boolean>(doc?.freelancer_read_required ?? false);
   const canShare = SHAREABLE_CATEGORIES.includes(category);
   const [tags, setTags] = useState<string[]>(doc?.tags || []);
   const [ownerIds, setOwnerIds] = useState<string[]>(doc?.owner_user_ids || []);
@@ -205,6 +212,7 @@ export function DocFormModal({ doc, users, canPublish = true, tagSuggestions = [
         || escalate !== (doc!.escalate_after_days?.toString() || '')
         || review !== (doc!.review_interval_months?.toString() || '')
         || shareable !== (doc!.shareable_with_freelancers ?? false)
+        || readRequired !== (doc!.freelancer_read_required ?? false)
         || contentReview !== (doc!.content_review_interval_months?.toString() || '')
         || JSON.stringify(roles) !== JSON.stringify(doc!.target_roles || [])
         || JSON.stringify(userIds) !== JSON.stringify(doc!.target_user_ids || [])
@@ -228,6 +236,7 @@ export function DocFormModal({ doc, users, canPublish = true, tagSuggestions = [
         chase_interval_days: numOrNull(chase), escalate_after_days: numOrNull(escalate),
         review_interval_months: numOrNull(review),
         shareable_with_freelancers: canShare ? shareable : false,
+        freelancer_read_required: canShare && shareable ? readRequired : false,
         tags: tags.length ? tags : null,
         owner_user_ids: ownerIds.length ? ownerIds : null,
         content_review_interval_months: numOrNull(contentReview),
@@ -339,6 +348,19 @@ export function DocFormModal({ doc, users, canPublish = true, tagSuggestions = [
                 ? 'Freelancers will be able to read this. Fine for guides & general policies.'
                 : `“${category}” documents are internal only — switch to policy / training / other to allow sharing.`}
             </p>
+            {canShare && shareable && (
+              <div className="mt-2 pl-6">
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" checked={readRequired} onChange={(e) => setReadRequired(e.target.checked)} />
+                  Freelancers must confirm they&apos;ve read it
+                </label>
+                <p className="text-xs mt-1 text-gray-400">
+                  The portal shows it as &ldquo;To read&rdquo; until they tap &ldquo;I&apos;ve read and understood this&rdquo;,
+                  and you can see who has. A new version asks them all again. Nothing is blocked if they don&apos;t.
+                  Best for documents everyone needs (Working with Ooosh, Getting started, How to invoice).
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="rounded-md border border-gray-200 p-2.5 space-y-2">
@@ -465,6 +487,9 @@ export function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: 
         <div className="p-5 overflow-y-auto space-y-3">
           {err && <div className="p-3 rounded bg-red-50 text-red-700 text-sm">{err}</div>}
           <p className="text-xs text-amber-700 bg-amber-50 rounded p-2">Publishing a new version re-flags everyone who completed the previous one to review/re-sign. Edit the current text below.</p>
+          {doc.freelancer_read_required && (
+            <p className="text-xs text-amber-700 bg-amber-50 rounded p-2">Freelancers will be asked to read it again too: it shows as &ldquo;To read&rdquo; in their portal until they confirm the new version.</p>
+          )}
           {loadingRaw ? <div className="text-sm text-gray-500">Loading current version…</div>
             : <ContentEditor body={body} setBody={setBody} file={file} setFile={setFile} />}
           <label className="text-sm block">Change note
@@ -602,6 +627,77 @@ export function ViewModal({ doc, canReview, onApprove, onReject, onClose }: {
   );
 }
 
+// ── Which freelancers have read it ────────────────────────────────────────────
+// backend services/freelancer-document-reads.ts: approved freelancers with a
+// portal login, against the CURRENT version (a new version asks them again).
+interface FreelancerReaders {
+  version: number | null;
+  read: { personId: string; name: string; readAt: string }[];
+  notYet: { personId: string; name: string; lastLogin: string | null }[];
+}
+function FreelancerReadsModal({ doc, onClose }: { doc: DocRow; onClose: () => void }) {
+  const [data, setData] = useState<FreelancerReaders | null>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    api.get<{ data: FreelancerReaders }>(`/staff-documents/${doc.id}/freelancer-reads`)
+      .then((r) => setData(r.data))
+      .catch((e) => setErr(e instanceof Error ? e.message : 'Could not load.'));
+  }, [doc.id]);
+  const when = (iso: string | null) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  };
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b">
+          <h3 className="font-semibold text-gray-900">Freelancers who&apos;ve read it — {doc.title}</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-xl">×</button>
+        </div>
+        <div className="p-5 overflow-y-auto space-y-4">
+          {err && <div className="p-3 rounded bg-red-50 text-red-700 text-sm">{err}</div>}
+          {!data && !err && <div className="text-gray-500 text-sm">Loading…</div>}
+          {data && (
+            <>
+              <p className="text-xs text-gray-500">
+                Version {data.version ?? '—'}. Approved freelancers with a portal login. A tick means they tapped
+                &ldquo;I&apos;ve read and understood this&rdquo;; it&apos;s a record that they were given it.
+              </p>
+              <div>
+                <div className="text-sm font-medium text-gray-700 mb-1">Not read yet ({data.notYet.length})</div>
+                {data.notYet.length === 0 ? <div className="text-sm text-gray-400">Everyone has read it.</div> : (
+                  <ul className="divide-y divide-gray-100 border border-gray-100 rounded">
+                    {data.notYet.map((p) => (
+                      <li key={p.personId} className="px-3 py-1.5 text-sm flex justify-between gap-3">
+                        <span className="text-gray-800">{p.name}</span>
+                        <span className="text-xs text-gray-400">{p.lastLogin ? `last in the portal ${when(p.lastLogin)}` : 'not been in the portal'}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div>
+                <div className="text-sm font-medium text-gray-700 mb-1">Read ({data.read.length})</div>
+                {data.read.length === 0 ? <div className="text-sm text-gray-400">Nobody yet.</div> : (
+                  <ul className="divide-y divide-gray-100 border border-gray-100 rounded">
+                    {data.read.map((p) => (
+                      <li key={p.personId} className="px-3 py-1.5 text-sm flex justify-between gap-3">
+                        <span className="text-gray-800">{p.name}</span>
+                        <span className="text-xs text-green-700">✓ {when(p.readAt)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Share with Claude (admin only) ───────────────────────────────────────────
 // docs/AI-KNOWLEDGE-SPEC.md §4. Whatever is shared here is read by the Claude
 // that drafts client emails, for the topics ticked — so it is admin-only.
@@ -673,6 +769,7 @@ export default function StaffDocumentsAdminPage() {
   const [form, setForm] = useState<{ open: boolean; doc: DocRow | null }>({ open: false, doc: null });
   const [versionDoc, setVersionDoc] = useState<DocRow | null>(null);
   const [matrixDoc, setMatrixDoc] = useState<DocRow | null>(null);
+  const [readsDoc, setReadsDoc] = useState<DocRow | null>(null);
   const [viewDoc, setViewDoc] = useState<DocRow | null>(null);
   const [aiDoc, setAiDoc] = useState<DocRow | null>(null);
   const isAdmin = useAuthStore((st) => st.user?.role) === 'admin';
@@ -727,6 +824,15 @@ export default function StaffDocumentsAdminPage() {
   });
 
   const modeLabel: Record<Mode, string> = { read_only: 'Read only', tick: 'Tick', sign: 'Sign' };
+  /** The ⋯ menu on a row: the less frequent actions, Delete last. */
+  const rowActions = (d: DocRow): RecordAction[] => [
+    { label: 'Edit', onClick: () => setForm({ open: true, doc: d }) },
+    { label: 'New version', onClick: () => setVersionDoc(d) },
+    ...(d.completion_mode !== 'read_only' ? [{ label: "Who's done (staff)", onClick: () => setMatrixDoc(d) }] : []),
+    ...(d.freelancer_read_required ? [{ label: "Who's read it (freelancers)", onClick: () => setReadsDoc(d) }] : []),
+    ...(isAdmin ? [{ label: d.ai_shared ? 'Shared with Claude…' : 'Share with Claude…', onClick: () => setAiDoc(d) }] : []),
+    { label: 'Delete', onClick: () => del(d.id), danger: true },
+  ];
   const approvalPill = (s: ApprovalStatus) => s === 'draft' ? { t: 'Draft', c: 'bg-gray-100 text-gray-600' }
     : s === 'pending_approval' ? { t: 'Pending approval', c: 'bg-amber-100 text-amber-700' }
     : null;
@@ -793,31 +899,32 @@ export default function StaffDocumentsAdminPage() {
                   <td className="py-2 px-3 text-gray-600">{modeLabel[d.completion_mode]}</td>
                   <td className="py-2 px-3 text-gray-600 text-xs">{d.target_type.replace('_', ' ')}</td>
                   <td className="py-2 px-3 text-xs">
-                    {d.completion_mode === 'read_only' ? <span className="text-gray-400">—</span> : (
-                      <span>
+                    {/* The figures open who's done / who's read it (they used to be two more links on the right). */}
+                    {d.completion_mode === 'read_only' ? (!d.freelancer_read_required && <span className="text-gray-400">—</span>) : (
+                      <button onClick={() => setMatrixDoc(d)} title="Who's done" className="text-left hover:underline">
                         <span className="text-green-700">{d.completed_count}✓</span>{' '}
                         <span className="text-gray-500">{d.pending_count} pending</span>
                         {d.lapsed_count > 0 && <span className="text-amber-700"> · {d.lapsed_count} lapsed</span>}
-                      </span>
+                      </button>
+                    )}
+                    {d.freelancer_read_required && (
+                      <button onClick={() => setReadsDoc(d)} title="Which freelancers have read it" className="block text-left hover:underline mt-0.5">
+                        <span className="text-purple-700">Freelancers: {d.freelancer_read_count ?? 0} of {d.freelancer_audience_count ?? 0} read</span>
+                      </button>
                     )}
                   </td>
                   <td className="py-2 px-3 text-gray-500">{d.current_version ?? '—'}</td>
                   <td className="py-2 px-3 text-right whitespace-nowrap">
-                    <button onClick={() => setViewDoc(d)} className={`text-xs px-1 ${d.approval_status === 'pending_approval' ? 'text-green-700 font-medium hover:underline' : 'text-gray-600 hover:text-purple-700'}`}>
-                      {d.approval_status === 'pending_approval' ? 'Review' : 'View'}
-                    </button>
-                    <button onClick={() => setForm({ open: true, doc: d })} className="text-xs text-gray-600 hover:text-purple-700 px-1">Edit</button>
-                    <button onClick={() => setVersionDoc(d)} className="text-xs text-gray-600 hover:text-purple-700 px-1">New version</button>
-                    {isAdmin && (
-                      <button onClick={() => setAiDoc(d)} className="text-xs text-indigo-600 hover:text-indigo-800 px-1">Claude</button>
-                    )}
-                    {d.completion_mode !== 'read_only' && (
-                      <button onClick={() => setMatrixDoc(d)} className="text-xs text-gray-600 hover:text-purple-700 px-1">Who's done</button>
-                    )}
-                    {reviewDue(d) && (
-                      <button onClick={() => markReviewed(d.id)} className="text-xs text-amber-700 hover:text-amber-900 px-1">Mark reviewed</button>
-                    )}
-                    <button onClick={() => del(d.id)} className="text-xs text-red-500 hover:text-red-700 px-1">Delete</button>
+                    {/* View (or Review) and a due review stay out; the rest is under ⋯ (jon, Nov 2026). */}
+                    <div className="inline-flex items-center justify-end gap-1">
+                      <button onClick={() => setViewDoc(d)} className={`text-xs px-1 ${d.approval_status === 'pending_approval' ? 'text-green-700 font-medium hover:underline' : 'text-gray-600 hover:text-purple-700'}`}>
+                        {d.approval_status === 'pending_approval' ? 'Review' : 'View'}
+                      </button>
+                      {reviewDue(d) && (
+                        <button onClick={() => markReviewed(d.id)} className="text-xs text-amber-700 hover:text-amber-900 px-1">Mark reviewed</button>
+                      )}
+                      <RecordActionsMenu actions={rowActions(d)} floating />
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -835,6 +942,7 @@ export default function StaffDocumentsAdminPage() {
         onClose={() => setForm({ open: false, doc: null })} onSaved={() => { setForm({ open: false, doc: null }); load(); }} />}
       {versionDoc && <VersionModal doc={versionDoc} onClose={() => setVersionDoc(null)} onSaved={() => { setVersionDoc(null); load(); }} />}
       {matrixDoc && <MatrixModal doc={matrixDoc} onClose={() => setMatrixDoc(null)} />}
+      {readsDoc && <FreelancerReadsModal doc={readsDoc} onClose={() => setReadsDoc(null)} />}
       {aiDoc && <AiShareModal doc={aiDoc} onClose={() => setAiDoc(null)} onSaved={() => { setAiDoc(null); load(); }} />}
       {viewDoc && <ViewModal doc={viewDoc} canReview onApprove={() => approve(viewDoc.id)} onReject={() => reject(viewDoc.id)} onClose={() => setViewDoc(null)} />}
     </div>

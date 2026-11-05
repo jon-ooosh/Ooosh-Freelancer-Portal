@@ -22,7 +22,7 @@ import Link from 'next/link'
 import type { ReactNode } from 'react'
 import {
   RefreshCw, LogOut, Play, Lock, Speaker, Truck, Users, Mic, Wrench, Route,
-  ArrowLeftRight, TrainFront, Check, X,
+  ArrowLeftRight, TrainFront, Check, X, BookOpen,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { PortalDayBooking, DayBookingsResponse } from '@/lib/op-api'
@@ -621,6 +621,8 @@ export default function DashboardPage() {
   const [yardDays, setYardDays] = useState<PortalDayBooking[]>([])
   const [yardBusy, setYardBusy] = useState<string | null>(null)
   const [yardError, setYardError] = useState('')
+  // Documents we've asked them to read (OP services/freelancer-document-reads.ts).
+  const [toRead, setToRead] = useState<{ id: string; title: string }[]>([])
 
   // The remembered view, read after mount (no localStorage on the server).
   useEffect(() => { setSort(readStoredSort()) }, [])
@@ -675,6 +677,17 @@ export default function DashboardPage() {
     }
   }
 
+  /** Documents still to read: a reminder on every visit until each is confirmed. Never breaks the page. */
+  const fetchToRead = useCallback(async () => {
+    try {
+      const res = await fetch('/api/resources/unread')
+      const data = await res.json()
+      setToRead(res.ok && data.success ? (data.documents || []) : [])
+    } catch {
+      setToRead([])
+    }
+  }, [])
+
   /** The sitter's rostered shifts. Independent of the jobs fetch, like yard days. */
   const fetchShifts = useCallback(async () => {
     try {
@@ -720,12 +733,14 @@ export default function DashboardPage() {
     fetchJobs()
     fetchShifts()
     fetchYardDays()
-  }, [fetchJobs, fetchShifts, fetchYardDays])
+    fetchToRead()
+  }, [fetchJobs, fetchShifts, fetchYardDays, fetchToRead])
 
   const handleRefresh = () => {
     fetchJobs()
     fetchShifts()
     fetchYardDays()
+    fetchToRead()
   }
 
   const handleLogout = async () => {
@@ -902,6 +917,28 @@ export default function DashboardPage() {
               <YardOfferCard key={day.id} day={day} busy={yardBusy === day.id}
                 onAnswer={(r) => answerYardDay(day.id, r)} />
             ))}
+          </section>
+        )}
+
+        {/* Documents we've asked them to read: on every visit until confirmed. Never blocks anything. */}
+        {toRead.length > 0 && (
+          <section className="flex flex-col gap-2.5">
+            <SectionLabel tone="amber" count={toRead.length}>To read</SectionLabel>
+            <div className={`${cls.card} overflow-hidden flex flex-col`}>
+              {toRead.map((d, i) => (
+                <div key={d.id}>
+                  {i > 0 && <div className="h-px bg-hf-divider ml-[68px]" />}
+                  <Link href={`/resources/${d.id}`} className="min-h-[64px] px-4 py-2.5 flex items-center gap-3 hover:bg-hf-inset">
+                    <IconTile kind="backline"><BookOpen {...ICON} /></IconTile>
+                    <span className="flex-1 min-w-0 flex flex-col gap-0.5">
+                      <span className="text-[16px] font-semibold text-hf-ink">{d.title}</span>
+                      <span className="text-[14px] text-hf-muted">Please read it and let us know</span>
+                    </span>
+                    <Chevron />
+                  </Link>
+                </div>
+              ))}
+            </div>
           </section>
         )}
 

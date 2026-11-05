@@ -495,6 +495,10 @@ export interface PortalResource {
   fileName: string | null
   fileType: string | null
   url: string | null
+  /** Asks this freelancer to confirm they've read it (OP services/freelancer-document-reads.ts). */
+  readRequired?: boolean
+  /** When they confirmed the current version, or null. */
+  readAt?: string | null
 }
 
 export interface PortalResourcesResponse {
@@ -510,6 +514,8 @@ export interface PortalResourceDetail {
   fileName?: string | null
   fileType?: string | null
   url?: string | null
+  readRequired?: boolean
+  readAt?: string | null
 }
 
 // =============================================================================
@@ -575,6 +581,16 @@ export async function getEarningsFromOP(sessionToken: string, period?: string): 
 /** List approved, freelancer-shareable staff documents. */
 export async function getResourcesFromOP(sessionToken: string): Promise<PortalResourcesResponse> {
   return opFetch<PortalResourcesResponse>('/resources', sessionToken)
+}
+
+/** The documents this freelancer still has to read (the dashboard's reminder). */
+export async function getUnreadResourcesFromOP(sessionToken: string): Promise<{ documents: { id: string; title: string }[] }> {
+  return opFetch<{ documents: { id: string; title: string }[] }>('/resources/unread', sessionToken)
+}
+
+/** "I've read and understood this": recorded against the current version. */
+export async function markResourceReadInOP(sessionToken: string, id: string): Promise<{ success: boolean; readAt: string }> {
+  return opFetch<{ success: boolean; readAt: string }>(`/resources/${id}/read`, sessionToken, { method: 'POST', body: '{}' })
 }
 
 /** Fetch a single resource (markdown body, or a fresh presigned file url). */
