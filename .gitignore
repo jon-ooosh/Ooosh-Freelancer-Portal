@@ -20,6 +20,10 @@ dist/
 # copy of whatever was open, so on the server that means the production .env.
 # `.env` above is an exact-name match and does NOT cover `.env.save`.
 *.save
+# Hand-made backups of the .env (`.env.bak-20261022` sat untracked on the
+# server for two weeks, Nov 2026) — same risk: a `git add -A` commits secrets.
+.env.bak*
+*.env.bak*
 
 # Secrets / service-account credentials (NEVER commit these!)
 gmail-sa.json
