@@ -4,6 +4,7 @@ import { vehiclePrepPill } from '../lib/vehiclePrep';
 import { referralBadge } from '../lib/driverStatus';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { ENQUIRY_SOURCE_CHOICES, ENQUIRY_SOURCE_LABELS } from '../lib/enquirySource';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ActivityTimeline from '../components/ActivityTimeline';
 import JobProblemsPanel from '../components/JobProblemsPanel';
@@ -4221,6 +4222,27 @@ function JobDetailContent() {
                   )}
                   {job.likelihood ? (job.likelihood.charAt(0).toUpperCase() + job.likelihood.slice(1)) : 'Set likelihood'}
                 </button>
+
+                {/* How they got in touch — jobs made in HireHop arrive without it (docs/BUSINESS-FIGURES-SPEC.md) */}
+                <select
+                  value={job.enquiry_source || ''}
+                  onChange={async (e) => {
+                    try {
+                      await api.patch(`/pipeline/${job.id}`, { enquiry_source: e.target.value || null });
+                      await loadJob();
+                    } catch (err) {
+                      alert(err instanceof Error ? err.message : 'Could not save');
+                    }
+                  }}
+                  title="How did they get in touch?"
+                  className={`text-xs rounded-md border px-1.5 py-1 ${job.enquiry_source ? 'border-gray-200 text-gray-700' : 'border-amber-300 bg-amber-50 text-amber-800'}`}
+                >
+                  <option value="">How did they get in touch?</option>
+                  {ENQUIRY_SOURCE_CHOICES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  {job.enquiry_source && !ENQUIRY_SOURCE_CHOICES.some((o) => o.value === job.enquiry_source) && (
+                    <option value={job.enquiry_source}>{ENQUIRY_SOURCE_LABELS[job.enquiry_source] || job.enquiry_source}</option>
+                  )}
+                </select>
 
                 {/* Next Chase Date — opens full chase modal (hidden for lost/operational statuses) */}
                 {!isOperational && job.pipeline_status !== 'lost' && (
