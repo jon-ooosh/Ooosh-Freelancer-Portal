@@ -125,7 +125,7 @@ export default function LostCancelledPage() {
   // 'Outstanding close-out' defaults to true, so its presence isn't a sign
   // of an active user-set filter. Treat as active only when explicitly
   // unticked (URL param 'false').
-  const outstandingCloseoutChanged = searchParams.get('outstanding_closeout') === 'false';
+  const outstandingCloseoutChanged = tab === 'cancelled' && searchParams.get('outstanding_closeout') === 'false';
   const hasActiveFilters = filterLostReason || filterTier || filterManager || filterDateFrom
     || filterDateTo || filterValueBucket || filterNoticePeriod || outstandingCloseoutChanged || filterHideReopened;
 
@@ -159,7 +159,10 @@ export default function LostCancelledPage() {
       if (filterDateFrom) params.set('date_from', filterDateFrom);
       if (filterDateTo) params.set('date_to', filterDateTo);
       if (filterNoticePeriod) params.set('notice_period', filterNoticePeriod);
-      if (filterOutstandingCloseout) params.set('outstanding_closeout', 'true');
+      // Cancelled tab only — a lost enquiry never had a hire, so it has no
+      // close-out. Applying this default-on filter to the Lost tab hid every
+      // lost job whose cards had been swept (i.e. almost all of them).
+      if (tab === 'cancelled' && filterOutstandingCloseout) params.set('outstanding_closeout', 'true');
       if (filterHideReopened) params.set('hide_reopened', 'true');
 
       const valueB = VALUE_BUCKETS[filterValueBucket];
@@ -365,7 +368,8 @@ export default function LostCancelledPage() {
             ))}
           </select>
 
-          {/* Outstanding close-out — useful for both tabs */}
+          {/* Outstanding close-out — Cancelled tab only (lost enquiries have no close-out) */}
+          {tab === 'cancelled' && (
           <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer" title="Show only jobs with at least one open post-hire close-out item (refund pending, invoice not sent, etc.)">
             <input
               type="checkbox"
@@ -378,6 +382,7 @@ export default function LostCancelledPage() {
             />
             Outstanding close-out
           </label>
+          )}
 
           {/* Hide re-opened — Cancelled tab only */}
           {tab === 'cancelled' && (
