@@ -37,11 +37,17 @@ export default function ExcessLedgerPage() {
   // Action modal
   const [actionExcess, setActionExcess] = useState<JobExcess | null>(null);
 
+  // How much of the Ledger's Total Held is card holds (pre-auths) rather than cash.
+  const [heldSplit, setHeldSplit] = useState<{ total: number; holds: number; cash: number } | null>(null);
+
   const loadLedger = useCallback(async () => {
     setLoading(true);
     try {
       const data = await api.get<{ data: ClientExcessLedgerEntry[] }>('/excess/ledger');
       setLedger(data.data);
+      api.get<{ data: { total: number; holds: number; cash: number } }>('/excess/held-split')
+        .then((r) => setHeldSplit(r.data))
+        .catch(() => setHeldSplit(null));
     } catch (err) {
       console.error('Failed to load excess ledger:', err);
     } finally {
@@ -175,7 +181,12 @@ export default function ExcessLedgerPage() {
       {viewMode !== 'client-detail' && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-2">
-            <SummaryCard label="Total Held" value={`£${totalHeld.toFixed(2)}`} color="green" />
+            <SummaryCard
+              label="Total Held" value={`£${totalHeld.toFixed(2)}`} color="green"
+              sub={viewMode !== 'all' && heldSplit && heldSplit.holds > 0.005
+                ? `£${heldSplit.cash.toFixed(2)} cash + £${heldSplit.holds.toFixed(2)} card holds (pre-auths)`
+                : undefined}
+            />
             <SummaryCard label="Pending Collection" value={String(totalPending)} color="amber" />
             <SummaryCard label="Clients with Balance" value={String(totalClients)} color="blue" />
             <SummaryCard label="Rolled Over" value={String(totalRolledOver)} color="purple" />
@@ -348,7 +359,7 @@ export default function ExcessLedgerPage() {
 
 // ── Sub-components ──
 
-function SummaryCard({ label, value, color }: { label: string; value: string; color: string }) {
+function SummaryCard({ label, value, color, sub }: { label: string; value: string; color: string; sub?: string }) {
   const colorMap: Record<string, string> = {
     green: 'bg-green-50 border-green-200 text-green-800',
     amber: 'bg-amber-50 border-amber-200 text-amber-800',
@@ -360,6 +371,7 @@ function SummaryCard({ label, value, color }: { label: string; value: string; co
     <div className={`rounded-lg border p-4 ${colorMap[color] || colorMap.blue}`}>
       <p className="text-xs font-medium opacity-75">{label}</p>
       <p className="text-xl font-bold mt-1">{value}</p>
+      {sub && <p className="text-[11px] mt-1 opacity-80">{sub}</p>}
     </div>
   );
 }

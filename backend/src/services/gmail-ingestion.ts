@@ -432,6 +432,11 @@ export async function ingestGmailMessage(
   // Direction: SENT label → outbound (our reply), else inbound (client email).
   const direction = (msg.labelIds || []).includes('SENT') ? 'outbound' : 'inbound';
   const snippet = (msg.snippet || body).slice(0, 500);
+  // When it was actually sent / received (Gmail's internalDate, ms) — created_at /
+  // received_at are only when OP pulled it in. Read by the business figures
+  // (first reply times, docs/BUSINESS-FIGURES-SPEC.md).
+  const internalMs = Number(msg.internalDate);
+  const messageAt = Number.isFinite(internalMs) && internalMs > 0 ? new Date(internalMs).toISOString() : null;
 
   // Resolve the job: forced (backfill) or via the deterministic matcher (live),
   // with thread-anchoring on the live path. `matchMethod` / `matchConfidence` are
@@ -484,10 +489,10 @@ export async function ingestGmailMessage(
       `INSERT INTO interactions
          (type, content, job_id, created_by,
           gmail_message_id, gmail_thread_id, email_from, email_to, email_subject,
-          email_snippet, email_direction, has_attachments, match_method, match_confidence)
-       VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+          email_snippet, email_direction, has_attachments, match_method, match_confidence, message_at)
+       VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [body || snippet || '(no body)', jobId, SYSTEM_USER_ID, rfcMessageId, msg.threadId,
-       from, to, subject, snippet, direction, hasAttachments, matchMethod, matchConfidence],
+       from, to, subject, snippet, direction, hasAttachments, matchMethod, matchConfidence, messageAt],
     );
 
     // Chase auto-unenrol: a LIVE inbound client reply is engagement — push the
@@ -524,10 +529,10 @@ export async function ingestGmailMessage(
   await query(
     `INSERT INTO gmail_unmatched_inbound
        (mailbox, gmail_message_id, gmail_thread_id, email_from, email_to,
-        email_subject, email_snippet, has_attachments, received_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        email_subject, email_snippet, has_attachments, received_at, message_at, email_direction)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10)
      ON CONFLICT (gmail_message_id) DO NOTHING`,
-    [mailbox, rfcMessageId, msg.threadId, from, to, subject, snippet, hasAttachments],
+    [mailbox, rfcMessageId, msg.threadId, from, to, subject, snippet, hasAttachments, messageAt, direction],
   );
   return 'unmatched';
 }

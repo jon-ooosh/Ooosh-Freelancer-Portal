@@ -32,6 +32,10 @@ Full detail: `docs/reference/PIPELINE-AND-ORGS.md`, `docs/reference/OPERATIONS-M
 
 - **Dismissal is an OVERLAY FLAG, not a status.** `dismissed_at` is stamped; `pipeline_status` is deliberately untouched. **The test everywhere is `dismissed_at IS NOT NULL`, never a `pipeline_status` check.** Any surface deriving display or eligibility from `pipeline_status` alone must also check it, or it mislabels a dud as a live enquiry (global search did exactly this).
 
+## Lost outcomes
+
+- **`jobs.auto_lost` marks an enquiry the 09:00 sweep closed** (start date passed, nobody decided — migration 337). Its `lost_reason` is still 'No Decision', the label staff pick by hand, so **never read 'No Decision' as "the client said no"** — test `auto_lost`. A person marking it lost (OP route or HireHop Not interested) clears it and stamps `lost_at`. Business figures count it as "not followed up" (`docs/BUSINESS-FIGURES-SPEC.md`).
+
 ## Requirements
 
 - **Suspension markers must be filtered out of EVERY count / aggregate / pip.** Requirements carrying `[Suspended: …]` in `notes` sit at `status='blocked'` but are "not required on this job" (Van & Driver, internal jobs). Use the generic form `notes NOT LIKE '%[Suspended:%'`. Miss it and a V&D-only job looks like it has unresolved problems on whatever surface you're building.

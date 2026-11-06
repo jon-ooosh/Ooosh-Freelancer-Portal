@@ -60,6 +60,8 @@ interface OverviewData {
     balances_resolved_total: number; balances_resolved_count: number;
     deposits_pending_count: number;
     excess_held: number; excess_held_count: number;
+    /** Of excess_held, the part that is a card hold (pre-auth), not cash. */
+    excess_held_holds?: number;
     excess_held_upcoming: number; excess_held_upcoming_count: number;
     excess_held_past: number; excess_held_past_count: number;
     pending_refunds: number; pending_refunds_count: number;
@@ -885,6 +887,9 @@ export default function MoneyOverviewPage() {
           {' · '}
           <span className="text-amber-700 font-medium">{gbp(t.excess_held_past)} to return</span>
           {t.excess_held_past_count > 0 && <span className="text-gray-400"> ({t.excess_held_past_count})</span>}
+          {(t.excess_held_holds ?? 0) > 0.005 && (
+            <span className="block text-gray-500">incl. {gbp(t.excess_held_holds ?? 0)} card holds (pre-auths), not cash</span>
+          )}
         </>
       ),
     },
