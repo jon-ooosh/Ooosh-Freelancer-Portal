@@ -20,7 +20,7 @@ import { useVehicles } from '../hooks/useVehicles'
 import { useAllocations, useSaveAllocations } from '../hooks/useAllocations'
 import { useDriverHireForms } from '../hooks/useDriverHireForms'
 import { extractVanRequirements } from '../lib/hirehop-api'
-import { findMatchingVehicles, formatVanType, getVehicleGearboxLabel, vehicleNeedsPrepWarning } from '../lib/van-matching'
+import { findMatchingVehicles, formatVanType, getVehicleGearboxLabel, lacksRequestedTowbar, vehicleNeedsPrepWarning } from '../lib/van-matching'
 import { useAvailability, type UnavailableAssignment } from '../hooks/useAvailability'
 import type { HireHopJob, VanAllocation, VanRequirement } from '../types/hirehop'
 import type { Vehicle } from '../types/vehicle'
@@ -386,6 +386,7 @@ function JobAllocationCard({
                   className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-600"
                 >
                   {req.quantity > 1 ? `${req.quantity}x ` : ''}{formatVanType(req.simpleType, req.gearbox)}
+                  {req.needsTowbar ? ' + towbar' : ''}
                 </span>
               ))}
             </div>
@@ -700,6 +701,7 @@ function RequirementSlots({
     <div className="mt-3 first:mt-0">
       <p className="mb-1.5 text-xs font-medium text-gray-500">
         {slotsNeeded > 1 ? `${slotsNeeded}x ` : ''}{label}
+        {requirement.needsTowbar && <span className="ml-1 text-amber-700">· needs a towbar</span>}
       </p>
 
       {/* Show allocated slots */}
@@ -800,6 +802,16 @@ function RequirementSlots({
               </div>
             )}
 
+            {/* The client asked for a towbar and this van has none — a warning, never a block */}
+            {allocatedVehicle && lacksRequestedTowbar(allocatedVehicle, requirement) && (
+              <div className="mt-1.5 flex items-center gap-1 rounded bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700">
+                <svg className="h-3 w-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                No towbar on this van — the job asked for one
+              </div>
+            )}
+
             {/* Driver name — read-only display from linked hire form */}
             {allocation.driverName && (
               <div className="mt-2">
@@ -820,6 +832,7 @@ function RequirementSlots({
                   <VanPicker
                     vehicles={matchingVehicles}
                     held={heldVehicles}
+                    needsTowbar={requirement.needsTowbar}
                     onSelect={(vehicle) => linkVehicleToHireForm(allocation.id, vehicle)}
                     onCancel={() => setLinkPickerForId(null)}
                   />
@@ -853,6 +866,7 @@ function RequirementSlots({
                   <VanPicker
                     vehicles={matchingVehicles}
                     held={heldVehicles}
+                    needsTowbar={requirement.needsTowbar}
                     onSelect={(vehicle) => changeVanOnHireForm(allocation.id, vehicle)}
                     onCancel={() => setChangeVanForId(null)}
                   />
@@ -936,6 +950,7 @@ function RequirementSlots({
             <VanPicker
               vehicles={matchingVehicles}
               held={heldVehicles}
+              needsTowbar={requirement.needsTowbar}
               onSelect={(vehicle) => {
                 onAllocate(job, requirementIndex, vehicle, 'Staff')
                 setShowPicker(false)
@@ -976,11 +991,14 @@ function formatHoldPoint(date: string | null, time?: string | null): string | nu
 function VanPicker({
   vehicles,
   held = [],
+  needsTowbar = false,
   onSelect,
   onCancel,
 }: {
   vehicles: Vehicle[]
   held?: HeldVehicle[]
+  /** The slot asked for a towbar: vans without one get a "No towbar" tag. */
+  needsTowbar?: boolean
   onSelect: (vehicle: Vehicle) => void
   onCancel: () => void
 }) {
@@ -1052,6 +1070,11 @@ function VanPicker({
                   <div className="flex items-center gap-1.5">
                     <span className="font-mono text-sm font-bold text-ooosh-navy">{v.reg}</span>
                     <ForSalePill sale={openSales.get(v.id)} />
+                    {v.hasTowbar ? (
+                      <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">Towbar</span>
+                    ) : needsTowbar ? (
+                      <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">No towbar</span>
+                    ) : null}
                     {needsWarning && (
                       <svg className={`h-4 w-4 shrink-0 ${
                         isOnHire ? 'text-blue-500' : isNotReady ? 'text-red-500' : 'text-amber-500'

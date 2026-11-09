@@ -4,7 +4,7 @@
  * No API calls — just matching logic. Used by the AllocationsPage and BookOutPage.
  *
  * Gearbox is derived from the vehicleType field (e.g. "PREMIUM LWB (A)" = auto).
- * The simpleType field (Premium, Basic, Panel, Vito) doesn't include gearbox.
+ * The simpleType field (Premium, Standard, Basic, Panel, Vito) doesn't include gearbox.
  */
 
 import type { Vehicle } from '../types/vehicle'
@@ -16,7 +16,7 @@ import type { VanRequirement, VanAllocation } from '../types/hirehop'
  * the same strings). A blank `simple_type` matches nothing — which is why the
  * fleet UI must always offer a way to set it.
  */
-export const VAN_TYPES = ['Premium', 'Basic', 'Vito', 'Panel'] as const
+export const VAN_TYPES = ['Premium', 'Standard', 'Basic', 'Vito', 'Panel'] as const
 
 /**
  * Derive gearbox type from vehicleType string.
@@ -86,6 +86,22 @@ function getStatusPriority(status: string): number {
 }
 
 /**
+ * Towbar steer (jon, Nov 2026): a van that needs a towbar lists the towbar vans
+ * first; a van that doesn't lists them after the rest, so they stay free for a
+ * job that asks. Never hides a van — the picker shows a "No towbar" warning.
+ */
+function towbarRank(vehicle: Vehicle, requirement: VanRequirement): number {
+  const has = vehicle.hasTowbar === true
+  if (requirement.needsTowbar) return has ? 0 : 1
+  return has ? 1 : 0
+}
+
+/** The van was asked for with a towbar and this one has none. */
+export function lacksRequestedTowbar(vehicle: Vehicle, requirement: VanRequirement): boolean {
+  return requirement.needsTowbar === true && vehicle.hasTowbar !== true
+}
+
+/**
  * Check if a vehicle needs a prep warning — anything that's not "Available" (prepped & ready).
  */
 export function vehicleNeedsPrepWarning(vehicle: Vehicle): boolean {
@@ -114,6 +130,7 @@ export type UnavailableVehicleIds = Set<string>
  * - Matches the type + gearbox requirement
  *
  * Does NOT filter by hire status — the UI shows warnings for non-Available vehicles.
+ * Sorted by hire status, with the towbar steer (`towbarRank`).
  *
  * @param unavailableVehicleIds IDs of vehicles with an overlapping assignment
  *   on a different job. Pass an empty set to skip the overlap filter (e.g.
@@ -133,7 +150,16 @@ export function findMatchingVehicles(
       // Must match the requirement (type + gearbox)
       return vehicleMatchesRequirement(v, requirement)
     })
-    .sort((a, b) => getStatusPriority(a.hireStatus) - getStatusPriority(b.hireStatus))
+    .sort((a, b) => {
+      // A towbar job wants a towbar van before it wants a prepped one.
+      if (requirement.needsTowbar) {
+        const t = towbarRank(a, requirement) - towbarRank(b, requirement)
+        if (t !== 0) return t
+      }
+      const s = getStatusPriority(a.hireStatus) - getStatusPriority(b.hireStatus)
+      if (s !== 0) return s
+      return towbarRank(a, requirement) - towbarRank(b, requirement)
+    })
 }
 
 /**

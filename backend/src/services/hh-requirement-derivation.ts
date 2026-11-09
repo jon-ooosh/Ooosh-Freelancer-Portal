@@ -54,6 +54,13 @@ const AUTOPULL_SEAT_ROUND_TABLE = 2822;
 const AUTOPULL_SEAT_FORWARD_FACING = 2823;
 const SEAT_PARENT_LIST_ID = 1645; // "Rear seats:" stock item
 
+// "Towbar" (jon, Nov 2026): a VIRTUAL autopull in the Vehicles category, pulled
+// onto a van that needs one (every Standard MWB, optional on a Premium). It is
+// never a van — excluded by id as well as by VIRTUAL, so a change in how
+// HireHop reports VIRTUAL can't turn it into a phantom van with an excess and
+// a hire form. Frontend twin: HIREHOP_TOWBAR_ITEM_ID (modules/vehicles/types/hirehop.ts).
+export const TOWBAR_LIST_ID = 2064;
+
 // VE103B certificate — chargeable HH stock item (CATEGORY_ID 355 "Misc Sale Item",
 // £25 one-off). Its presence on a job is sales' signal that the vehicle is going
 // abroad and needs a VE103B. One cert per vehicle going abroad, so the line
@@ -96,6 +103,7 @@ export interface DerivedFlags {
   self_drive_count: number;           // Number of slots with mode='self_drive'
   van_and_driver_count: number;       // Number of slots with mode='van_and_driver'
   seat_config: 'round_table' | 'forward_facing' | null;
+  towbar_count: number;               // Towbar lines (2064) — vans that must have a towbar
   ve103b_required: boolean;           // VE103B cert item (1023) present on the job
   vans_going_abroad: number;          // Count of certs needed (= qty of item 1023)
   has_carnet: boolean;                // Carnet arrangement fee (575) present — we supply a carnet
@@ -131,6 +139,7 @@ export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {
     self_drive_count: 0,
     van_and_driver_count: 0,
     seat_config: null,
+    towbar_count: 0,
     ve103b_required: false,
     vans_going_abroad: 0,
     has_carnet: false,
@@ -150,7 +159,7 @@ export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {
     const prepMins = extractPrepTime(item);
 
     // ── Vehicles (category 370) ──
-    if (item.CATEGORY_ID === VEHICLE_CATEGORY && item.kind === 2 && !item.VIRTUAL) {
+    if (item.CATEGORY_ID === VEHICLE_CATEGORY && item.kind === 2 && !item.VIRTUAL && item.LIST_ID !== TOWBAR_LIST_ID) {
       const qty = Math.max(1, item.QUANTITY);
       flags.has_vehicle = true;
       flags.vehicle_count += qty;
@@ -170,6 +179,11 @@ export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {
         if (mode === 'self_drive') flags.self_drive_count++;
         else flags.van_and_driver_count++;
       }
+    }
+
+    // ── Towbar (autopull under a van) ──
+    if (item.LIST_ID === TOWBAR_LIST_ID && item.kind !== 0 && item.kind !== 3) {
+      flags.towbar_count += Math.max(1, item.QUANTITY);
     }
 
     // ── Seat configuration (prompt detection) ──
@@ -1404,6 +1418,10 @@ function buildVehicleNotes(flags: DerivedFlags): string {
     parts.push('Seats: Forward-facing');
   } else if (flags.seat_config === 'round_table') {
     parts.push('Seats: Round a table');
+  }
+
+  if (flags.towbar_count > 0) {
+    parts.push(flags.towbar_count === 1 ? 'Towbar needed' : `Towbar needed on ${flags.towbar_count} vans`);
   }
 
   if (flags.prep_time_by_category.vehicles > 0) {

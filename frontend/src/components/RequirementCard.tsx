@@ -71,6 +71,7 @@ export interface DerivedFlags {
   self_drive_count?: number;
   van_and_driver_count?: number;
   seat_config: 'round_table' | 'forward_facing' | null;
+  towbar_count?: number;  // Towbar lines on the job (HireHop item 2064)
   has_backline: boolean;
   backline_item_count: number;
   has_rehearsal: boolean;
@@ -531,6 +532,11 @@ export default function RequirementCard({
               {req.requirement_type === 'vehicle' && derivedFlags?.seat_config && (
                 <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${derivedFlags.seat_config === 'forward_facing' ? 'bg-amber-50 text-amber-700' : 'bg-green-50 text-green-700'}`}>
                   {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing' : '🔄 Round a table'}
+                </span>
+              )}
+              {req.requirement_type === 'vehicle' && (derivedFlags?.towbar_count ?? 0) > 0 && (
+                <span className="text-[11px] px-1.5 py-0.5 rounded font-medium bg-amber-50 text-amber-700">
+                  Towbar{derivedFlags!.towbar_count! > 1 ? ` ×${derivedFlags!.towbar_count}` : ''}
                 </span>
               )}
               {req.is_auto && req.source === 'hirehop_sync' && (

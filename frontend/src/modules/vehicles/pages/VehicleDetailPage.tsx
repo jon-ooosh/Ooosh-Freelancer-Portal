@@ -712,6 +712,8 @@ export function VehicleDetailPage() {
             displayMap={{ round_table: 'Round a Table', forward_facing: 'Forward Facing' }}
             onSave={v => saveField('seat_layout', v)} />
         )}
+        <EditableRow label="Towbar fitted" value={vehicle.hasTowbar === true} type="toggle"
+          onSave={v => saveField('has_towbar', v === true)} />
         <EditableRow label="Oil Type" value={vehicle.oilType} type="text" onSave={v => saveField('oil_type', v)} />
         <EditableRow label="Coolant Type" value={vehicle.coolantType} type="text" onSave={v => saveField('coolant_type', v)} />
         <EditableRow label="Tyre Size" value={vehicle.tyreSize} type="text" onSave={v => saveField('tyre_size', v)} />

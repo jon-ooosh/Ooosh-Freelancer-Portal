@@ -20,6 +20,7 @@ import {
   HIREHOP_STOCK_MAPPINGS,
   HIREHOP_VIRTUAL_ITEM_IDS,
   HIREHOP_STATUS_LABELS,
+  HIREHOP_TOWBAR_ITEM_ID,
 } from '../types/hirehop'
 
 import { apiFetch } from '../config/api-config'
@@ -122,7 +123,10 @@ async function fetchJobItems(jobId: number): Promise<HireHopJobItem[]> {
       // Only include real hire items (not headers, notes, or virtual placeholders)
       const kind = Number(item.kind ?? 2)
       if (kind === 0 || kind === 3) return null  // Skip headers and notes
-      if (isVirtual && categoryId !== VEHICLE_CATEGORY_ID) return null
+      const listId = Number(item.LIST_ID ?? 0) || undefined
+      // The Towbar is virtual; keep it whatever its category, it marks the van that needs one.
+      const isTowbar = (listId ?? itemId) === HIREHOP_TOWBAR_ITEM_ID
+      if (isVirtual && categoryId !== VEHICLE_CATEGORY_ID && !isTowbar) return null
 
       return {
         id: Number(item.ID ?? item.id ?? 0),
@@ -130,6 +134,9 @@ async function fetchJobItems(jobId: number): Promise<HireHopJobItem[]> {
         ITEM_NAME: String(item.NAME ?? item.title ?? item.ITEM_NAME ?? item.item_name ?? ''),
         QUANTITY: Number(item.QTY ?? item.qty ?? item.quantity ?? item.QUANTITY ?? 1),
         CATEGORY_ID: categoryId,
+        LIST_ID: listId,
+        LFT: Number(item.LFT ?? 0) || undefined,
+        RGT: Number(item.RGT ?? 0) || undefined,
       }
     })
     .filter((i): i is HireHopJobItem => i !== null)
@@ -648,9 +655,17 @@ const VEHICLE_CATEGORY_IDS = [369, 370, 371]
 export function extractVanRequirements(job: HireHopJob): VanRequirement[] {
   const requirements: VanRequirement[] = []
 
+  // Towbar lines (autopulls under a van). Each one marks the van line whose
+  // nested-set range it sits inside.
+  const towbars = job.items.filter(i => stockIdOf(i) === HIREHOP_TOWBAR_ITEM_ID)
+  const towbarPositionsKnown = towbars.every(t => t.LFT != null && t.RGT != null)
+
   for (const item of job.items) {
-    // Skip virtual items (damage charges, etc.)
-    if (HIREHOP_VIRTUAL_ITEM_IDS.includes(item.ITEM_ID)) continue
+    const stockId = stockIdOf(item)
+
+    // Skip virtual items (damage charges, etc.) and the Towbar, which is not a van
+    if (HIREHOP_VIRTUAL_ITEM_IDS.includes(stockId)) continue
+    if (stockId === HIREHOP_TOWBAR_ITEM_ID) continue
 
     // MUST be in a vehicle category (370 = actual vehicles) to be considered
     const categoryId = item.CATEGORY_ID ?? 0
@@ -659,39 +674,59 @@ export function extractVanRequirements(job: HireHopJob): VanRequirement[] {
     // Only count actual vehicles (category 370), not headers (369) or accessories (371)
     if (categoryId !== VEHICLE_CATEGORY_ID) continue
 
+    // When we can't tell which van a towbar belongs to, assume this one:
+    // a warning on a van that didn't need it beats a towbar job sent without one.
+    let needsTowbar = false
+    if (towbars.length > 0) {
+      if (!towbarPositionsKnown || item.LFT == null || item.RGT == null) needsTowbar = true
+      else needsTowbar = towbars.some(t => t.LFT! > item.LFT! && t.RGT! < item.RGT!)
+    }
+
     // Try known stock mapping first
-    const mapping = HIREHOP_STOCK_MAPPINGS.find(m => m.stockId === item.ITEM_ID)
+    const mapping = HIREHOP_STOCK_MAPPINGS.find(m => m.stockId === stockId)
     if (mapping) {
       requirements.push({
-        stockId: item.ITEM_ID,
+        stockId,
         simpleType: mapping.simpleType,
         gearbox: mapping.gearbox,
         quantity: item.QUANTITY,
+        needsTowbar,
       })
       continue
     }
 
-    // Fall back to name-based inference for unknown vehicle stock IDs
+    // Fall back to name-based inference for unknown vehicle stock IDs.
+    // "Standard MWB" must be tested before "mwb", or it reads as a Basic.
     const name = item.ITEM_NAME.toLowerCase()
     let simpleType = 'Premium'  // Default
     let gearbox: 'auto' | 'manual' = 'auto'
 
-    if (name.includes('basic') || name.includes('mwb')) simpleType = 'Basic'
+    if (name.includes('standard')) simpleType = 'Standard'
+    else if (name.includes('basic') || name.includes('mwb')) simpleType = 'Basic'
     else if (name.includes('vito')) simpleType = 'Vito'
     else if (name.includes('panel')) simpleType = 'Panel'
 
     if (name.includes('manual')) gearbox = 'manual'
 
-    console.warn(`[hirehop-api] Vehicle item ${item.ITEM_ID} ("${item.ITEM_NAME}") not in STOCK_MAPPINGS, inferred: ${simpleType} ${gearbox}`)
+    console.warn(`[hirehop-api] Vehicle item ${stockId} ("${item.ITEM_NAME}") not in STOCK_MAPPINGS, inferred: ${simpleType} ${gearbox}`)
     requirements.push({
-      stockId: item.ITEM_ID,
+      stockId,
       simpleType,
       gearbox,
       quantity: item.QUANTITY,
+      needsTowbar,
     })
   }
 
   return requirements
+}
+
+/**
+ * The HireHop STOCK id of a line. Live reads put it in ITEM_ID; OP's stored
+ * line items put the line's own id there and the stock id in LIST_ID.
+ */
+export function stockIdOf(item: HireHopJobItem): number {
+  return Number(item.LIST_ID) || item.ITEM_ID
 }
 
 // ── Mapping ──

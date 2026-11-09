@@ -508,7 +508,7 @@ function FleetFinanceTable({ vehicles }: { vehicles: Vehicle[] }) {
 }
 
 /** Simple type filter pills */
-const VEHICLE_TYPES = ['Premium', 'Basic', 'Panel', 'Vito']
+const VEHICLE_TYPES = ['Premium', 'Standard', 'Basic', 'Panel', 'Vito']
 
 export function VehiclesPage() {
   const [searchParams] = useSearchParams()

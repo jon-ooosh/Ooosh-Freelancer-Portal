@@ -6,6 +6,7 @@ import { Navigate, Link } from 'react-router-dom';
 import XeroBankAccountsSection from '../components/XeroBankAccountsSection';
 import { compressImage } from '../modules/vehicles/lib/image-utils';
 import { DOC_TYPES as STAFF_DOC_TYPES } from '../components/StaffRecordFiles';
+import { ukToday } from '../lib/ukDate';
 
 interface TeamUser {
   id: string;
@@ -101,6 +102,9 @@ function SettingsContent() {
 
       {/* Card reader (Stripe Terminal S700) — test/live switch + who may use it, admin only */}
       {currentUser?.role === 'admin' && <CardReaderSettingsSection />}
+
+      {/* Which HireHop price list new jobs use, and from when (PRICE-LIST-CHANGE.md) — admin only */}
+      {currentUser?.role === 'admin' && <HireHopPriceGroupSection />}
 
       {/* Login security & the warehouse kiosk (STAFF-LOGIN-SECURITY-SPEC) — admin only */}
       {currentUser?.role === 'admin' && <LoginAndKioskSettingsSection />}
@@ -1971,6 +1975,102 @@ function ShopSettingsSection() {
  * insured block printed on every broker PDF, and the four numbers behind the
  * estimated vehicle value (§6.6). Plain text boxes — each is one value.
  */
+/**
+ * HireHop prices (docs/PRICE-LIST-CHANGE.md): which price group (A/B/C) the jobs
+ * OP creates in HireHop are born on, and from which date. HireHop holds every
+ * price; this only picks the list. Jobs already created keep theirs. Admin only.
+ */
+function HireHopPriceGroupSection() {
+  const [group, setGroup] = useState('');
+  const [from, setFrom] = useState('');
+  const [orig, setOrig] = useState<{ group: string; from: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => { void load(); }, []);
+
+  async function load() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=hirehop');
+      const get = (k: string) => res.data.find(r => r.key === k)?.value ?? '';
+      const g = ['A', 'B', 'C'].includes(get('hh_price_group').trim().toUpperCase()) ? get('hh_price_group').trim().toUpperCase() : '';
+      const f = get('hh_price_group_from').trim();
+      setGroup(g); setFrom(f); setOrig({ group: g, from: f });
+    } catch {
+      setError('Could not load the HireHop price settings (has migration 338 run?).');
+    }
+  }
+
+  async function save() {
+    setError(''); setSuccess('');
+    if (from && !/^\d{4}-\d{2}-\d{2}$/.test(from)) { setError('The date must be YYYY-MM-DD, or empty.'); return; }
+    setSaving(true);
+    try {
+      await api.put('/system-settings', { settings: { hh_price_group: group, hh_price_group_from: from } });
+      setSuccess('Saved. It applies to jobs created in HireHop from now on.');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally { setSaving(false); }
+  }
+
+  if (!orig) return error ? <div className="mb-6 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div> : null;
+  const changed = group !== orig.group || from !== orig.from;
+  const live = orig.group && (!orig.from || ukToday() >= orig.from);
+  const status = !orig.group
+    ? 'Now: OP sends no price group, so HireHop uses Price A.'
+    : live
+      ? `Now: new jobs are created on Price ${orig.group}.`
+      : `Now: Price A (HireHop's default). From ${orig.from}, new jobs are created on Price ${orig.group}.`;
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">HireHop prices</h2>
+      <p className="text-sm text-gray-600 mb-1">
+        Which of HireHop&apos;s price lists (Price A, B or C) the jobs OP creates use, and from when. HireHop holds
+        the prices; this only picks the list. Jobs already created keep the prices on their lines, and a quote
+        option or Re-open copies its source job&apos;s list.
+      </p>
+      <p className="text-sm text-gray-800 mb-4 font-medium">{status}</p>
+
+      {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
+
+      <div className="space-y-3">
+        <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+          <label htmlFor="hh_price_group" className="text-sm text-gray-700">
+            Price list for new jobs
+            <span className="block text-xs text-gray-400 font-mono">hh_price_group</span>
+          </label>
+          <select id="hh_price_group" value={group} onChange={e => setGroup(e.target.value)}
+            className="px-2 py-1.5 rounded border border-gray-300 text-sm max-w-xs">
+            <option value="">HireHop&apos;s default (A)</option>
+            <option value="A">Price A</option>
+            <option value="B">Price B</option>
+            <option value="C">Price C</option>
+          </select>
+        </div>
+        <div className="grid sm:grid-cols-[18rem_minmax(0,1fr)] gap-2 sm:items-center">
+          <label htmlFor="hh_price_group_from" className="text-sm text-gray-700">
+            From (UK date; empty = straight away)
+            <span className="block text-xs text-gray-400 font-mono">hh_price_group_from</span>
+          </label>
+          <input id="hh_price_group_from" type="date" value={from} onChange={e => setFrom(e.target.value)}
+            className="px-2 py-1.5 rounded border border-gray-300 text-sm max-w-xs" />
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <button onClick={() => void save()} disabled={saving || !changed}
+          className="px-4 py-2 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Card reader (docs/STRIPE-TERMINAL-SPEC.md §11): test or live, and which roles see
  * "Card reader" on Record Payment. Admin only — it decides whether real cards are charged.
