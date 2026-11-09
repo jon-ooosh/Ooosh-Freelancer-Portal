@@ -185,7 +185,7 @@ router.post('/:token/send-to-driver', writeLimiter, withLink(true, async (req, r
   }
   const result = await createAndSendLink({
     claimId: link.claim_id, name: d.name, email: d.email, driverId: d.id, role: 'driver', createdBy: null,
-    forwardedByName: link.filled_by_name || link.recipient_name || null,
+    forwardedByName: link.filled_by_name || link.recipient_name || null, purpose: 'driver_part',
   });
   if (!result.sent) { res.status(502).json({ error: 'We could not send the email — please try again shortly.' }); return; }
   await logClaimEvent(link.claim_id, null, 'sent_to_driver', `Driver's part sent to ${d.name} by ${link.filled_by_name || link.recipient_name || 'a recipient'}`);

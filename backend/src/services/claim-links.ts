@@ -102,6 +102,8 @@ export async function createAndSendLink(opts: {
   handedOffFrom?: string | null;
   createdBy: string | null;
   forwardedByName?: string | null;
+  /** 'driver_part': a non-driver asked the driver to sign — the email asks for the declaration only. */
+  purpose?: 'form' | 'driver_part';
 }): Promise<{ linkId: string; reused: boolean; sent: boolean; error?: string }> {
   const email = opts.email.trim().toLowerCase();
   const existing = await query(
@@ -129,7 +131,7 @@ export async function createAndSendLink(opts: {
     linkId = ins.rows[0].id;
   }
 
-  const sent = await sendLinkEmail(opts.claimId, token, email, opts.name, opts.forwardedByName ?? null);
+  const sent = await sendLinkEmail(opts.claimId, token, email, opts.name, opts.forwardedByName ?? null, opts.purpose ?? 'form');
   if (sent.success) {
     await query(`UPDATE incident_claim_links SET sent_at = NOW() WHERE id = $1`, [linkId]);
     // First send only (a resend is email-only): a text too, when we have their mobile (§21).
@@ -203,6 +205,7 @@ export async function sendLinkEmail(
   email: string,
   name: string | null,
   forwardedByName: string | null,
+  purpose: 'form' | 'driver_part' = 'form',
 ): Promise<{ success: boolean; error?: string }> {
   const c = await query(`SELECT vehicle_reg, hh_job_number FROM incident_claims WHERE id = $1`, [claimId]);
   const reg = c.rows[0]?.vehicle_reg || 'our van';
@@ -210,6 +213,28 @@ export async function sendLinkEmail(
   const url = frontendLink(`/claim/${token}`);
   const hi = name?.trim() ? name.trim().split(/\s+/)[0] : 'there';
   const { emailService } = await import('./email-service');
+  if (purpose === 'driver_part') {
+    // Someone else has filled the form in; the driver only has to sign. The link opens on
+    // the declaration (?part=driver), and the page emails the code to this same address.
+    const result = await emailService.sendRaw({
+      to: email,
+      subject: `Your signature needed — incident report, ${reg}${hh ? ` (#${hh})` : ''}`,
+      variant: 'client',
+      html: `
+      <p>Hi ${escapeHtml(hi)},</p>
+      <p>${forwardedByName ? escapeHtml(forwardedByName) : 'Someone from your team'} has filled in our incident form about our van
+      <strong>${escapeHtml(reg)}</strong>${hh ? ` (job #${hh})` : ''}. As the driver, we just need you to complete and sign
+      the driver declaration — it only takes a couple of minutes.</p>
+      <p style="margin: 24px 0;">
+        <a href="${url}?part=driver" style="background:#7B5EA7;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none;font-weight:600;">Sign the driver declaration</a>
+      </p>
+      <p>To check it's you, the form will email a 6-digit code to this address. Once you've signed you'll be back on the
+      checklist — if every part is ticked, press <strong>Send to Ooosh</strong>.</p>
+      <p><strong>Please don't admit liability to anyone</strong>, and send us any letters you receive about the incident rather than replying to them.</p>
+      <p>Thanks,<br>Ooosh! Tours</p>`,
+    });
+    return { success: result.success, error: result.success ? undefined : (result.error || 'Email failed') };
+  }
   const result = await emailService.sendRaw({
     to: email,
     subject: `Incident report — ${reg}${hh ? ` (#${hh})` : ''}`,

@@ -78,7 +78,10 @@ export default function ClaimFormPage() {
   const { token = '' } = useParams<{ token: string }>();
   const [data, setData] = useState<FormState | null>(null);
   const [notFound, setNotFound] = useState('');
-  const [view, setView] = useState<string>('home');
+  // ?part=driver (the "sign the driver declaration" email) opens straight on the declaration.
+  const [view, setView] = useState<string>(() => {
+    try { return new URLSearchParams(window.location.search).get('part') === 'driver' ? 'driver' : 'home'; } catch { return 'home'; }
+  });
   const [submitted, setSubmitted] = useState(false);
   const [forwarded, setForwarded] = useState('');
   const [session, setSession] = useState<string | null>(() => {
