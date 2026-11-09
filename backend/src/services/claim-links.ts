@@ -136,7 +136,8 @@ export async function createAndSendLink(opts: {
     await query(`UPDATE incident_claim_links SET sent_at = NOW() WHERE id = $1`, [linkId]);
     // First send only (a resend is email-only): a text too, when we have their mobile (§21).
     if (!reused) {
-      await sendLinkSms(opts.claimId, token, { driverId: opts.driverId ?? null, personId: opts.personId ?? null, name: opts.name }, 'claim_form_link');
+      await sendLinkSms(opts.claimId, token, { driverId: opts.driverId ?? null, personId: opts.personId ?? null, name: opts.name },
+        opts.purpose === 'driver_part' ? 'claim_form_driver_part' : 'claim_form_link');
     }
   }
   return { linkId, reused, sent: sent.success, error: sent.error };
@@ -171,7 +172,7 @@ export async function sendLinkSms(
   claimId: string,
   token: string,
   who: { driverId: string | null; personId: string | null; name: string | null },
-  template: 'claim_form_link' | 'claim_form_reminder',
+  template: 'claim_form_link' | 'claim_form_reminder' | 'claim_form_driver_part',
   extra: Record<string, string> = {},
 ): Promise<boolean> {
   try {
@@ -184,13 +185,13 @@ export async function sendLinkSms(
       variables: {
         vehicleReg: c.rows[0]?.vehicle_reg || '',
         jobRef: c.rows[0]?.hh_job_number ? ` (#${c.rows[0].hh_job_number})` : '',
-        formUrl: frontendLink(`/claim/${token}`),
+        formUrl: frontendLink(`/claim/${token}${template === 'claim_form_driver_part' ? '?part=driver' : ''}`),
         ...extra,
       },
     });
     if (r.success) {
       await logClaimEvent(claimId, null, 'sms_sent',
-        `${template === 'claim_form_link' ? 'Form link' : 'Reminder'} texted to ${who.name || 'the recipient'}`);
+        `${template === 'claim_form_link' ? 'Form link' : template === 'claim_form_driver_part' ? "Driver's part" : 'Reminder'} texted to ${who.name || 'the recipient'}`);
     }
     return r.success;
   } catch (err) {
