@@ -26,6 +26,14 @@ const templates: Record<string, SmsTemplate> = {
       `Ooosh! Tours: please fill in our incident form for van {{vehicleReg}}{{jobRef}}: {{formUrl}}`,
   },
 
+  // Someone else filled the form in and sent the driver their part (sign the
+  // declaration). The link opens on the declaration (?part=driver). GSM only;
+  // with the longer link this is usually two segments.
+  claim_form_driver_part: {
+    body:
+      `Ooosh! Tours: as the driver, please sign your part of our incident form for van {{vehicleReg}}{{jobRef}}: {{formUrl}}`,
+  },
+
   // Sent alongside the 3rd email reminder (services/claim-chase.ts).
   claim_form_reminder: {
     body:

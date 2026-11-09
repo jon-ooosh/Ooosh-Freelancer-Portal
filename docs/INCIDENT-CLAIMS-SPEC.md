@@ -795,6 +795,9 @@ Decided with jon before the build: GPS and SMS yes; **video and retention flaggi
 - Templates `claim_form_link` and `claim_form_reminder` in `sms-templates.ts` — one 160-character
   segment with the link. Production runs `SMS_MODE=live`, so they went live on deploy (Oct 2026). In
   `SMS_MODE=test` they'd go to the test number unless listed in `SMS_LIVE_TEMPLATES`.
+- `claim_form_driver_part` (Nov 2026, job 16169): when a non-driver sends the driver their part, the
+  first text asks only for the signature and links to `?part=driver` (usually two segments). Same
+  first-send-only rule; a link the driver already had is re-emailed, not texted.
 - Only to people we have a mobile for: a driver's from their hire form, a job contact's from the
   address book (mobile, else international, else phone). Someone a client forwarded the form to has
   only an email, so gets emails only. A resend is email-only.
