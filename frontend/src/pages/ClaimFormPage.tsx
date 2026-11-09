@@ -31,6 +31,7 @@ interface FormState {
   hh_job_number: number | null;
   job_name: string | null;
   recipient_name: string | null;
+  link_driver_id: string | null;
   filled_as: 'driver' | 'witness' | null;
   filled_by_name: string | null;
   form: Record<string, unknown>;
@@ -315,13 +316,16 @@ function WhoSection({ token, data, session, onSession, onForwarded, onDone }: {
 }
 
 /** Pick your name → code emailed to the address on your hire form → enter it. */
-function DriverCodeFlow({ token, drivers, session, onVerified }: {
+function DriverCodeFlow({ token, drivers, session, onVerified, preselectId }: {
   token: string;
   drivers: FormState['drivers'];
   session: string | null;
   onVerified: (session: string, driverName: string) => Promise<void> | void;
+  preselectId?: string | null;
 }) {
-  const [driverId, setDriverId] = useState(drivers.length === 1 ? drivers[0].id : '');
+  const [driverId, setDriverId] = useState(
+    preselectId && drivers.some((d) => d.id === preselectId) ? preselectId : drivers.length === 1 ? drivers[0].id : '',
+  );
   const [sentTo, setSentTo] = useState('');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -554,7 +558,13 @@ function DriverSection({ token, data, session, onSession, onDone }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [sentToDriver, setSentToDriver] = useState('');
-  const [iAmDriver, setIAmDriver] = useState(data.filled_as === 'driver');
+  // The driver this link was sent to (if they're on the van) is asked for the code first —
+  // whoever filled the rest in. Otherwise "Send to <them>" re-sent them this same link,
+  // and they came back to this page in a loop (job 16169, Nov 2026).
+  const linkDriver = data.drivers.find((d) => d.id === data.link_driver_id) || null;
+  const [codeFor, setCodeFor] = useState<string | null>(linkDriver?.id ?? null);
+  const [alreadyTheirs, setAlreadyTheirs] = useState('');
+  const [iAmDriver, setIAmDriver] = useState(data.filled_as === 'driver' || !!linkDriver);
 
   useEffect(() => {
     if (!session) return;
@@ -591,7 +601,20 @@ function DriverSection({ token, data, session, onSession, onDone }: {
         <h2 className="text-xl font-semibold text-slate-800">Driver declaration</h2>
         <p className="text-slate-600">This part has to be completed and signed by the person who was driving.</p>
         {iAmDriver ? (
-          <DriverCodeFlow token={token} drivers={data.drivers} session={session} onVerified={(s) => onSession(s)} />
+          <>
+            {alreadyTheirs ? (
+              <p className="text-sm text-slate-700 rounded-xl border border-purple-200 bg-purple-50 p-3">
+                This form link is already {alreadyTheirs}&apos;s, so there&apos;s nothing to email.
+                {' '}{alreadyTheirs} just needs to confirm it&apos;s them with a code, below.
+              </p>
+            ) : linkDriver ? (
+              <p className="text-sm text-slate-600">This link was sent to {linkDriver.name}. If that&apos;s you, confirm with a code below.</p>
+            ) : null}
+            <DriverCodeFlow token={token} drivers={data.drivers} session={session} onVerified={(s) => onSession(s)} preselectId={codeFor} />
+            <button type="button" onClick={() => { setIAmDriver(false); setAlreadyTheirs(''); }} className="text-sm text-[#7B5EA7] underline">
+              I wasn&apos;t driving — send it to the driver instead
+            </button>
+          </>
         ) : sentToDriver ? (
           <p className="text-green-700">✓ We&apos;ve emailed {sentToDriver} a link to do their part.</p>
         ) : (
@@ -606,8 +629,15 @@ function DriverSection({ token, data, session, onSession, onDone }: {
                   onClick={async () => {
                     setBusy(true); setError('');
                     try {
-                      const r = await post<{ data: { name: string } }>(`${API}/${token}/send-to-driver`, { driver_id: d.id });
-                      setSentToDriver(r.data.name);
+                      const r = await post<{ data: { name: string; already_theirs?: boolean } }>(`${API}/${token}/send-to-driver`, { driver_id: d.id });
+                      if (r.data.already_theirs) {
+                        // This link is theirs already — ask them for the code here instead.
+                        setAlreadyTheirs(r.data.name);
+                        setCodeFor(d.id);
+                        setIAmDriver(true);
+                      } else {
+                        setSentToDriver(r.data.name);
+                      }
                     } catch (e) { setError(errText(e)); } finally { setBusy(false); }
                   }}
                   className={secondary}

@@ -106,6 +106,8 @@ router.get('/:token', readLimiter, withLink(false, async (_req, res, link) => {
       hh_job_number: link.hh_job_number,
       job_name: row.job_name,
       recipient_name: link.recipient_name,
+      // The driver this link was sent to (if any) — the declaration offers them the code first.
+      link_driver_id: link.driver_id,
       filled_as: link.filled_as,
       filled_by_name: link.filled_by_name,
       form: clientForm,
@@ -175,6 +177,12 @@ router.post('/:token/send-to-driver', writeLimiter, withLink(true, async (req, r
   const d = (await driversOnVan(link)).find((x) => x.id === driverId);
   if (!d) { res.status(404).json({ error: 'That driver is not on this van.' }); return; }
   if (!d.email) { res.status(409).json({ error: "We don't have an email for that driver — please let us know how to reach them." }); return; }
+  // This link already IS theirs — createAndSendLink would just re-send it, and they'd land
+  // back here in a loop (job 16169, Nov 2026). The page asks them for the code instead.
+  if (link.recipient_email && d.email.trim().toLowerCase() === link.recipient_email.trim().toLowerCase()) {
+    res.json({ data: { ok: true, already_theirs: true, name: d.name } });
+    return;
+  }
   const result = await createAndSendLink({
     claimId: link.claim_id, name: d.name, email: d.email, driverId: d.id, role: 'driver', createdBy: null,
     forwardedByName: link.filled_by_name || link.recipient_name || null,
