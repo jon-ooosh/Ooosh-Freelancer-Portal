@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { EvidenceGroup, type EvidenceGroupSpec, type EvidenceFile } from '../components/drivers/EvidenceGroup';
+import { EvidenceGroup, filesForSlot, type EvidenceGroupSpec, type EvidenceFile } from '../components/drivers/EvidenceGroup';
 import { DocumentThumb } from '../components/drivers/DocumentThumb';
+import { AcceptIdentityModal, type IdentityFieldKey } from '../components/drivers/AcceptIdentityModal';
 import { StageTracker, WhatNeedsDoing, type DriverVerificationState, type VerificationAction } from '../components/drivers/VerificationCockpit';
 import { deriveDriverStatus, isNiLicence } from '../lib/driverStatus';
 import { hasManagerRole, roleAllowed } from '../lib/roles';
@@ -282,6 +283,13 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState<'accepted' | 'rejected' | null>(null);
   const [error, setError] = useState('');
+  // Accepting asks for the licence details (AcceptIdentityModal); changing a
+  // decision already made opens that, or a reason box to reject after all.
+  const [acceptMode, setAcceptMode] = useState<'accept' | 'reverse' | null>(null);
+  const [changing, setChanging] = useState(false);
+  const [notice, setNotice] = useState('');
+  const user = useAuthStore((s) => s.user);
+  const isManager = hasManagerRole(user?.role);
 
   const status = driver.identity_check_status;
   if (!status) return null;
@@ -312,13 +320,44 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
     .filter((x): x is { label: string; file: FileAttachment } => !!x.file);
   const hasReviewDocument = reviewImages.some(x => x.label !== 'Selfie');
 
+  // What the modal shows to copy from: this check's images, else the record's.
+  const identityGroup = buildEvidenceGroups(driver).find(g => g.key === 'identity');
+  const recordImages = (identityGroup?.slots || []).flatMap((slot) => {
+    const files = filesForSlot((driver.files || []) as EvidenceFile[], slot);
+    if (files.length === 0) return [];
+    const newest = files.reduce((a, b) =>
+      new Date(a.uploaded_at || 0) > new Date(b.uploaded_at || 0) ? a : b);
+    return [{ label: slot.label, url: newest.url, name: newest.name }];
+  });
+  const modalImages = hasReviewDocument
+    ? reviewImages.map(({ label, file }) => ({ label, url: file.url, name: file.name }))
+    : recordImages;
+  const initialDetails: Record<IdentityFieldKey, string> = {
+    full_name: driver.full_name || '',
+    date_of_birth: toInputDate(driver.date_of_birth),
+    nationality: driver.nationality || '',
+    licence_number: driver.licence_number || '',
+    licence_issued_by: driver.licence_issued_by || '',
+    licence_issue_country: driver.licence_issue_country || '',
+    licence_valid_from: toInputDate(driver.licence_valid_from),
+    licence_valid_to: toInputDate(driver.licence_valid_to),
+    licence_address: driver.licence_address || '',
+    idenfy_check_date: toInputDate(driver.idenfy_check_date),
+  };
+
+  async function refresh() {
+    const refreshed = await api.get<{ data: DriverDetail }>(`/drivers/${driver.id}`);
+    onDriverUpdate(refreshed.data);
+  }
+
   async function resolve(outcome: 'accepted' | 'rejected') {
     setBusy(outcome);
     setError('');
     try {
       await api.post(`/drivers/${driver.id}/resolve-identity`, { outcome, notes });
-      const refreshed = await api.get<{ data: DriverDetail }>(`/drivers/${driver.id}`);
-      onDriverUpdate(refreshed.data);
+      setChanging(false);
+      setNotes('');
+      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save that — please try again.');
     } finally {
@@ -408,13 +447,86 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
         </p>
       )}
 
+      {notice && <p className="mt-2 text-sm text-amber-800">{notice}</p>}
+
+      {/* Changing a decision already made. Reversing a REJECTION is managers
+          only (a rejection can be for fraud); un-accepting is anyone's. */}
+      {status === 'rejected' && (
+        isManager ? (
+          <button
+            type="button"
+            onClick={() => setAcceptMode('reverse')}
+            className="mt-3 text-sm font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline"
+          >
+            Change this decision &mdash; accept after all
+          </button>
+        ) : (
+          <p className="mt-3 text-xs text-gray-500">Only a manager can change a rejected ID check.</p>
+        )
+      )}
+      {status === 'accepted' && !changing && (
+        <button
+          type="button"
+          onClick={() => { setChanging(true); setError(''); }}
+          className="mt-3 text-sm font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline"
+        >
+          Change this decision
+        </button>
+      )}
+      {status === 'accepted' && changing && (
+        <div className="mt-3">
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={2}
+            placeholder="Why is this being rejected after all? (required)"
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm mb-2 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          />
+          {error && <p className="text-sm text-red-600 mb-2">{error}</p>}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy !== null || !notes.trim()}
+              onClick={() => resolve('rejected')}
+              className="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium disabled:opacity-50"
+            >
+              {busy === 'rejected' ? 'Saving\u2026' : '\u2715 Reject after all'}
+            </button>
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => { setChanging(false); setNotes(''); setError(''); }}
+              className="px-3 py-2 rounded-lg text-sm text-gray-700 hover:bg-white/60"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {acceptMode && (
+        <AcceptIdentityModal
+          driverId={driver.id}
+          mode={acceptMode}
+          initial={initialDetails}
+          fullLicence={(driver.licence_type || '').toLowerCase() === 'full'}
+          images={modalImages}
+          onClose={() => setAcceptMode(null)}
+          onDone={(raised) => {
+            setAcceptMode(null);
+            setNotice(raised ? `Accepted. ${raised} \u2014 an insurer referral has been raised.` : '');
+            refresh().catch(() => { /* the page's own Refresh will catch up */ });
+          }}
+        />
+      )}
+
       {status === 'needs_review' && (
         <>
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
             rows={2}
-            placeholder="Notes (optional) — e.g. spoke to driver, licence photo is 9 years old"
+            placeholder="Notes for a rejection (optional) — e.g. the face in the selfie isn't the licence holder"
             className="w-full rounded border border-gray-300 px-3 py-2 text-sm mb-3 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
           />
           {error && <p className="text-sm text-red-600 mb-2">{error}</p>}
@@ -422,10 +534,10 @@ function IdentityReviewPanel({ driver, onDriverUpdate }: {
             <button
               type="button"
               disabled={busy !== null}
-              onClick={() => resolve('accepted')}
+              onClick={() => setAcceptMode('accept')}
               className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium disabled:opacity-50"
             >
-              {busy === 'accepted' ? 'Saving…' : '✓ It&rsquo;s them — accept'}
+              {'\u2713 It\u2019s them \u2014 accept'}
             </button>
             <button
               type="button"
