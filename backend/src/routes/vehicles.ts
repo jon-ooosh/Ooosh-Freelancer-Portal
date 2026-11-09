@@ -1275,6 +1275,8 @@ const FLEET_FIELD_MAP: Record<string, string> = {
   rossetts_applicable: 'rossetts_applicable', rossettsApplicable: 'rossetts_applicable',
   // Seat layout (migration 041)
   seat_layout: 'seat_layout', seatLayout: 'seat_layout',
+  // Towbar fitted (migration 338) — steers towbar jobs at allocation
+  has_towbar: 'has_towbar', hasTowbar: 'has_towbar',
 };
 
 /** Coerce a request value for its target DB column (uppercase reg, stringify jsonb). */
@@ -7791,6 +7793,7 @@ function mapDbRowToVehicle(row: Record<string, unknown>, opts: { includeFinance?
     servicePlanStatus: row.service_plan_status as string | null,
     rossettsApplicable: row.rossetts_applicable === true,
     seatLayout: row.seat_layout as string | null,
+    hasTowbar: row.has_towbar === true,
     notes: (row.notes as string | null) ?? null,
     setupChecklist: Array.isArray(row.setup_checklist) ? row.setup_checklist : [],
     files,

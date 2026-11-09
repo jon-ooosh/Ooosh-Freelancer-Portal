@@ -3173,6 +3173,16 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     if (job.company_name) hhBody.company = job.company_name;
     if (venueName) hhBody.venue = venueName;
 
+    // The price list (A/B/C) new jobs are born on — the yearly price change
+    // (services/hh-price-group.ts, docs/PRICE-LIST-CHANGE.md). Never blocks a create.
+    try {
+      const { priceGroupForNewJob } = await import('../services/hh-price-group');
+      const priceGroup = await priceGroupForNewJob();
+      if (priceGroup !== null) hhBody.price_group = priceGroup;
+    } catch (err) {
+      console.error('[Pipeline] Could not read the HireHop price group setting — HireHop default used:', err);
+    }
+
     // Include contact fields in job creation — save_job.php may populate the auto-created contact
     // Primary per-job contact's email/phone wins over the org's when set.
     const initialEmail = primaryContact?.email || orgDetails?.email;
@@ -3203,6 +3213,7 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     console.log('[Pipeline] Creating job in HireHop:', {
       out: hhBody.out, start: hhBody.start, end: hhBody.end, to: hhBody.to,
       duration_days: hhBody.duration_days, duration_hrs: hhBody.duration_hrs,
+      price_group: hhBody.price_group,
     });
 
     // POST to HireHop via broker

@@ -6,7 +6,7 @@ import type { ChecklistItem, DetailPrompt, SettingsData } from '../../lib/settin
 import { DEFAULT_CHECKLIST_SETTINGS } from '../../config/default-checklist-settings'
 
 // ── Vehicle types ──
-const VEHICLE_TYPES = ['All', 'Premium', 'Basic', 'Panel', 'Vito'] as const
+const VEHICLE_TYPES = ['All', 'Premium', 'Standard', 'Basic', 'Panel', 'Vito'] as const
 const PREP_SECTIONS = ['Vehicle Exterior', 'Engine', 'Front Cab', 'Passenger Area', 'Boot'] as const
 const INPUT_TYPES = [
   { value: 'options', label: 'Options (pick one)' },

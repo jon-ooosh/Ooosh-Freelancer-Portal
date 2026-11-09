@@ -36,7 +36,7 @@ import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { runHookWithRecovery } from '../services/post-hook-recovery';
 import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
-import { applyAccountAutoCover, AUTO_COVER_MARKER } from '../services/hh-requirement-derivation';
+import { applyAccountAutoCover, AUTO_COVER_MARKER, TOWBAR_LIST_ID } from '../services/hh-requirement-derivation';
 import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { isIdentityAuthorised, identityHoldReason } from '../services/identity-review';
 import { retireDoneBells } from '../services/notification-resolve';
@@ -3681,7 +3681,8 @@ async function processAdditionalDriverCharge(hhJobId: number, jobId: string | nu
     const qty = parseFloat(String(item.qty || item.QTY || item.quantity || item.QUANTITY || 1));
     const isVirtual = item.VIRTUAL === '1';
 
-    if (categoryId === VEHICLE_CATEGORY_ID && !isVirtual) {
+    // The Towbar autopull sits in the Vehicles category but is never a van.
+    if (categoryId === VEHICLE_CATEGORY_ID && !isVirtual && stockId !== TOWBAR_LIST_ID) {
       vehicleCount += qty;
     }
     if (stockId === ADDITIONAL_DRIVER_ITEM_ID) {

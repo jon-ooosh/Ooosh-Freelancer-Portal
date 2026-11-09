@@ -40,6 +40,13 @@ export interface HireHopJobItem {
   ITEM_NAME: string     // e.g. "Premium LWB Splitter Van - auto gearbox"
   QUANTITY: number
   CATEGORY_ID?: number  // HireHop category (370 = Vehicles, 371 = Vehicle accessories, etc.)
+  // The stock item id when the source sends it separately. Items read from OP's
+  // stored line items carry the LINE's id in ITEM_ID and the stock id here, so
+  // match stock with `stockIdOf()` in lib/hirehop-api.ts, never ITEM_ID alone.
+  LIST_ID?: number
+  // Nested-set position: an autopull (e.g. the Towbar) sits inside its van's range.
+  LFT?: number
+  RGT?: number
 }
 
 /** Parsed HireHop job — clean domain model */
@@ -83,7 +90,17 @@ export const HIREHOP_STOCK_MAPPINGS: StockTypeMapping[] = [
   { stockId: 1016, stockName: 'Mercedes Vito 114 LWB 6-seater mini-splitter - auto gearbox', simpleType: 'Vito', gearbox: 'auto' },
   { stockId: 1303, stockName: 'Mercedes Vito 114 LWB 6-seater mini-splitter - manual gearbox', simpleType: 'Vito', gearbox: 'manual' },
   { stockId: 8,    stockName: 'Panel Van', simpleType: 'Panel', gearbox: 'auto' },
+  // New for 2027 (jon, Nov 2026). Every Standard comes with a towbar.
+  { stockId: 2065, stockName: 'Standard MWB Splitter Van - auto gearbox', simpleType: 'Standard', gearbox: 'auto' },
+  { stockId: 2066, stockName: 'Standard MWB Splitter Van - manual gearbox', simpleType: 'Standard', gearbox: 'manual' },
 ]
+
+/**
+ * The "Towbar" autopull (jon, Nov 2026): a virtual item in the Vehicles
+ * category, pulled onto a van that needs one. It is NOT a van, and its presence
+ * inside a van line's range means that van must have a towbar.
+ */
+export const HIREHOP_TOWBAR_ITEM_ID = 2064
 
 /** Virtual items to ignore (e.g. damage charges, not actual stock) */
 export const HIREHOP_VIRTUAL_ITEM_IDS = [1741]
@@ -96,6 +113,8 @@ export interface VanRequirement {
   simpleType: string
   gearbox: 'auto' | 'manual'
   quantity: number
+  /** The client asked for a towbar on this van (a Towbar line under it). */
+  needsTowbar?: boolean
 }
 
 // ── Allocations (persisted in R2) ──

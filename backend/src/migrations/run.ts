@@ -377,6 +377,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '335_freelancer_ooh_returns.sql',
         '336_cashflow_vat_and_overpaid_tidy.sql',
         '337_enquiry_figures_recording.sql',
+        '338_towbars_and_price_group.sql',
       ];
 
       for (const migration of migrations) {

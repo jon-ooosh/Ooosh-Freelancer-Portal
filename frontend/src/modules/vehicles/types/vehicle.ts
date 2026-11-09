@@ -102,6 +102,7 @@ export interface Vehicle {
   servicePlanStatus: string | null // '0 Remaining'..'6 Remaining', 'WORKINGONIT', 'NO PLAN'
   rossettsApplicable: boolean       // on the Rossetts (Mercedes) annual warranty plan — drives Rossetts service alerts
   seatLayout: 'round_table' | 'forward_facing' | null  // Premium vans only — current seat config
+  hasTowbar?: boolean               // a towbar is fitted (migration 338) — steers towbar jobs at allocation
   notes: string | null             // Free-text per-vehicle notes
   setupChecklist: SetupChecklistItem[]  // New-vehicle onboarding tasks (migration 089)
   files: VehicleFile[]
@@ -136,7 +137,7 @@ export interface VehicleFile {
   uploaded_by: string
 }
 
-export type VehicleSimpleType = 'Premium' | 'Basic' | 'Panel' | 'Vito' | string
+export type VehicleSimpleType = 'Premium' | 'Standard' | 'Basic' | 'Panel' | 'Vito' | string
 
 export interface VehicleListFilters {
   search: string

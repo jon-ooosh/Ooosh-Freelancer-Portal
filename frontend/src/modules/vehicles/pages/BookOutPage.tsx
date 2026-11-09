@@ -1868,6 +1868,7 @@ function StepSelectVehicle({
               >
                 {req.quantity > 1 ? `${req.quantity}x ` : ''}{req.simpleType}
                 {req.simpleType !== 'Panel' ? ` ${req.gearbox}` : ''}
+                {req.needsTowbar ? ' + towbar' : ''}
               </span>
             ))}
           </div>
@@ -1909,6 +1910,7 @@ function StepSelectVehicle({
                   {gearbox !== 'unknown' && (
                     <span className="text-[10px] text-gray-400">({gearbox === 'auto' ? 'A' : 'M'})</span>
                   )}
+                  {v.hasTowbar && <span className="text-[10px] text-gray-400">· towbar</span>}
                   {matched && (
                     <svg className="h-4 w-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
