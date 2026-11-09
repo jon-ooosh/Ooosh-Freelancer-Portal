@@ -284,6 +284,8 @@ export async function handleJobStatusChange(
     // confirmed_at at all, so a job booked by staff in HireHop had no record
     // of when it was won. COALESCE keeps the first date on a re-confirmation.
     const stampConfirmed = newPipelineStatus === 'confirmed';
+    // Marked Not Interested in HireHop: a person decided, so it gets its date like
+    // the OP route gives it (the business figures read lost_at — migration 337).
 
     await query(
       `UPDATE jobs SET pipeline_status = $1, pipeline_status_changed_at = NOW(), updated_at = NOW()
@@ -293,6 +295,7 @@ export async function handleJobStatusChange(
          ${clearLastMinuteMarker || unwon ? ', last_minute_alerted_at = NULL' : ''}
          ${unwon ? ', confirmed_at = NULL, confirmed_method = NULL' : ''}
          ${stampConfirmed ? ', confirmed_at = COALESCE(confirmed_at, NOW())' : ''}
+         ${newPipelineStatus === 'lost' ? ', lost_at = NOW(), auto_lost = false' : ''}
        WHERE id = $2`,
       [newPipelineStatus, job.id],
     );

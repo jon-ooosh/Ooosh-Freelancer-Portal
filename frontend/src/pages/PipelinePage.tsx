@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { ENQUIRY_SOURCE_CHOICES } from '../lib/enquirySource';
 import DatePicker from '../components/DatePicker';
 import ChaseModal from '../components/ChaseModal';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
@@ -1571,6 +1572,12 @@ function NewEnquiryModal({
       setError('Client and description are required');
       return;
     }
+    // Required (jon, Nov 2026): the business figures compare channels, and a box
+    // left optional stays blank on exactly the busy days that matter.
+    if (!enquirySource) {
+      setError('How did they get in touch? Pick one.');
+      return;
+    }
 
     // Auto-save any unsaved form data the user left dangling — the
     // forgot-to-click-Save trap. If the contact form has data, treat
@@ -2624,6 +2631,25 @@ function NewEnquiryModal({
             />
           </div>
 
+          {/* How they got in touch — required (docs/BUSINESS-FIGURES-SPEC.md) */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">How did they get in touch? *</label>
+            <div className="flex flex-wrap gap-1.5">
+              {ENQUIRY_SOURCE_CHOICES.map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => setEnquirySource(o.value)}
+                  className={`px-2.5 py-1 rounded-full text-xs border ${enquirySource === o.value
+                    ? 'bg-ooosh-600 border-ooosh-600 text-white'
+                    : 'bg-white border-gray-300 text-gray-700 hover:border-ooosh-400'}`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Dates — HireHop-style 4-date system with linking */}
           <div className="space-y-2">
             <label className="block text-sm font-medium text-gray-700">Dates</label>
@@ -2880,24 +2906,6 @@ function NewEnquiryModal({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Enquiry source</label>
-                <select
-                  value={enquirySource}
-                  onChange={(e) => setEnquirySource(e.target.value)}
-                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                >
-                  <option value="">—</option>
-                  <option value="phone">Phone</option>
-                  <option value="email">Email</option>
-                  <option value="web_form">Website</option>
-                  <option value="referral">Referral</option>
-                  <option value="repeat">Returning client</option>
-                  <option value="forum">Forum / social</option>
-                  <option value="cold_lead">Cold lead</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>

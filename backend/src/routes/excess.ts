@@ -797,6 +797,28 @@ router.get('/:id/rollover-chain', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /api/excess/held-split — Total Held, cash vs card holds ──
+// The ledger's balance_held counts a pre-auth's amount_held (a hold on the client's
+// card, not money we have). This says how much of the total is holds, so the page
+// can show the cash figure — the one the cash forecast uses (loadExcessHeld).
+router.get('/held-split', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
+  try {
+    const r = await query(
+      `SELECT COALESCE(SUM(h.held_amount), 0) AS total,
+              COALESCE(SUM(LEAST(GREATEST(COALESCE(je.amount_held, 0), 0), h.held_amount)), 0) AS holds
+         FROM v_excess_held h
+         JOIN job_excess je ON je.id = h.excess_id
+        WHERE h.held_amount > 0.01`
+    );
+    const total = Number(r.rows[0]?.total ?? 0);
+    const holds = Number(r.rows[0]?.holds ?? 0);
+    res.json({ data: { total, holds, cash: Math.max(total - holds, 0) } });
+  } catch (error) {
+    console.error('[excess] Held split error:', error);
+    res.status(500).json({ error: 'Failed to load the held split' });
+  }
+});
+
 // ── GET /api/excess/ledger — Client excess ledger ──
 
 router.get('/ledger', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {

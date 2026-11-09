@@ -470,6 +470,10 @@ export function startScheduler() {
                     AND s.pipeline_status NOT IN ('new_enquiry','quoting','paused','provisional','lost','cancelled'))
                THEN 'Confirmed Alternative Quote (from us)'
                ELSE 'No Decision' END,
+             -- Closed by this sweep, not by a person: the business figures count it
+             -- as "not followed up", never as a lost sale (migration 337).
+             auto_lost = true,
+             lost_at = NOW(),
              updated_at = NOW()
          WHERE job_date IS NOT NULL
            AND job_date::date < CURRENT_DATE

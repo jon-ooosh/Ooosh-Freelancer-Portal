@@ -637,6 +637,8 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       updateParams.push(lost_detail || null);
       pIdx++;
       updates.push(`lost_at = NOW()`);
+      // A person decided — no longer the 09:00 sweep's "not followed up" (migration 337).
+      updates.push(`auto_lost = false`);
       // Clear chase date — lost jobs don't need chasing
       updates.push(`next_chase_date = NULL`);
       // Drop the one-shot last-minute marker (migration 226) — if this job ever

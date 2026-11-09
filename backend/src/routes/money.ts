@@ -256,8 +256,12 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
     // "past hire end" (should mostly be reimbursed/rolled over — the
     // actionable backlog). Records with no linked job date count as upcoming.
     let excessHeldUpcoming = 0, excessHeldPast = 0, excessUpcomingCount = 0, excessPastCount = 0;
+    // Of the held figure, how much is a card HOLD (a pre-auth, amount_held) rather than
+    // cash we have — the same split the cash forecast makes (cashflow-sources.ts loadExcessHeld).
+    let excessHeldHolds = 0;
     for (const r of excessHeld.rows as Array<Record<string, unknown>>) {
       const amt = parseFloat(String(r.held_amount ?? 0));
+      excessHeldHolds += Math.min(Math.max(parseFloat(String(r.amount_held ?? 0)), 0), amt);
       if (r.hire_finished === true) { excessHeldPast += amt; excessPastCount++; }
       else { excessHeldUpcoming += amt; excessUpcomingCount++; }
     }
@@ -282,6 +286,7 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
           excess_held_upcoming_count: excessUpcomingCount,
           excess_held_past: excessHeldPast,
           excess_held_past_count: excessPastCount,
+          excess_held_holds: excessHeldHolds,
           pending_refunds: sum(pendingRefunds.rows, 'amount'),
           pending_refunds_count: pendingRefunds.rows.length,
           client_overpaid: sum(clientOverpaid.rows, 'amount'),
