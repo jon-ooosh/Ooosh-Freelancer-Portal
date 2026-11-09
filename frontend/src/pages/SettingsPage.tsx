@@ -2008,7 +2008,7 @@ function HireHopPriceGroupSection() {
     setSaving(true);
     try {
       await api.put('/system-settings', { settings: { hh_price_group: group, hh_price_group_from: from } });
-      setSuccess('Saved. It applies to jobs created in HireHop from now on.');
+      setSuccess('Saved. The line above says which list new jobs use now, and from when. Jobs already in HireHop are not changed.');
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save');

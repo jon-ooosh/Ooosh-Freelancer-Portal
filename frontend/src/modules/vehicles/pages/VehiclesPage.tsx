@@ -25,6 +25,7 @@ import { refreshAllMots } from '../lib/mot-history'
 /** Colour classes for simple vehicle types */
 const typeColours: Record<string, string> = {
   Premium: 'bg-indigo-100 text-indigo-800',
+  Standard: 'bg-teal-100 text-teal-800',
   Basic: 'bg-sky-100 text-sky-800',
   Panel: 'bg-gray-100 text-gray-700',
   Vito: 'bg-slate-100 text-slate-700',
@@ -79,6 +80,9 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
               <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${typeColours[vehicle.simpleType] || 'bg-gray-100 text-gray-600'}`}>
                 {vehicle.simpleType}{gearboxLabel ? ` · ${gearboxLabel}` : ''}
               </span>
+            )}
+            {vehicle.hasTowbar && (
+              <span className="text-xs text-gray-500">Towbar</span>
             )}
             {vehicle.seats && (
               <span className="text-xs text-gray-400">{vehicle.seats} seats</span>
@@ -356,6 +360,7 @@ function FleetTable({
                 </td>
                 <td className="whitespace-nowrap px-2 py-2 text-xs text-gray-600">
                   {vehicle.simpleType || '—'}{gearboxLabel ? ` · ${gearboxLabel}` : ''}
+                  {vehicle.hasTowbar ? ' · towbar' : ''}
                 </td>
                 <td className="whitespace-nowrap px-2 py-2">
                   <span className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-medium ${status.cls}`}>
