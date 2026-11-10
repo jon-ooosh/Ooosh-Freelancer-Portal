@@ -547,13 +547,18 @@ others = [p for p in prs if p["user"]["login"] != "dependabot[bot]"]
 print(f"Open pull requests: {len(prs)} ({len(bots)} Dependabot, {len(others)} other)")
 if not bots: print("Dependabot queue is empty.")
 now = datetime.datetime.now(datetime.timezone.utc)
-def semver_major(t):
-    m = re.search(r"from (\d+)[\d.]* to (\d+)[\d.]*", t)
-    return bool(m and m.group(1) != m.group(2))
+# A bump that names several packages ("bump vite and @vitejs/plugin-react in /frontend")
+# has no versions in its title, so Dependabot's own "Bumps/Updates ... from X to Y" lines
+# in the body are read too. Line-anchored, so the quoted release notes can't match.
+# Title-only missed two majors (PRs 1591, 1008) and reported them as "merges itself" - Nov 2026.
+def semver_major(title, body):
+    pairs = re.findall(r"from (\d+)[\d.]* to (\d+)", title)
+    pairs += re.findall(r"^(?:Bumps|Updates) .*? from (\d+)[\d.]* to (\d+)", body or "", re.M)
+    return any(a != b for a, b in pairs)
 for p in bots:
     title = p["title"]; n = p["number"]
     age = (now - datetime.datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))).days
-    major = semver_major(title) and "minor-and-patch" not in p["head"]["ref"]
+    major = semver_major(title, p.get("body")) and "minor-and-patch" not in p["head"]["ref"]
     try:
         runs = gh(f"/commits/{p['head']['sha']}/check-runs?per_page=50")["check_runs"]
         ci = [r for r in runs if r["name"] in ("Backend build", "Frontend build")]
