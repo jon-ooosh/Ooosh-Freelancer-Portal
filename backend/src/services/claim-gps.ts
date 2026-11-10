@@ -13,7 +13,7 @@
  * whole day — stamped on gps_auto_captured_at so it's tried once (a Traccar
  * error un-stamps it, so an outage doesn't lose it).
  */
-import { v4 as uuid } from 'uuid';
+import { randomUUID as uuid } from 'crypto';
 import { query } from '../config/database';
 import { uploadToR2 } from '../config/r2';
 import { getRouteForReg, type RoutePoint } from './traccar-server';

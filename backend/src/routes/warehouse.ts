@@ -23,7 +23,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
-import { v4 as uuid } from 'uuid';
+import { randomUUID as uuid } from 'crypto';
 import { query } from '../config/database';
 import { verifyStaffToken, authenticate, authorize, type AuthRequest } from '../middleware/auth';
 import { signFor, verifyFor } from '../services/tokens';
