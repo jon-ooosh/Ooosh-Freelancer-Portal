@@ -60,6 +60,7 @@ import rehearsalsRouter from './rehearsals';
 import backlineMatcherRouter from './backline-matcher';
 import wiseRouter from './wise';
 import cashflowRouter from './cashflow';
+import businessFiguresRouter from './business-figures';
 import autoChaseRouter from './auto-chase';
 import leadsRouter from './leads';
 import bandWatchesRouter from './band-watches';
@@ -104,6 +105,7 @@ router.use('/backline', backlineRouter);
 router.use('/backline-matcher', backlineMatcherRouter);  // AI equipment matcher + demand tracker (replaces alternative-hirehop-stock Netlify app)
 router.use('/wise', wiseRouter);  // Wise supplier payments — scaffolding (read-only health check; spec Part 2)
 router.use('/cashflow', cashflowRouter);  // Cash forecast — admin only (docs/CASHFLOW-FORECAST-SPEC.md)
+router.use('/business-figures', businessFiguresRouter);  // Enquiries & booking rates — admin only (docs/BUSINESS-FIGURES-SPEC.md)
 router.use('/cancellations', cancellationsRouter);
 router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled / lost jobs (Phase 1 — SQL only)
 router.use('/problems', problemsRouter);  // Job-level problems register (damaged/missing/broken/dispute). The old /issues platform tracker was retired Sep 2026; its tables remain.

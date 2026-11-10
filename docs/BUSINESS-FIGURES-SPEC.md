@@ -1,6 +1,6 @@
 # Business figures — enquiries, conversion and response times
 
-**Status: Step 1 BUILT (Nov 2026) — recording only. Steps 2–3 not built.**
+**Status: Steps 1–2 BUILT (Nov 2026). Step 3 (reply speed against booking, properly) waits for ~a month of recording.**
 Admin-only, its own tab beside the cash forecast (not on the cash page). Raised by jon
 alongside the cash forecast (`CASHFLOW-FORECAST-SPEC.md`), Nov 2026.
 
@@ -79,6 +79,40 @@ Counting rules (reuse, don't re-derive): a quote-option group counts once
 `job-outcomes.ts` `JOB_BOOKED_SQL` or cancelled-after-booking. Arrival time = the
 earliest of the job's creation and the client's first inbound email (`message_at`)
 from a contact address in the days before.
+
+## 5a. Step 2 — what was built (Nov 2026)
+
+**Money › Business figures** (`/money/business`, `pages/BusinessFiguresPage.tsx`), admin only, linked
+both ways with the cash forecast. `GET /api/business-figures/enquiries?from=&to=`
+(`routes/business-figures.ts`, admin) → `services/business-figures.ts` `buildEnquiryFigures()`;
+the counting and timing is pure, in `services/business-figures-maths.ts` (tested).
+
+- **Window:** defaults to the later of 12 months ago and 1 April 2026 (`FIGURES_EARLIEST` — OP came
+  into real use around then, jon), to today; any range can be picked.
+- **One row per enquiry:** a quote-option group once (its lead; arriving with its first option);
+  dismissed, internal, re-opened and `cold_lead` jobs left out; an alternative-quote loss is not an
+  enquiry. Arrival = the earlier of OP's `created_at` and HireHop's `created_date`, or the client's
+  first email (job timeline, or unmatched to a contact address) up to 3 days before.
+- **Outcomes** from `job-outcomes.ts`: booked (confirmed / returned), booked-then-cancelled (counted
+  as booked, shown separately), lost (by a person), not followed up (`auto_lost`), open.
+  **Booking rate = booked ÷ (booked + lost + not followed up)** — open ones wait.
+- **First reply** = office minutes (09:00–18:00 UK, every day — the same hours as
+  `scripts/email-response-times.ts`) from first contact to our first email to the client within 30
+  days: on the job (any option), or unmatched to one of the job's contact addresses. Real time
+  (`message_at`) where recorded, else when OP pulled it in — up to ten minutes late live; backfilled
+  emails (`backfill_forced`) are skipped because their pull time is the run date. Replies from info@
+  can't be put to a person ("info@ (shared inbox)"); a personal address is named by its user.
+- **To quote** = office minutes to the first `Quote (N).pdf` sent (`job_quote_versions.received_at`).
+  `scripts/harvest-quote-history.ts --run` searches info@ for every job since April that OP never
+  searched (mostly lost ones) — one job a second, safe to re-run.
+- **Breakdowns:** month (with booked value), how they got in touch, likelihood, value band, service
+  (vans / backline / rehearsals from requirements + HireHop flags; a job can be in several), reply
+  speed (under 1 hr / 1–4 hrs / 4 hrs–1 day / over a day), who took it (`manager1_person_id`, else the
+  OP creator), who sent the first reply, and lost reasons. Every row shows how many enquiries each
+  median rests on.
+- **Caveats on the page itself:** channel coverage, how many have a reply / quote found, that
+  HireHop-made jobs are dated when keyed in, that a phone call back doesn't show, and that fast
+  replies go to easy enquiries (compare within channel or likelihood).
 
 ## 6. Step 3 — reply speed against booking (about a month after step 1)
 

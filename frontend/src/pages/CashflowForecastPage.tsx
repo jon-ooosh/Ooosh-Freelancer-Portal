@@ -200,6 +200,7 @@ export default function CashflowForecastPage() {
               ? <>balances confirmed <span className={forecast.checkIn.stale ? 'text-amber-700 font-semibold' : 'text-green-700 font-semibold'}>{shortDate(forecast.checkIn.asOf, true)}</span></>
               : 'no balances yet'}
             {loading && <span className="ml-2 text-gray-400">Updating…</span>}
+            {' · '}<Link to="/money/business" className="text-ooosh-700 hover:underline">Business figures</Link>
           </p>
         </div>
         <div className="flex flex-wrap gap-2">

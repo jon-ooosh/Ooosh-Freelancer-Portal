@@ -317,8 +317,11 @@ never for money in. **Its settings are `cashflow_settings`, NOT `system_settings
 reads that). Builder `services/cashflow-forecast.ts`, pure maths `cashflow-schedule.ts`. **§13 is what
 shipped and where it differs from the plan**; §11 the phases. **Phase 2 BUILT (§13.2):** freelancers booked and not yet invoiced, enquiries weighted by learned booking rates (the band), "What would fix it". THE deposit rule is `services/deposit-rule.ts` (+ frontend `lib/depositRule.ts`). **Phase 3 (§13.3):** regular-payment suggestions from Xero bank history, the card receipts check, Wise read live; **Xero's API can't give the statement balance** (unreconciled data is withheld), so the Monday check-in stays. **§13.4:** VAT typed by quarter on the check-in (`cashflow-vat.ts`; negative = HMRC owes us, never projected; a filed return is a planned item), warnings that name their vans/jobs, a cancelled job's banner that follows its refund reminders (`readRefundOutcome()`), and "Dealt with outside OP" on overpaid invoices (OP note only). Mockup in `docs/design/cashflow-forecast/`.
 
-**STEP 1 BUILT (recording only), Nov 2026:** `docs/BUSINESS-FIGURES-SPEC.md` — enquiry-to-booking
-conversion and reply speed by channel, admin-only, beside the cash forecast. Step 1 records what
+**STEPS 1–2 BUILT, Nov 2026:** `docs/BUSINESS-FIGURES-SPEC.md` — enquiry-to-booking
+conversion and reply speed by channel, admin-only, beside the cash forecast. Step 2 is Money › Business
+figures (`/money/business`, `services/business-figures.ts` + pure `business-figures-maths.ts`): booking rate
+by month / channel / likelihood / value / service / person, first reply and time to quote in office hours,
+lost reasons; a quote-option group counts once; §5a is what shipped. Step 1 records what
 the figures need: the real time of every ingested email (`message_at`, Gmail's own — `created_at` /
 `received_at` are when OP pulled it in), the direction of unmatched email, "How did they get in
 touch?" required on New Enquiry (`lib/enquirySource.ts`), and `jobs.auto_lost` for enquiries the

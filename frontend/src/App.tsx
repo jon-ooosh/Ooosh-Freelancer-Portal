@@ -29,6 +29,7 @@ import IssueDetailPage from './pages/IssueDetailPage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import MoneyOverviewPage from './pages/MoneyOverviewPage';
 import CashflowForecastPage from './pages/CashflowForecastPage';
+import BusinessFiguresPage from './pages/BusinessFiguresPage';
 import CostsPage from './pages/CostsPage';
 import ShopTillPage from './pages/ShopTillPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
@@ -315,6 +316,7 @@ export default function App() {
                 <Route path="/data-cleanup" element={<DataCleanupPage />} />
                 <Route path="/money/overview" element={<MoneyOverviewPage />} />
                 <Route path="/money/cashflow" element={<CashflowForecastPage />} />
+                <Route path="/money/business" element={<BusinessFiguresPage />} />
                 <Route path="/money/excess" element={<ExcessLedgerPage />} />
                 <Route path="/money/costs" element={<CostsPage />} />
                 <Route path="/money/shop" element={<ShopTillPage />} />
