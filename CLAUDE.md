@@ -578,9 +578,11 @@ Six roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, 
 
 - **Never run `npm audit fix --force`** — it pulls breaking majors that break the build.
   Plain `npm audit fix` (semver-safe) is fine and already applied.
-- Two vulnerabilities are **deliberately left in `backend/` and must not be "fixed"**:
-  `xlsx` (no npm fix exists; only parses trusted admin uploads) and `uuid` (only fixable
-  via a breaking major, for a bounds issue we don't hit).
+- One vulnerability is **deliberately left in `backend/` and must not be "fixed"**:
+  `xlsx` (no npm fix exists; only parses trusted admin uploads).
+- **No `uuid` package — use `randomUUID` from Node's `crypto`** (Nov 2026). uuid 12+ ships
+  ESM only, which jest can't load (Dependabot PR 1593 went red), and Node has it built in.
+  A uuid copy still sits under Google's `gaxios`; that alert is theirs to fix — we never call it.
 - The "critical" npm sometimes reports is `handlebars` via `ts-jest` — **dev-only, not
   shipped**. Don't panic over the severity label.
 - Dependabot is live. **Always let a Dependabot PR build in the affected dir before

@@ -18,7 +18,7 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import path from 'path';
 import rateLimit from 'express-rate-limit';
-import { v4 as uuid } from 'uuid';
+import { randomUUID as uuid } from 'crypto';
 import { query } from '../config/database';
 import { uploadToR2, getFromR2, deleteFromR2, isR2Configured } from '../config/r2';
 import {

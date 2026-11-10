@@ -15,7 +15,7 @@
  * job_issues on every read, so it catches every way a Problem can be logged;
  * the bell (`notifyVehicleSaleOfIssue`) is the courtesy on top.
  */
-import { v4 as uuid } from 'uuid';
+import { randomUUID as uuid } from 'crypto';
 import { query } from '../config/database';
 import { uploadToPublicR2, deleteFromPublicR2 } from '../config/r2';
 import { DISPLAY_NAME_SQL } from './display-name';

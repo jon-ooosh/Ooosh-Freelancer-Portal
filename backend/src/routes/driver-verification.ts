@@ -19,7 +19,7 @@ import crypto from 'crypto';
 import multer from 'multer';
 import rateLimit from 'express-rate-limit';
 import path from 'path';
-import { v4 as uuid } from 'uuid';
+import { randomUUID as uuid } from 'crypto';
 import { query } from '../config/database';
 import { encryptDriverPiiInto, decryptDriverRow, DRIVER_PII_FIELDS } from '../services/driver-pii';
 import { computeDriverValidity, persistableWindows, touchesValidity, backfillFromDates, hasAllRequiredDocuments } from '../services/driver-validity';
