@@ -251,3 +251,28 @@ export async function fetchVehicleFileBlob(key: string): Promise<string> {
   const blob = await response.blob()
   return URL.createObjectURL(blob)
 }
+
+/** What `fillFromHireHop()` did (backend `services/hh-van-stock.ts`). */
+export interface FillFromHireHopResult {
+  checked: number
+  filled: Array<{ reg: string; set: string[]; stockTitle: string }>
+  disagrees: Array<{ reg: string; op: string; hirehop: string; stockTitle: string }>
+  notInHireHop: string[]
+  unclear: Array<{ reg: string; stockTitle: string }>
+  failed: Array<{ reg: string; error: string }>
+  remaining: number
+}
+
+/**
+ * Fill blank van types and gearboxes from the HireHop stock line each reg is
+ * filed under. Only blanks; a disagreement is reported, never changed. Admin.
+ */
+export async function fillFromHireHop(): Promise<FillFromHireHopResult> {
+  const resp = await apiFetch('/fleet/fill-from-hirehop', { method: 'POST' })
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}))
+    throw new Error((body as { error?: string }).error || `HTTP ${resp.status}`)
+  }
+  const body = await resp.json() as { data: FillFromHireHopResult }
+  return body.data
+}

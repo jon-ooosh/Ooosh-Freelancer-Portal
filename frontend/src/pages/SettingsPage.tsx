@@ -2032,7 +2032,12 @@ function HireHopPriceGroupSection() {
         the prices; this only picks the list. Jobs already created keep the prices on their lines, and a quote
         option or Re-open copies its source job&apos;s list.
       </p>
-      <p className="text-sm text-gray-800 mb-4 font-medium">{status}</p>
+      <p className="text-sm text-gray-800 mb-2 font-medium">{status}</p>
+      <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mb-4">
+        A job prices <strong>every</strong> line from its list, not just the vans. Before a list goes live, every item a
+        job can carry (backline, rooms, sale items, the additional driver and VE103B lines) needs a price in it, or it
+        quotes £0. See docs/PRICE-LIST-CHANGE.md.
+      </p>
 
       {error && <div className="mb-3 p-2 rounded bg-red-50 border border-red-200 text-sm text-red-700">{error}</div>}
       {success && <div className="mb-3 p-2 rounded bg-emerald-50 border border-emerald-200 text-sm text-emerald-800">{success}</div>}
