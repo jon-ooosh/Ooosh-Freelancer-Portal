@@ -561,9 +561,12 @@ for p in bots:
     major = semver_major(title, p.get("body")) and "minor-and-patch" not in p["head"]["ref"]
     try:
         runs = gh(f"/commits/{p['head']['sha']}/check-runs?per_page=50")["check_runs"]
-        ci = [r for r in runs if r["name"] in ("Backend build", "Frontend build")]
+        # ci.yml builds backend + frontend only; Netlify builds the root portal. Its build result
+        # is a commit status (another token permission), but its checks ("Header rules - ..." etc.)
+        # fail with it, so they stand in. Without them PRs 1625/1626 read green while Netlify was red (Nov 2026).
+        ci = [r for r in runs if r["name"] in ("Backend build", "Frontend build") or r["app"]["slug"] == "netlify"]
         concl = {r["conclusion"] for r in ci}
-        state = "green" if ci and concl == {"success"} else ("red" if "failure" in concl else "pending")
+        state = "red" if "failure" in concl else ("green" if ci and concl <= {"success", "neutral", "skipped"} else "pending")
     except Exception:
         state = "unknown"
     if major:

@@ -29,6 +29,19 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # Skipped on purpose (Nov 2026) - lift each when its reason goes away.
+    ignore:
+      # TypeScript 7 broke the Netlify build (PR 1625). Revisit once Next supports it.
+      - dependency-name: "typescript"
+        versions: [">=7.0.0"]
+      # ESLint 10 broke the Netlify build: Next 15 lints during `next build` (PR 1626).
+      # Next 16 stops doing that - revisit after it is merged.
+      - dependency-name: "eslint"
+        versions: [">=9.0.0"]
+      # Types must match the Node that runs the code: Netlify NODE_VERSION 22 (PR 1628
+      # offered 26). Raise this with the Node major (docs/MAINTENANCE.md, Node 22 -> April 2027).
+      - dependency-name: "@types/node"
+        versions: [">=23.0.0"]
 
   # --- OP backend (Express API) ---
   - package-ecosystem: "npm"
@@ -46,6 +59,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # Types must match the server's Node 22 - raise with the Node major (see the root entry).
+      - dependency-name: "@types/node"
+        versions: [">=23.0.0"]
 
   # --- OP frontend (React + Vite SPA) ---
   - package-ecosystem: "npm"
