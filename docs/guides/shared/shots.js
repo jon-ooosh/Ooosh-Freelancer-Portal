@@ -32,6 +32,14 @@ async function phone({ base, secret, user = { id: 'u1', email: 'alex@example.com
     viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true,
     timezoneId: 'Europe/London', locale: 'en-GB',
   })
+  // `next dev` floats its "N" badge over the bottom-left of every page: never in a guide.
+  await context.addInitScript(() => {
+    document.addEventListener('DOMContentLoaded', () => {
+      const s = document.createElement('style')
+      s.textContent = 'nextjs-portal { display: none !important; }'
+      document.head.appendChild(s)
+    })
+  })
   if (secret) {
     const { SignJWT } = require('jose')
     const token = await new SignJWT(user)
