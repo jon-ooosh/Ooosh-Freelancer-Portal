@@ -4143,6 +4143,21 @@ router.get('/fleet/:id/mot-history', authorize(...STAFF_ROLES), async (req: Auth
  * van from DVSA, in the background (one every 1.5 s). The daily run does the
  * same at 07:30; this is for "now", e.g. after a batch of MOTs.
  */
+/**
+ * POST /api/vehicles/fleet/fill-from-hirehop — fill blank van types and gearboxes
+ * from the HireHop stock line each reg is filed under (services/hh-van-stock.ts).
+ * Never overwrites a value; reports disagreements. Admin, like Vehicle Settings.
+ */
+router.post('/fleet/fill-from-hirehop', authorize('admin'), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { fillVanTypesFromHireHop } = await import('../services/hh-van-stock');
+    res.json({ data: await fillVanTypesFromHireHop() });
+  } catch (error) {
+    console.error('[vehicles/fill-from-hirehop] error:', error);
+    res.status(500).json({ error: 'Could not check the vans against HireHop' });
+  }
+});
+
 router.post('/mot-history/refresh-all', authorize('admin'), async (_req: AuthRequest, res: Response) => {
   try {
     const { isDvsaConfigured } = await import('../services/dvsa-mot');

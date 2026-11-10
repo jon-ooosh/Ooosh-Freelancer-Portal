@@ -7,7 +7,7 @@ import { useAllocations } from '../hooks/useAllocations'
 import { vehicleGearbox } from '../lib/van-matching'
 import { getDateUrgency } from '../types/vehicle'
 import { vmPath } from '../config/route-paths'
-import { createVehicle, uploadVehicleFile, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
+import { createVehicle, uploadVehicleFile, fetchComplianceSettings, DEFAULT_COMPLIANCE, fillFromHireHop } from '../lib/fleet-api'
 import { buildDefaultChecklist } from '../lib/setup-checklist'
 import { lifespanCountdown, sellByDate, formatGbp, annualMileage, formatAnnualMileage } from '../lib/vehicle-lifecycle'
 import { FinanceProviderSelect } from '../components/FinanceLifecycleSection'
@@ -577,6 +577,32 @@ export function VehiclesPage() {
   // server (one van every ~1.5 s), so reload the list once it should be done.
   const [motRefreshMsg, setMotRefreshMsg] = useState<string | null>(null)
   const [motRefreshing, setMotRefreshing] = useState(false)
+  // Fill blank van types / gearboxes from HireHop (services/hh-van-stock.ts)
+  const [hhFilling, setHhFilling] = useState(false)
+  const [hhFillMsg, setHhFillMsg] = useState<string[] | null>(null)
+  async function handleFillFromHireHop() {
+    setHhFilling(true)
+    setHhFillMsg(null)
+    try {
+      const r = await fillFromHireHop()
+      const lines: string[] = []
+      if (r.checked === 0) lines.push('Every active van already has its type and gearbox.')
+      for (const f of r.filled) lines.push(`${f.reg}: set ${f.set.join(' and ')} (HireHop: ${f.stockTitle})`)
+      for (const d of r.disagrees) lines.push(`${d.reg}: OP says ${d.op}, HireHop has it as ${d.hirehop} (${d.stockTitle}) — check which is right`)
+      for (const u of r.unclear) lines.push(`${u.reg}: HireHop's "${u.stockTitle}" doesn't say — set it on the van's page`)
+      if (r.notInHireHop.length) lines.push(`Not found in HireHop by reg (no asset with that barcode): ${r.notInHireHop.join(', ')}`)
+      for (const f of r.failed) lines.push(`${f.reg}: HireHop didn't answer (${f.error}) — try again`)
+      if (r.remaining > 0) lines.push(`${r.remaining} more to check — press the button again.`)
+      if (r.checked > 0 && lines.length === 0) lines.push('Nothing to change.')
+      setHhFillMsg(lines)
+      if (r.filled.length) void refetch()
+    } catch (err) {
+      setHhFillMsg([(err as Error).message])
+    } finally {
+      setHhFilling(false)
+    }
+  }
+
   async function handleRefreshAllMots() {
     setMotRefreshing(true)
     setMotRefreshMsg(null)
@@ -642,6 +668,16 @@ export function VehiclesPage() {
               {motRefreshing ? 'Checking MOTs…' : 'Refresh MOTs'}
             </button>
           )}
+          {isStrictAdmin && (
+            <button
+              onClick={handleFillFromHireHop}
+              disabled={hhFilling}
+              title="For any van missing its type or gearbox, read it from the HireHop stock line its reg is filed under. Never overwrites."
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {hhFilling ? 'Checking HireHop…' : 'Fill gearboxes from HireHop'}
+            </button>
+          )}
           {isAdmin && (
             <button
               onClick={() => setShowAddForm(true)}
@@ -662,6 +698,17 @@ export function VehiclesPage() {
 
       {motRefreshMsg && (
         <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">{motRefreshMsg}</div>
+      )}
+
+      {hhFillMsg && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+          <div className="flex items-start justify-between gap-2">
+            <ul className="space-y-0.5">
+              {hhFillMsg.map((line, i) => <li key={i}>{line}</li>)}
+            </ul>
+            <button onClick={() => setHhFillMsg(null)} className="shrink-0 text-xs text-blue-600 hover:underline">Close</button>
+          </div>
+        </div>
       )}
 
       {/* Add Vehicle form */}

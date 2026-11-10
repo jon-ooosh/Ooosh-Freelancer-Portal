@@ -71,6 +71,12 @@ quotes £457.24 instead of £465.
 3. On a group-A job, **change the dates**. The van must re-price with the 2026 structure, not the 2027 one.
 4. Optional, OP end to end: set Settings › HireHop prices to B with no date, create one test enquiry in
    HireHop from OP, check it is on Price B, then put the date back.
+5. **On the Price-B scratch job, add a backline item whose Price B is £0.** £0 means every non-van item
+   needs a Price B (see the warning in §5). The Price A figure means HireHop falls back to A and nothing
+   more is needed.
+6. **Does an existing line re-price from the stock item?** Make a throwaway item (Price A £10/day), put it on
+   a scratch Price-A job for 3 days, then change the item's Price A to £20. Change the job's dates to 4 days:
+   £40 means the line keeps its own £10 rate (old quotes are safe); £80 means it re-reads the stock price.
 
 ## 5. The switch (OP)
 
@@ -78,6 +84,15 @@ quotes £457.24 instead of £465.
 date every job OP creates in HireHop is born on Price B (`price_group: 1` on `save_job.php`). Before it, OP
 sends nothing and HireHop uses Price A, as always. Code: `services/hh-price-group.ts`, read once per create in
 `routes/pipeline.ts`. Settings `hh_price_group`, `hh_price_group_from` (migration 338).
+
+> **⚠ OPEN, 10 Nov 2026 — do not let the switch go live until this is settled.** A job takes EVERY
+> line's price from its one list, not just the vans'. As of 10 Nov 2026 Price B is £0 on everything but the
+> vans and trailer, so a Price-B job would quote £0 for all backline, rehearsal rooms, storage and sale
+> items. That includes the lines OP adds by stock number without a price of its own: additional driver
+> (1324), VE103B cert (1023) and the staging calculator's items. Either every item gets a Price B
+> before 1 Jan (a copy of A, with the same price structure), or the switch is dropped and the 2027 van
+> rates go into Price A on the first working day. Which one depends on HireHop's behaviour (§4 tests
+> 5–6, in the reply of 10 Nov 2026).
 
 What it does **not** do:
 - **A job copied by HireHop keeps its source's list and line prices.** That covers "Quote another option" and
