@@ -458,7 +458,9 @@ refused. Its own table (`freelancer_ooh_returns`) and `quotes.ooh_return`, NOT t
 against them. Found on the way: the hirer's "returning tonight" reminder email and text still went
 after a freelancer had already collected the van; both now skip a soft-checked-in van.
 
-Still to come: the shop-till guide in the new look.
+**The shop-till guide** was rebuilt in the new look (Nov 2026): the same words (step 1 now matches the
+Jobs page), every screenshot retaken on the reskinned till, and its own styles, Inter font and PDF script
+replaced by the shared ones. Upload it as a new version of the same Staff Document.
 
 ## 9. The reskin (PR 3, Oct 2026)
 

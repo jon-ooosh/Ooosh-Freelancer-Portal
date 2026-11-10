@@ -16,7 +16,7 @@ The plan for the set is `docs/FREELANCER-PORTAL-SPEC.md` §8.
 | `studio-sitter/` | Studio sitting (the evening, the phone, closing up, the lock-up checklist) | draft, Oct 2026 |
 | `fire-procedure/` | Fire: what to do (studio sitters and anyone in the building out of hours; the sitter guide points at it) | draft, Nov 2026 |
 | `working-with-ooosh/` | Working with Ooosh: what we expect, and what freelancers can expect from us (text only; freelancers will confirm they've read it) | draft, Nov 2026 |
-| `shop-till/` | How to use the shop till (studio sitters) | live; still in the old look, has its own scripts |
+| `shop-till/` | How to use the shop till (studio sitters); the till's **How to use** button opens Resources | live; rebuilt in the new look, Nov 2026 |
 
 ## How a guide is built
 
@@ -31,7 +31,7 @@ Oct 2026 look (DM Sans, plum, warm neutrals).
 | `<guide>/<guide>-guide.pdf` | The PDF to upload. |
 | `shared/guide.css` | The look, shared by every guide. Each guide sets its footer with `:root { --footer: "…"; }`. |
 | `shared/build-pdf.js` | HTML to PDF. Refuses a missing image, an em or en dash, or a page whose content runs into its footer. |
-| `shared/shots.js` | Screenshot helpers: the phone, the fake login cookie, the orange rings, clipping, hiding fixed bars, sample photos, a drawn signature. |
+| `shared/shots.js` | Screenshot helpers: the phone (with `next dev`'s "N" badge hidden), the fake login cookie, the orange rings, clipping, hiding fixed bars, sample photos, a drawn signature. |
 | `shared/sample-photos/` | Made-up van photos (18, in the app's order) and a backline one, fed to the camera. |
 | `shared/fonts/` | DM Sans, bundled so the PDF embeds it cleanly (SIL Open Font License, `OFL.txt`). |
 
