@@ -39,7 +39,7 @@ interface Setting { key: string; value: string | null; }
 interface SettingsResponse { data: Setting[]; default_window?: { from: string; to: string }; max_window_days?: number; }
 
 type Modal =
-  | { kind: 'dismiss'; lead: Lead }
+  | { kind: 'dismiss'; leads: Lead[] }
   | { kind: 'address'; lead: Lead }
   | { kind: 'enquiry'; lead: Lead }
   | { kind: 'outreach'; lead: Lead }
@@ -157,6 +157,12 @@ export default function LeadsPage() {
   const [sortKey, setSortKey] = useState<SortKey>('score');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [modal, setModal] = useState<Modal>(null);
+  // Ticked rows, for bulk Dismiss (To review / Contacted) and bulk Restore
+  // (Dismissed). Cleared on a tab change; actions only ever touch ticked rows
+  // still on screen, so a filter change can't act on hidden ones.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  useEffect(() => { setSelected(new Set()); }, [tabParam]);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -311,6 +317,19 @@ export default function LeadsPage() {
   const confirmMatch = (id: string, organisation_id: string) => act(() => api.post(`/leads/${id}/confirm-match`, { organisation_id }));
   const rejectMatch = (id: string) => act(() => api.post(`/leads/${id}/reject-match`, {}));
   const restore = (id: string) => act(() => api.post(`/leads/${id}/restore`, {}));
+  const restoreSelected = async (rows: Lead[]) => {
+    if (!rows.length || !confirm(`Restore ${rows.length} lead${rows.length === 1 ? '' : 's'} to To review?${
+      rows.some((l) => l.status_reason === 'not_a_fit') ? ' Any “not a fit” bands will be allowed back on later searches.' : ''}`)) return;
+    setBulkBusy(true); setError(null);
+    try {
+      const r = await api.post<{ data: { restored: number } }>('/leads/restore-bulk', { ids: rows.map((l) => l.id) });
+      setSelected(new Set());
+      setNotice({ text: `Restored ${r.data.restored} lead${r.data.restored === 1 ? '' : 's'}.` });
+      await reloadAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to restore');
+    } finally { setBulkBusy(false); }
+  };
   // One click when the tour turns out to be one we've already quoted and lost /
   // had cancelled / dismissed — "already handled", with the job named in the note.
   const dismissAlreadyQuoted = (l: Lead) => {
@@ -344,6 +363,19 @@ export default function LeadsPage() {
       return sortDir === 'asc' ? cmp : -cmp;
     });
   const tabMeta = STAGE_TABS.find((t) => t.key === tab)!;
+  // Bulk: Dismiss on To review / Contacted (not leads already made into an
+  // enquiry), Restore on Dismissed. Not on In pipeline.
+  const bulkMode: 'dismiss' | 'restore' | null = tab === 'dismissed' ? 'restore' : tab === 'pipeline' ? null : 'dismiss';
+  const selectable = (l: Lead) => bulkMode === 'restore' || (bulkMode === 'dismiss' && l.status !== 'converted' && !l.converted_job_id);
+  const selectableShown = shown.filter(selectable);
+  const selectedShown = selectableShown.filter((l) => selected.has(l.id));
+  const allShownTicked = selectableShown.length > 0 && selectedShown.length === selectableShown.length;
+  const toggleOne = (id: string) => setSelected((prev) => {
+    const n = new Set(prev);
+    if (n.has(id)) n.delete(id); else n.add(id);
+    return n;
+  });
+  const toggleAllShown = () => setSelected(allShownTicked ? new Set() : new Set(selectableShown.map((l) => l.id)));
 
   const lastActivity = (l: Lead) => {
     if (!l.last_event || !l.last_event_at) return null;
@@ -443,10 +475,34 @@ export default function LeadsPage() {
           {stageRows.length > 0 ? 'Nothing matches these filters.' : tabMeta.empty}
         </div>
       ) : (
+        <>
+        {bulkMode && selectedShown.length > 0 && (
+          <div className="sticky top-0 z-10 mb-2 flex flex-wrap items-center gap-3 rounded-lg border border-purple-200 bg-purple-50 px-3 py-2 text-sm">
+            <span className="font-medium text-gray-800">{selectedShown.length} selected</span>
+            {bulkMode === 'dismiss' ? (
+              <button onClick={() => setModal({ kind: 'dismiss', leads: selectedShown })}
+                className="px-3 py-1 rounded border border-gray-300 bg-white text-gray-700 hover:text-red-600 hover:border-red-300">
+                Dismiss {selectedShown.length}…
+              </button>
+            ) : (
+              <button onClick={() => restoreSelected(selectedShown)} disabled={bulkBusy}
+                className="px-3 py-1 rounded border border-[#7B5EA7] bg-white text-[#7B5EA7] hover:bg-purple-100 disabled:opacity-50">
+                {bulkBusy ? 'Restoring…' : `Restore ${selectedShown.length}`}
+              </button>
+            )}
+            <button onClick={() => setSelected(new Set())} className="text-xs text-gray-500 hover:underline">Clear</button>
+          </div>
+        )}
         <div className="overflow-x-auto rounded-lg border border-gray-200">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-gray-500 text-xs uppercase">
               <tr>
+                <th className="pl-3 py-2 w-6">
+                  {bulkMode && selectableShown.length > 0 && (
+                    <input type="checkbox" checked={allShownTicked} onChange={toggleAllShown}
+                      title={allShownTicked ? 'Untick all' : `Tick all ${selectableShown.length} shown`} aria-label="Tick all shown" />
+                  )}
+                </th>
                 {SORT_COLS.map((c) => (
                   <th key={c.key}
                     className={`px-3 py-2 cursor-pointer select-none hover:text-gray-700 ${c.align === 'right' ? 'text-right' : c.align === 'center' ? 'text-center' : 'text-left'}`}
@@ -471,7 +527,12 @@ export default function LeadsPage() {
                 const onlyDeadJobs = !liveJob && linkedJobs.length > 0;
                 return (
                 <Fragment key={l.id}>
-                  <tr id={`lead-${l.id}`} className={`hover:bg-gray-50 align-top cursor-pointer ${expanded === l.id ? 'bg-purple-50/40' : ''}`} onClick={() => setExpanded(expanded === l.id ? null : l.id)}>
+                  <tr id={`lead-${l.id}`} className={`hover:bg-gray-50 align-top cursor-pointer ${expanded === l.id ? 'bg-purple-50/40' : selected.has(l.id) ? 'bg-purple-50/30' : ''}`} onClick={() => setExpanded(expanded === l.id ? null : l.id)}>
+                    <td className="pl-3 py-2 w-6" onClick={(e) => e.stopPropagation()}>
+                      {selectable(l) && (
+                        <input type="checkbox" checked={selected.has(l.id)} onChange={() => toggleOne(l.id)} aria-label={`Select ${l.artist_name}`} />
+                      )}
+                    </td>
                     <td className="px-3 py-2 font-medium text-gray-900">
                       <span className="mr-1 text-gray-300">{expanded === l.id ? '▾' : '▸'}</span>
                       {l.artist_name}
@@ -601,7 +662,7 @@ export default function LeadsPage() {
                             </button>
                           )}
                           {l.status !== 'converted' && (
-                            <button onClick={() => setModal({ kind: 'dismiss', lead: l })} className="text-xs text-gray-400 hover:text-red-600" title="Dismiss this lead">Dismiss</button>
+                            <button onClick={() => setModal({ kind: 'dismiss', leads: [l] })} className="text-xs text-gray-400 hover:text-red-600" title="Dismiss this lead">Dismiss</button>
                           )}
                         </div>
                       )}
@@ -609,7 +670,7 @@ export default function LeadsPage() {
                   </tr>
                   {expanded === l.id && (
                     <tr className="bg-gray-50">
-                      <td colSpan={8} className="px-6 py-3 text-xs text-gray-600">
+                      <td colSpan={9} className="px-6 py-3 text-xs text-gray-600">
                         <div className="grid gap-x-8 gap-y-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
                           <div className="min-w-0">
                             {l.status === 'contacted' && l.status_note && (
@@ -680,6 +741,7 @@ export default function LeadsPage() {
             </tbody>
           </table>
         </div>
+        </>
       )}
       </>)}
 
@@ -696,8 +758,12 @@ export default function LeadsPage() {
         <SearchHistoryModal runs={runs} loading={runsLoading} onClose={() => setModal(null)} onShowBatch={showBatch} />
       )}
       {modal?.kind === 'dismiss' && (
-        <DismissLeadModal lead={modal.lead} onClose={() => setModal(null)}
-          onDone={async () => { setModal(null); await reloadAll(); }} />
+        <DismissLeadModal leads={modal.leads} onClose={() => setModal(null)}
+          onDone={async (n) => {
+            setModal(null);
+            if (modal.leads.length > 1) { setSelected(new Set()); setNotice({ text: `Dismissed ${n} lead${n === 1 ? '' : 's'}.` }); }
+            await reloadAll();
+          }} />
       )}
       {modal?.kind === 'address' && (
         <AddToAddressBookModal lead={modal.lead} onClose={() => setModal(null)}

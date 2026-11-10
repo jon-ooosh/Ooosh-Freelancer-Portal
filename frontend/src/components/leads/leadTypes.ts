@@ -9,6 +9,8 @@ export interface LeadContact {
   confidence: string;
   /** Added by staff — survives any re-research. */
   manual?: boolean;
+  /** Email typed by staff (e.g. worked out from the company's format) — not confirmed. */
+  email_guessed?: boolean;
 }
 
 export interface MatchCandidate {
