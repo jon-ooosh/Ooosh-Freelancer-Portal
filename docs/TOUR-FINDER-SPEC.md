@@ -742,3 +742,55 @@ several acts:
 - The Watched bands list says how many aren't on Ticketmaster ("usually not bands") with "show
   only those", and those rows have "Find on Ticketmaster" and "Not a band — stop".
 
+
+## 22. Typed emails and bulk dismiss (BUILT, Nov 2026)
+
+Asked for by jon, 10 Nov 2026, after a week of working the band watch and back-catalogue leads.
+No migration.
+
+### 22.1 Typing or correcting an email at "Add to address book"
+
+**Why:** research often finds the manager's name but not their address, and staff can work it out
+from the company's usual format (Dirty Honey: Mark DiDia at Red Light Management →
+`Mark.DiDia@redlightmanagement.com`). Before this, a contact with no email couldn't be added at
+all, and fixing one meant leaving the screen.
+
+**What it does:**
+- Every contact row on the modal has an email box, filled with what research found. Typing one
+  into an empty box ticks the contact. A badly formed address blocks the save.
+- **A typed address that differs from research is saved as NOT confirmed**, never silently as
+  fact:
+  - a new person gets a line in their notes: "Email worked out (e.g. from the company's usual
+    format), not confirmed — Lead Finder, <date>.";
+  - saved as the band's email, the org's notes get the same line, with the address;
+  - the lead's contact keeps the address with `email_guessed: true` (an amber "guessed" chip) and
+    `manual: true`, so "Research again" doesn't throw it away.
+- **A typed address that is already someone in the book is not a guess** — that person is linked,
+  as before, and the chip isn't shown.
+- An existing person's email is read-only on the modal; changing it is the person's own page.
+- Only the typed address travels (`contacts[].email` on `POST /:id/add-to-address-book`); an
+  untouched box sends nothing, so research's address is used as before.
+
+**Deliberately not built:** checking the address actually works (no mail-server probing). A bounce
+on the first outreach email shows on the person through the existing Resend delivery flags.
+
+### 22.2 Bulk dismiss and bulk restore
+
+**Why:** a lot of leads are good bands but too close or not suitable, and dismissing them one at a
+time was slow.
+
+**What it does:**
+- Tick boxes on **To review** and **Contacted**, and a header box that ticks every lead the current
+  filters show. Leads already made into an enquiry can't be ticked. Ticks clear when the tab
+  changes, and the bar's actions only touch ticked leads still shown.
+- **"Dismiss N…"** opens the usual dismiss modal: one reason and one note for all of them. With
+  "Not a fit" it warns that every band stops coming back and their other open tours go too —
+  exactly what the single dismiss does, per lead.
+- **"Restore N"** on the **Dismissed** tab (asks first) is the safety net; it also lifts each
+  band's "not a fit".
+- `POST /leads/dismiss-bulk { ids, reason, note }` and `POST /leads/restore-bulk { ids }` (staff,
+  up to 500 ids). Both run THE single-lead code (`dismissLead()` / `restoreLead()` in
+  `routes/leads.ts`) once per lead, so the suppression, the other-tours cascade, the activity log
+  and the jobs-for-this-tour sync are identical. Leads already dismissed or converted are skipped
+  and counted (`{ dismissed, skipped }`), e.g. a band's second tour that "Not a fit" on its first
+  already took.

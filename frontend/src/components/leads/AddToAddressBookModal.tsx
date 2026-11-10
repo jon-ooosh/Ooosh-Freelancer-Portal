@@ -6,6 +6,11 @@
  * Each contact can be added as a PERSON under a name staff can edit (research
  * often finds no name, or just "info"), or — for shared inboxes like info@ /
  * bookings@ — saved as the BAND's own email instead of a pretend person.
+ *
+ * The email can be typed or corrected here too — e.g. one research couldn't
+ * find, worked out from the company's usual format (TOUR-FINDER-SPEC §22.1).
+ * A typed address is saved as NOT confirmed: a note on the person, "guessed"
+ * on the lead's contact.
  */
 import { useEffect, useState } from 'react';
 import { api } from '../../services/api';
@@ -20,7 +25,13 @@ interface PreviewContact extends LeadContact {
   role: string;
   generic: boolean;
 }
-interface ContactChoice { picked: boolean; as: 'person' | 'org_email'; name: string; }
+interface ContactChoice { picked: boolean; as: 'person' | 'org_email'; name: string; email: string; }
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const validEmail = (e: string) => EMAIL_RE.test(e.trim());
+/** Typed, and not what the research found — saved as not confirmed. */
+const isGuessed = (c: PreviewContact, ch: ContactChoice) =>
+  validEmail(ch.email) && ch.email.trim().toLowerCase() !== (c.contact_email ?? '').trim().toLowerCase();
 interface Preview { proposed_name: string; similar: SimilarOrg[]; contacts: PreviewContact[]; }
 
 export default function AddToAddressBookModal({ lead, onClose, onDone }: {
@@ -53,6 +64,7 @@ export default function AddToAddressBookModal({ lead, onClose, onDone }: {
             picked: c.can_add && c.confidence !== 'low',
             as: c.generic && !c.existing_person ? 'org_email' : 'person',
             name: c.contact_name?.trim() || '',
+            email: c.contact_email?.trim() || '',
           };
         }
         setChoices(init);
@@ -71,13 +83,31 @@ export default function AddToAddressBookModal({ lead, onClose, onDone }: {
     const ch = choices[c.idx];
     return ch?.picked && ch.as === 'person' && !c.existing_person && !ch.name.trim();
   });
+  // …and an email: people are matched by email, so nobody goes in without one.
+  const badEmail = (preview?.contacts ?? []).some((c) => {
+    const ch = choices[c.idx];
+    return ch?.picked && !c.existing_person && !validEmail(ch.email);
+  });
+
+  /** Typing an email into a contact research found none for ticks it. */
+  const setEmail = (c: PreviewContact, value: string) => {
+    const ch = choices[c.idx];
+    update(c.idx, { email: value, ...(!c.can_add && !ch?.picked && validEmail(value) ? { picked: true } : {}) });
+  };
 
   const submit = async () => {
     setSaving(true); setError(null);
     try {
       const contacts = Object.entries(choices)
         .filter(([, ch]) => ch.picked)
-        .map(([idx, ch]) => ({ idx: Number(idx), as: ch.as, name: ch.as === 'person' ? ch.name.trim() || null : null }));
+        .map(([idx, ch]) => {
+          const c = preview?.contacts.find((x) => x.idx === Number(idx));
+          return {
+            idx: Number(idx), as: ch.as, name: ch.as === 'person' ? ch.name.trim() || null : null,
+            // Only an email staff typed or changed is sent — the backend marks it not confirmed.
+            email: c && !c.existing_person && isGuessed(c, ch) ? ch.email.trim() : null,
+          };
+        });
       const body = choice === 'new'
         ? { create_name: name.trim(), contacts }
         : { organisation_id: choice, contacts };
@@ -107,7 +137,7 @@ export default function AddToAddressBookModal({ lead, onClose, onDone }: {
       footer={(
         <>
           <button onClick={onClose} className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
-          <button onClick={submit} disabled={!preview || saving || missingName || (choice === 'new' && !name.trim())}
+          <button onClick={submit} disabled={!preview || saving || missingName || badEmail || (choice === 'new' && !name.trim())}
             className="px-4 py-2 rounded-lg bg-[#7B5EA7] text-white text-sm font-medium hover:bg-[#6a4f92] disabled:opacity-50">
             {saving ? 'Saving…' : choice === 'new' ? 'Create band' : 'Link to this organisation'}
           </button>
@@ -151,20 +181,36 @@ export default function AddToAddressBookModal({ lead, onClose, onDone }: {
           ) : (
             <ul className="space-y-2.5">
               {preview.contacts.map((c) => {
-                const ch = choices[c.idx] ?? { picked: false, as: 'person' as const, name: '' };
+                const ch = choices[c.idx] ?? { picked: false, as: 'person' as const, name: '', email: '' };
+                const canTick = Boolean(c.existing_person) || validEmail(ch.email);
+                const guessed = !c.existing_person && isGuessed(c, ch);
                 return (
-                  <li key={c.idx} className={`rounded-lg border px-3 py-2 ${ch.picked ? 'border-gray-300' : 'border-gray-100'} ${c.can_add ? '' : 'opacity-60'}`}>
-                    <label className={`flex items-start gap-2 ${c.can_add ? 'cursor-pointer' : ''}`}>
-                      <input type="checkbox" className="mt-0.5" disabled={!c.can_add} checked={ch.picked} onChange={() => update(c.idx, { picked: !ch.picked })} />
+                  <li key={c.idx} className={`rounded-lg border px-3 py-2 ${ch.picked ? 'border-gray-300' : 'border-gray-100'}`}>
+                    <label className={`flex items-start gap-2 ${canTick ? 'cursor-pointer' : ''}`}>
+                      <input type="checkbox" className="mt-0.5" disabled={!canTick} checked={ch.picked} onChange={() => update(c.idx, { picked: !ch.picked })} />
                       <span>
-                        <span className="font-medium text-gray-900">{c.contact_email || c.contact_name || c.contact_type}</span>
+                        <span className="font-medium text-gray-900">{c.contact_name || c.contact_email || c.contact_type}</span>
                         <span className="text-gray-400"> · {c.role}</span>
-                        {c.contact_name && c.contact_email && <span className="text-gray-500"> · found as “{c.contact_name}”</span>}
                         <span className={`ml-1 text-[10px] px-1 rounded ${c.confidence === 'high' ? 'bg-green-100 text-green-700' : c.confidence === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>{c.confidence}</span>
-                        {!c.can_add && <span className="block text-xs text-gray-400">No email address — can’t be added safely (we match people by email).</span>}
                       </span>
                     </label>
-                    {c.can_add && ch.picked && (
+                    <div className="mt-1.5 ml-6">
+                      {c.existing_person ? (
+                        <span className="text-xs text-gray-500">{c.contact_email}</span>
+                      ) : (
+                        <>
+                          <input type="email" value={ch.email} onChange={(e) => setEmail(c, e.target.value)} maxLength={320}
+                            placeholder={c.contact_email ? '' : 'No email found — type one, e.g. firstname.lastname@company.com'}
+                            className={`w-full rounded border px-2 py-1 text-sm ${ch.picked && !validEmail(ch.email) ? 'border-amber-400' : 'border-gray-300'}`} />
+                          {guessed && (
+                            <span className="block mt-0.5 text-xs text-amber-700">
+                              {c.contact_email ? 'Changed from what research found' : 'Typed by you'} — saved as not confirmed (a note on the person, “guessed” on the lead).
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    {ch.picked && (
                       <div className="mt-2 ml-6 space-y-1.5">
                         <label className="flex items-center gap-2 cursor-pointer">
                           <input type="radio" name={`as-${c.idx}`} checked={ch.as === 'person'} onChange={() => update(c.idx, { as: 'person' })} />
@@ -191,6 +237,7 @@ export default function AddToAddressBookModal({ lead, onClose, onDone }: {
         </>
       )}
       {missingName && <div className="mt-3 text-xs text-amber-700">Give each new person a name — or save a shared inbox as the band’s email.</div>}
+      {badEmail && <div className="mt-3 text-xs text-amber-700">Each ticked contact needs a proper email address — we match people by email.</div>}
       {error && <div className="mt-3 rounded-lg bg-red-50 text-red-800 px-3 py-2">{error}</div>}
     </LeadModal>
   );

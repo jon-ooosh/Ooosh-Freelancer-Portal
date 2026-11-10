@@ -12,7 +12,9 @@
  *   POST  /cancel                    — stop a stuck run                                         MANAGER
  *   PATCH /:id                       — lifecycle (status / assignment)                          STAFF
  *   POST  /:id/dismiss               — dismiss with a reason ("not a fit" suppresses the act)   STAFF
+ *   POST  /dismiss-bulk              — the same, for many leads at once { ids, reason, note }   STAFF
  *   POST  /:id/restore               — undo a dismiss (and any suppression)                     STAFF
+ *   POST  /restore-bulk              — the same, for many leads at once { ids }                 STAFF
  *   POST  /:id/confirm-match         — link a suggested org as the match                        STAFF
  *   POST  /:id/reject-match          — "none of these" — never suggest them again               STAFF
  *   GET   /:id/address-book-preview  — similar orgs + which contacts we already hold            STAFF
@@ -112,6 +114,15 @@ interface LeadContact {
   source: string | null;
   confidence: string;
   manual?: boolean;
+  /** Staff typed this email (worked out, e.g. from the company's format) — not confirmed. */
+  email_guessed?: boolean;
+}
+
+/** '2026-11-10' → '10 Nov 2026'. */
+function fmtUkDay(ymdStr: string): string {
+  return new Date(`${ymdStr}T00:00:00Z`).toLocaleDateString('en-GB', {
+    day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
+  });
 }
 
 /** DATE → 'YYYY-MM-DD' (timezone-safe — see dates.ts). */
@@ -362,39 +373,89 @@ const dismissSchema = z.object({
   reason: z.enum(DISMISS_REASONS),
   note: z.string().max(1000).nullable().optional(),
 }).refine((b) => b.reason !== 'other' || Boolean(b.note?.trim()), { message: 'Add a note for "Other"' });
+type DismissReason = typeof DISMISS_REASONS[number];
+
+/** Dismiss one lead — THE dismiss, shared by the single and bulk routes. */
+async function dismissLead(
+  lead: Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
+  reason: DismissReason, cleanNote: string | null, userId: string | null,
+): Promise<void> {
+  if (reason === 'not_a_fit') {
+    await query(
+      `INSERT INTO lead_suppressions (artist_key, artist_name, tm_artist_id, reason, note, created_by)
+       VALUES ($1, $2, $3, 'not_a_fit', $4, $5)
+       ON CONFLICT (artist_key) DO UPDATE SET
+         note = EXCLUDED.note, tm_artist_id = COALESCE(EXCLUDED.tm_artist_id, lead_suppressions.tm_artist_id)`,
+      [normaliseArtist(lead.artist_name), lead.artist_name, lead.tm_artist_id ?? null, cleanNote, userId],
+    );
+    // Their other open tours go too — "don't show this band again" means now as well.
+    await query(
+      `UPDATE leads SET status = 'dismissed', status_reason = 'not_a_fit', status_note = $2, updated_at = NOW()
+        WHERE id <> $1 AND status NOT IN ${HIDDEN_STATUSES} AND status <> 'converted'
+          AND (lower(artist_name) = lower($3) OR (COALESCE($4, '') <> '' AND tm_artist_id = $4))`,
+      [lead.id, cleanNote, lead.artist_name, lead.tm_artist_id ?? null],
+    );
+  }
+
+  await query(
+    `UPDATE leads SET status = 'dismissed', status_reason = $2, status_note = $3, updated_at = NOW() WHERE id = $1`,
+    [lead.id, reason, cleanNote],
+  );
+  await logLeadEvent(lead.id, 'dismissed', { detail: `${reason}${cleanNote ? ` — ${cleanNote}` : ''}`, userId });
+}
+
+/** Restore one lead — back to 'new', lifting a "not a fit" suppression. Shared by the single and bulk routes. */
+async function restoreLead(
+  lead: Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
+  userId: string | null,
+): Promise<void> {
+  await query(`DELETE FROM lead_suppressions WHERE artist_key = $1`, [normaliseArtist(lead.artist_name)]);
+  await query(
+    `UPDATE leads SET status = 'new', status_reason = NULL, status_note = NULL, updated_at = NOW() WHERE id = $1`,
+    [lead.id],
+  );
+  await logLeadEvent(lead.id, 'restored', { userId });
+  await syncTourJobs(lead.id);
+}
+
 router.post('/:id/dismiss', authorize(...STAFF_ROLES), validate(dismissSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { reason, note } = req.body as z.infer<typeof dismissSchema>;
     const lead = await loadLead(req.params.id as string);
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
-    const cleanNote = note?.trim() || null;
-
-    if (reason === 'not_a_fit') {
-      await query(
-        `INSERT INTO lead_suppressions (artist_key, artist_name, tm_artist_id, reason, note, created_by)
-         VALUES ($1, $2, $3, 'not_a_fit', $4, $5)
-         ON CONFLICT (artist_key) DO UPDATE SET
-           note = EXCLUDED.note, tm_artist_id = COALESCE(EXCLUDED.tm_artist_id, lead_suppressions.tm_artist_id)`,
-        [normaliseArtist(lead.artist_name), lead.artist_name, lead.tm_artist_id ?? null, cleanNote, req.user?.id ?? null],
-      );
-      // Their other open tours go too — "don't show this band again" means now as well.
-      await query(
-        `UPDATE leads SET status = 'dismissed', status_reason = 'not_a_fit', status_note = $2, updated_at = NOW()
-          WHERE id <> $1 AND status NOT IN ${HIDDEN_STATUSES} AND status <> 'converted'
-            AND (lower(artist_name) = lower($3) OR (COALESCE($4, '') <> '' AND tm_artist_id = $4))`,
-        [lead.id, cleanNote, lead.artist_name, lead.tm_artist_id ?? null],
-      );
-    }
-
-    await query(
-      `UPDATE leads SET status = 'dismissed', status_reason = $2, status_note = $3, updated_at = NOW() WHERE id = $1`,
-      [lead.id, reason, cleanNote],
-    );
-    await logLeadEvent(lead.id, 'dismissed', { detail: `${reason}${cleanNote ? ` — ${cleanNote}` : ''}`, userId: req.user?.id });
+    await dismissLead(lead, reason, note?.trim() || null, req.user?.id ?? null);
     res.json({ data: await loadLead(lead.id) });
   } catch (error) {
     console.error('[leads] dismiss error:', error);
     res.status(500).json({ error: 'Failed to dismiss lead' });
+  }
+});
+
+// POST /api/leads/dismiss-bulk — dismiss many leads with one reason and note
+// (the Leads page's ticked rows). Leads already dismissed, or made into an
+// enquiry, are skipped.
+const BULK_LIMIT = 500;
+const dismissBulkSchema = z.object({
+  ids: z.array(z.string().guid()).min(1).max(BULK_LIMIT),
+  reason: z.enum(DISMISS_REASONS),
+  note: z.string().max(1000).nullable().optional(),
+}).refine((b) => b.reason !== 'other' || Boolean(b.note?.trim()), { message: 'Add a note for "Other"' });
+router.post('/dismiss-bulk', authorize(...STAFF_ROLES), validate(dismissBulkSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { ids, reason, note } = req.body as z.infer<typeof dismissBulkSchema>;
+    const cleanNote = note?.trim() || null;
+    let dismissed = 0;
+    let skipped = 0;
+    for (const id of Array.from(new Set(ids))) {
+      const lead = await loadLead(id);
+      if (!lead || ['dismissed', 'not_relevant', 'converted'].includes(lead.status)) { skipped += 1; continue; }
+      await dismissLead(lead, reason, cleanNote, req.user?.id ?? null);
+      dismissed += 1;
+    }
+    res.json({ data: { dismissed, skipped } });
+  } catch (error) {
+    console.error('[leads] bulk dismiss error:', error);
+    res.status(500).json({ error: 'Failed to dismiss those leads' });
   }
 });
 
@@ -403,17 +464,32 @@ router.post('/:id/restore', authorize(...STAFF_ROLES), async (req: AuthRequest, 
   try {
     const lead = await loadLead(req.params.id as string);
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
-    await query(`DELETE FROM lead_suppressions WHERE artist_key = $1`, [normaliseArtist(lead.artist_name)]);
-    await query(
-      `UPDATE leads SET status = 'new', status_reason = NULL, status_note = NULL, updated_at = NOW() WHERE id = $1`,
-      [lead.id],
-    );
-    await logLeadEvent(lead.id, 'restored', { userId: req.user?.id });
-    await syncTourJobs(lead.id);
+    await restoreLead(lead, req.user?.id ?? null);
     res.json({ data: await loadLead(lead.id) });
   } catch (error) {
     console.error('[leads] restore error:', error);
     res.status(500).json({ error: 'Failed to restore lead' });
+  }
+});
+
+// POST /api/leads/restore-bulk — undo many dismissals at once (the safety net
+// for a bulk dismiss). Only dismissed / not-relevant leads are touched.
+const restoreBulkSchema = z.object({ ids: z.array(z.string().guid()).min(1).max(BULK_LIMIT) });
+router.post('/restore-bulk', authorize(...STAFF_ROLES), validate(restoreBulkSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { ids } = req.body as z.infer<typeof restoreBulkSchema>;
+    let restored = 0;
+    let skipped = 0;
+    for (const id of Array.from(new Set(ids))) {
+      const lead = await loadLead(id);
+      if (!lead || !['dismissed', 'not_relevant'].includes(lead.status)) { skipped += 1; continue; }
+      await restoreLead(lead, req.user?.id ?? null);
+      restored += 1;
+    }
+    res.json({ data: { restored, skipped } });
+  } catch (error) {
+    console.error('[leads] bulk restore error:', error);
+    res.status(500).json({ error: 'Failed to restore those leads' });
   }
 });
 
@@ -523,6 +599,10 @@ const addSchema = z.object({
     idx: z.number().int().min(0),
     as: z.enum(['person', 'org_email']).default('person'),
     name: z.string().trim().max(200).nullable().optional(),
+    // An email staff typed — filling one research didn't find, or correcting
+    // it (e.g. worked out from the company's usual format). Saved as NOT
+    // confirmed: a note on the person, "guessed" on the lead's contact.
+    email: z.string().trim().max(320).email().nullable().optional(),
   })).optional(),
   /** Older client shape: indexes, added as people under the researched name. */
   contact_indexes: z.array(z.number().int().min(0)).optional(),
@@ -563,15 +643,35 @@ router.post('/:id/add-to-address-book', authorize(...STAFF_ROLES), validate(addS
     const chosen = body.contacts
       ?? (body.contact_indexes ?? []).map((idx) => ({ idx, as: 'person' as const, name: null }));
     const seenIdx = new Set<number>();
+    const guessedNote = `Email worked out (e.g. from the company's usual format), not confirmed — Lead Finder, ${fmtUkDay(ukToday())}.`;
+    let contactsChanged = false;
     for (const choice of chosen) {
       if (seenIdx.has(choice.idx)) continue;
       seenIdx.add(choice.idx);
       const c = contacts[choice.idx];
       if (!c) continue;
-      const email = c.contact_email?.trim();
+      const researched = c.contact_email?.trim() || null;
+      const typedEmail = ('email' in choice ? choice.email?.trim() : null) || null;
+      const email = typedEmail || researched;
       if (!email) { skipped.push(c.contact_name || c.contact_type); continue; }
+      // Typed and different from what research found = worked out, not confirmed.
+      const guessed = Boolean(typedEmail) && typedEmail!.toLowerCase() !== (researched ?? '').toLowerCase();
+      if (guessed) {
+        // The lead keeps it too, marked — and as a hand-added contact, so a
+        // "Research again" doesn't throw it away.
+        contacts[choice.idx] = { ...c, contact_email: email, email_guessed: true, manual: true };
+        contactsChanged = true;
+      }
       if (choice.as === 'org_email') {
-        orgEmails.push({ email, outcome: await addOrganisationEmail(orgId, email, `Lead Finder, ${c.source || 'research'}`) });
+        const outcome = await addOrganisationEmail(orgId, email,
+          guessed ? 'Lead Finder — worked out, not confirmed' : `Lead Finder, ${c.source || 'research'}`);
+        if (guessed && outcome === 'set') {
+          await query(
+            `UPDATE organisations SET notes = concat_ws(chr(10), NULLIF(notes, ''), $2::text), updated_at = NOW() WHERE id = $1`,
+            [orgId, `${email}: ${guessedNote}`],
+          );
+        }
+        orgEmails.push({ email, outcome });
         continue;
       }
       // Staff's typed name wins; then the researched name; then the email's
@@ -580,11 +680,18 @@ router.post('/:id/add-to-address-book', authorize(...STAFF_ROLES), validate(addS
       const { first, last } = typed ? splitName(typed) : { first: email.split('@')[0], last: '' };
       const person = await findOrCreatePersonByEmail({
         email, firstName: first, lastName: last, phone: c.contact_phone?.trim() || null,
-        notes: `Added from the Lead Finder — ${c.contact_type.replace('_', ' ')} for ${lead.artist_name}${c.source ? ` (found via ${c.source})` : ''}.`,
+        notes: `Added from the Lead Finder — ${c.contact_type.replace('_', ' ')} for ${lead.artist_name}${c.source ? ` (found via ${c.source})` : ''}.`
+          + (guessed ? ` ${guessedNote}` : ''),
         createdBy: userId,
       });
+      // A typed email that is already someone in the book is real, not a guess.
+      if (guessed && person.outcome === 'existing') contacts[choice.idx] = { ...contacts[choice.idx], email_guessed: false };
       await linkPersonToOrganisation(person.id, orgId, CONTACT_ROLE[c.contact_type] ?? 'General Contact');
       added.push({ name: typed || email, outcome: person.outcome });
+    }
+
+    if (contactsChanged) {
+      await query(`UPDATE leads SET contacts = $2, updated_at = NOW() WHERE id = $1`, [lead.id, JSON.stringify(contacts)]);
     }
 
     // Picking an existing org is a confirmed match (warm); a band created here

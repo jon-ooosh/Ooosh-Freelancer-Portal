@@ -98,6 +98,9 @@ export default function LeadContacts({ lead, onChanged }: { lead: Lead; onChange
               <span className="font-medium">{c.contact_name || TYPE_LABEL[c.contact_type] || c.contact_type}</span>
               <span className="text-gray-400">({TYPE_LABEL[c.contact_type] ?? c.contact_type})</span>
               {c.contact_email && <a href={`mailto:${c.contact_email}`} className="text-blue-600 hover:underline">{c.contact_email}</a>}
+              {c.email_guessed && (
+                <span className="text-[10px] px-1 rounded bg-amber-100 text-amber-700" title="Worked out (e.g. from the company's usual format), not confirmed">guessed</span>
+              )}
               {c.contact_phone && <span>{c.contact_phone}</span>}
               <span className={`text-[10px] px-1 rounded ${c.confidence === 'high' ? 'bg-green-100 text-green-700' : c.confidence === 'medium' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>{c.confidence}</span>
               {c.source && <span className="text-gray-400">· {c.source}</span>}
