@@ -272,6 +272,12 @@ const templates: Record<string, EmailTemplate> = {
           </td></tr>
         </table>
       {{/if}}
+      {{#if attachedGuides}}
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+          <strong>Attached to this email:</strong> {{attachedGuides}}. Worth a read before you log in, and it's all in
+          the portal's Resources too.
+        </p>
+      {{/if}}
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         <strong>Getting paid.</strong> Agree your rate with us before each job, then invoice us for the work you've
         done. We aim to pay invoices on the first Friday one week after we approve them, so usually 8-14 days after

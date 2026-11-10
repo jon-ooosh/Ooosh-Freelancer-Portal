@@ -28,6 +28,7 @@ import { emailService } from '../services/email-service';
 import { getSystemSettings } from './system-settings';
 import { uploadToR2 } from '../config/r2';
 import { documentsOnFile, toFileList } from '../services/freelancer-documents';
+import { approvalEmailDocuments, joinTitles } from '../services/approval-email-documents';
 
 const router = Router();
 
@@ -813,8 +814,16 @@ async function sendApprovalEmail(
     'freelancer_invoice_guide_url',
   ]).catch(() => ({} as Record<string, string | null>));
 
+  // Staff Documents ticked "Attach to the 'you're approved' email" (migration 340).
+  // Never stops the email: a file that can't be fetched is just left off.
+  const guides = await approvalEmailDocuments().catch((err) => {
+    console.error('[freelancers] approval email attachments failed (sending without):', err);
+    return { files: [], titles: [] as string[] };
+  });
+
   const r = await emailService.send('freelancer_approved', {
     to: app.email as string,
+    attachments: guides.files.length ? guides.files : undefined,
     variables: {
       firstName: (app.preferred_name || app.first_name || 'there') as string,
       whatsappUrl: links.freelancer_whatsapp_url || '',
@@ -823,6 +832,7 @@ async function sendApprovalEmail(
       // address to use — theirs may not be the one they'd reach for.
       portalEmail: app.email as string,
       invoiceGuideUrl: links.freelancer_invoice_guide_url || '',
+      attachedGuides: joinTitles(guides.titles),
       notes: notes || '',
     },
   });

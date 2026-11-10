@@ -218,7 +218,10 @@ interface QuoteExpenseLine {
 interface SavedQuote {
   id: string;
   // A freelancer brings an Ooosh van back after hours (backend services/freelancer-ooh-return.ts)
-  ooh_return?: boolean;
+  /** null = automatic (a van due back late is on by default), true / false = set by hand. */
+  ooh_return?: boolean | null;
+  /** What the automatic rule says, and when the van should be back ("17:30"); null back time = no van comes back. */
+  ooh_auto?: { on: boolean; backAt: string | null };
   ooh_returns?: { person_id: string; info_sent_at: string | null; returned_at: string | null }[];
   job_type: string;
   calculation_mode: string;
@@ -2532,20 +2535,24 @@ function JobDetailContent() {
   }
 
   // "Back out of hours": a freelancer brings an Ooosh van back after we've closed.
-  // Turning it on emails the job's freelancers the out-of-hours procedure (gate
-  // code, key drop, where to park, tell us where), today if the job's last day
-  // has come, otherwise on that day at 10:00 (backend services/freelancer-ooh-return.ts).
+  // On emails the job's freelancers the out-of-hours procedure (gate code, key
+  // drop, where to park, tell us where), today if the job's last day has come,
+  // otherwise on that day from 10:00 (backend services/freelancer-ooh-return.ts).
+  // On by default when the van is due back late; a click flips what it shows,
+  // and a flip that matches the automatic answer goes back to automatic (null).
   async function toggleOohReturn(q: SavedQuote) {
-    const on = !q.ooh_return;
-    if (on && !window.confirm(
+    const effective = q.ooh_return ?? !!q.ooh_auto?.on;
+    const next = !effective;
+    const on: boolean | null = next === !!q.ooh_auto?.on ? null : next;
+    if (next && !window.confirm(
       'Email the freelancer(s) on this job how to bring the van back out of hours?\n\n'
       + 'They get the gate code, where the keys go, where to park if the yard is full, and a link to tell us where they parked. '
-      + 'If the job is today it goes now; otherwise on the day at 10am.'
+      + 'If the job is today it goes now; otherwise on the day from 10am.'
     )) return;
     try {
       const res = await api.patch<{ data: { due: boolean; sent: number; failed: number; tooLate?: boolean } }>(`/ooh-return/quotes/${q.id}`, { on });
-      if (on && res.data.tooLate) alert('This job finished more than 2 days ago, so there is nothing to send.');
-      if (on && res.data.failed > 0) alert(`${res.data.failed} email(s) didn't send. Try turning it off and on again.`);
+      if (next && res.data.tooLate) alert('This job finished more than 2 days ago, so there is nothing to send.');
+      if (next && res.data.failed > 0) alert(`${res.data.failed} email(s) didn't send. Try turning it off and on again.`);
       await loadQuotes();
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to update');
@@ -5921,16 +5928,20 @@ function JobDetailContent() {
                           const rows = q.ooh_returns || [];
                           const emailed = rows.filter((r) => r.info_sent_at).length;
                           const parked = rows.filter((r) => r.returned_at).length;
-                          const state = !q.ooh_return ? '' : parked ? ' · parked' : emailed ? ' · emailed' : ' · on the day';
+                          const auto = q.ooh_return == null;
+                          const on = q.ooh_return ?? !!q.ooh_auto?.on;
+                          const backAt = q.ooh_auto?.backAt;
+                          const state = !on ? '' : parked ? ' · parked' : emailed ? ' · emailed' : ' · on the day';
+                          const why = backAt ? `Van due back about ${backAt}.` : 'No van comes back to the yard on this job, or it has no time.';
                           return (
                             <button
                               onClick={() => toggleOohReturn(q)}
-                              className={`text-xs px-2 py-0.5 rounded-full cursor-pointer hover:opacity-80 transition-opacity ${q.ooh_return ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-400'}`}
-                              title={q.ooh_return
-                                ? 'The freelancer(s) get the out-of-hours return email on the job\'s last day. Click to turn off.'
-                                : 'Is a freelancer bringing an Ooosh van back after we\'ve closed? Click to email them how.'}
+                              className={`text-xs px-2 py-0.5 rounded-full cursor-pointer hover:opacity-80 transition-opacity ${on ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-400'}`}
+                              title={on
+                                ? `The freelancer(s) get the out-of-hours return email on the job's last day. ${auto ? `On automatically: ${why}` : 'Turned on by hand.'} Click to turn off.`
+                                : `Is a freelancer bringing an Ooosh van back after we've closed? ${auto ? why : 'Turned off by hand.'} Click to email them how.`}
                             >
-                              🌙 Back out of hours{q.ooh_return ? state : ': no'}
+                              🌙 Back out of hours{on ? `${auto ? ' (auto)' : ''}${state}` : `: no${auto ? '' : ' (by hand)'}`}
                             </button>
                           );
                         })()}
