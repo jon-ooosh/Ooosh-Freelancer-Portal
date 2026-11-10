@@ -1,19 +1,20 @@
-# Changing hire prices — the yearly price list switch
+# Changing hire prices — how we do it
 
-Status: **built Nov 2026, first used for the 1 Jan 2027 van prices.** Backline and the rest follow
-the same steps later.
+Status: **decided 10 Nov 2026 after testing in HireHop: change Price A on the day.** First used for the
+1 Jan 2027 van prices; backline and the rest follow the same steps.
 
-## 1. Decisions (jon, 9 Nov 2026)
+## 1. Decisions (jon, Nov 2026)
 
-1. **HireHop holds every price.** OP never stores or calculates a hire price; it only chooses which of
-   HireHop's price lists (Price A, B or C) a new job uses.
+1. **HireHop holds every price.** OP never stores or calculates a hire price.
 2. **The rule is the booking date.** Anything quoted *and* booked in 2026 keeps 2026 prices. Anything quoted
    or booked from 1 Jan 2027 pays 2027 prices. A 2026 quote still not booked at the end of the year is
    re-quoted at 2027 prices.
-3. **The new prices go into a spare list (Price B) ahead of time.** On the day, OP starts creating jobs on
-   it. Nobody edits HireHop on New Year's Eve, and a job already made keeps the prices on its lines.
-4. **The old prices stay in Price A as the reference** until next year's change overwrites them.
-5. **Panel vans keep their 2026 prices.** The eTransit is in-house only.
+3. **Prices change in Price A, on the day** (§4 is why). The new figures and structures are prepared ahead
+   in Price B, tested on a Price-B scratch job, then copied into Price A on the first working day of the
+   new prices. Jobs already made keep the prices on their lines.
+4. **Panel vans keep their 2026 prices.** The eTransit is in-house only.
+5. **The OP price-list switch stays OFF** (Settings › HireHop prices = HireHop's default, no date). It was
+   built for the Price-B route (§5), which the tests ruled out.
 
 ## 2. How HireHop prices a van
 
@@ -22,14 +23,10 @@ Price A/B/C on the van is the **one-day rate**. A *custom price structure* (one 
 `d × (that length's daily rate) ÷ (one-day rate)`. Beyond the last row (8 days), HireHop carries on at the
 last day's step, which is the 7+ day rate.
 
-A structure is per price list: `PRICES._1.TYPE` / `_2.TYPE` / `_3.TYPE` on the stock item are separate, so
-Price B can point at a new structure while Price A keeps the old one.
+A structure is per price list: `PRICES._1.TYPE` / `_2.TYPE` / `_3.TYPE` on the stock item are separate.
+**Never edit a structure in place** — make a new one and point the price at it.
 
-**Never edit a structure that existing jobs use.** A job whose dates change can re-multiply with whatever
-the structure says *then* (test 3 in §4 confirms it), so changing the 2026 multipliers in place could quietly
-re-price 2026 quotes. Make new structures.
-
-## 3. The 2027 vans — what to set up in HireHop
+## 3. The 2027 vans
 
 | Van class | 1–2 days | 3–4 days | 5–6 days | 7+ days |
 |---|---|---|---|---|
@@ -39,7 +36,7 @@ re-price 2026 quotes. Make new structures.
 | Mini (Vito) | £130 | £120 | £110 | £100 |
 
 **New price structures** (Period: Days). Checked: day rate × multiplier gives the table's total to the penny
-for 1–8 days.
+for 1–8 days. Built in HireHop as the "… 27 rates" structures (10 Nov 2026).
 
 | Days | Premium 2027 | Standard 2027 | Basic 2027 | Mini 2027 |
 |---|---|---|---|---|
@@ -52,65 +49,46 @@ for 1–8 days.
 | 7 | 5.775 | 5.3529412 | 5.6 | 5.3846154 |
 | 8 | 6.6 | 6.1176471 | 6.4 | 6.1538462 |
 
-**On each van item, Price B** = the 1–2 day rate above, with its 2027 structure:
-Premium auto + manual (1130, 10), Standard auto + manual (2065, 2066), Basic auto + manual (1129, 11),
-Vito auto + manual (1016, 1303). **Panel vans: Price B = Price A, same structure** (prices unchanged).
-Anything else a van job can carry (Towbar, trailer, accessories) also needs its **Price B filled in**: an item
-whose Price B is £0 quotes at **£0** on a 2027 job.
+**State on 10 Nov 2026:** Price B on Premium (1130, 10), Basic (1129, 11) and Vito (1016, 1303) holds the
+2027 one-day rate on its 2027 structure, tested on a Price-B job across hire lengths. Standard (2065, 2066)
+has the 2027 figures in both A and B. Trailer: in Vehicle accessories, Price A and B set.
 
-**Standard MWB** has no 2026 price. Its Price A and Price B are both the 2027 figures, and both must use the
-**Standard 2027** structure. It was created on structure 101; if that is the Basic one, a 3-day Standard
-quotes £457.24 instead of £465.
+**The changeover — first working day of 2027, before anyone quotes:** on each of the six items above, set
+**Price A = its Price B figure** and **Price A's structure = its "27 rates" structure**. That's all.
 
-## 4. Test before the switch (in HireHop, on a scratch job)
+## 4. What the HireHop tests showed (10 Nov 2026)
 
-1. Set a scratch job's price group to **B**, add each van, and check the totals against the table at 1, 3, 5,
-   7 and 10 days (e.g. Premium: £200, £570, £875, £1,155, £1,650).
-2. On a job with a van already on it, **change the price group** from A to B. Do the lines re-price, or keep
-   their prices? (OP never changes a job's group, but it is worth knowing.)
-3. On a group-A job, **change the dates**. The van must re-price with the 2026 structure, not the 2027 one.
-4. Optional, OP end to end: set Settings › HireHop prices to B with no date, create one test enquiry in
-   HireHop from OP, check it is on Price B, then put the date back.
-5. **On the Price-B scratch job, add a backline item whose Price B is £0.** £0 means every non-van item
-   needs a Price B (see the warning in §5). The Price A figure means HireHop falls back to A and nothing
-   more is needed.
-6. **Does an existing line re-price from the stock item?** Make a throwaway item (Price A £10/day), put it on
-   a scratch Price-A job for 3 days, then change the item's Price A to £20. Change the job's dates to 4 days:
-   £40 means the line keeps its own £10 rate (old quotes are safe); £80 means it re-reads the stock price.
+1. **A Price-B job prices EVERY line from Price B.** Backline on a Price-B scratch job came out at £0. So a
+   job on a list prices everything from it, including the lines OP adds by stock number (additional driver
+   1324, VE103B 1023, staging items). There is no fallback to Price A.
+2. **A line keeps its own price.** A test item at £10/day was put on a job for 3 days, its stock price changed
+   to £20, then the job changed to 4 days: the line went to £40. Old quotes are safe when Price A changes.
+3. **Still to confirm: a changed STRUCTURE.** Same test, but change the item's price structure instead of
+   its price, then change the job's days. If the line follows the new structure, a 2026 job whose dates are
+   edited after the changeover is re-multiplied with the 2027 multipliers on its 2026 day rate (a 3-day
+   Premium: £513 instead of £510; 7 days: £1,039.50 instead of £1,050). Small, and only on edited jobs, but
+   check those in January if so.
 
-## 5. The switch (OP)
+After the changeover:
+- **A job copied by HireHop keeps its source's prices.** That covers "Quote another option" and Re-open, so an
+  option added in January to a December quote is at 2026 prices; re-add the vans if it should be 2027.
+- **Unbooked 2026 quotes are re-quoted by hand** in early January (pipeline: enquiry / quoting / paused /
+  provisional, created before 2027): re-add the vans so they take the new price.
 
-**Settings › HireHop prices** (admin): *Price list for new jobs* = **B**, *From* = **2027-01-01**. From that UK
-date every job OP creates in HireHop is born on Price B (`price_group: 1` on `save_job.php`). Before it, OP
-sends nothing and HireHop uses Price A, as always. Code: `services/hh-price-group.ts`, read once per create in
-`routes/pipeline.ts`. Settings `hh_price_group`, `hh_price_group_from` (migration 338).
+## 5. The OP price-list switch (built, not used)
 
-> **⚠ OPEN, 10 Nov 2026 — do not let the switch go live until this is settled.** A job takes EVERY
-> line's price from its one list, not just the vans'. As of 10 Nov 2026 Price B is £0 on everything but the
-> vans and trailer, so a Price-B job would quote £0 for all backline, rehearsal rooms, storage and sale
-> items. That includes the lines OP adds by stock number without a price of its own: additional driver
-> (1324), VE103B cert (1023) and the staging calculator's items. Either every item gets a Price B
-> before 1 Jan (a copy of A, with the same price structure), or the switch is dropped and the 2027 van
-> rates go into Price A on the first working day. Which one depends on HireHop's behaviour (§4 tests
-> 5–6, in the reply of 10 Nov 2026).
+**Settings › HireHop prices** (admin) picks the list (A/B/C) jobs OP creates are born on, from a UK date
+(`services/hh-price-group.ts`, read once per create in `routes/pipeline.ts`; settings `hh_price_group`,
+`hh_price_group_from`, migration 338). Empty = OP sends nothing and HireHop uses Price A. **It is off.**
+Turning it on needs EVERY item a job can carry priced in that list first (§4.1), or those lines quote £0.
 
-What it does **not** do:
-- **A job copied by HireHop keeps its source's list and line prices.** That covers "Quote another option" and
-  Re-open. An option added in January to a December quote is at 2026 prices; re-add the vans if it should be
-  2027.
-- **A job made directly in HireHop** (not through OP) is on Price A, the old prices.
-- **It does not touch any existing job.** In early January, re-quote the 2026 quotes that were never booked
-  (pipeline: enquiry / quoting / paused / provisional, created before 2027).
+## 6. Next year, and backline
 
-## 6. Next year
-
-Leapfrog. In late 2027, overwrite **Price A** with the 2028 prices (and new structures), test, then set the
-switch to **A** from 2028-01-01. Price B then holds 2027 as the reference. Until then, **a new stock item needs
-the same price in A and B**, or it quotes £0 on whichever list is live.
+The same as §3: prepare new figures in Price B (new structures where the multipliers change), test on a
+Price-B scratch job, copy into Price A on the day. Price B is a staging area only — nothing quotes from it.
 
 **OP readers of Price A:** the Backline Matcher (`services/backline-stock.ts`, `PRICE_1`) and the Shop Till
-(sale items, `PRICES._1`). Neither touches vans. Before backline prices move to B, point the Matcher at the
-live list; leave the shop's sale items alone.
+(sale items, `PRICES._1`). Both stay right, because Price A is always the live price.
 
 ## 7. Built with it: Standard MWB and towbars (Nov 2026)
 
