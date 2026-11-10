@@ -63,11 +63,11 @@ has the 2027 figures in both A and B. Trailer: in Vehicle accessories, Price A a
    1324, VE103B 1023, staging items). There is no fallback to Price A.
 2. **A line keeps its own price.** A test item at £10/day was put on a job for 3 days, its stock price changed
    to £20, then the job changed to 4 days: the line went to £40. Old quotes are safe when Price A changes.
-3. **Still to confirm: a changed STRUCTURE.** Same test, but change the item's price structure instead of
-   its price, then change the job's days. If the line follows the new structure, a 2026 job whose dates are
-   edited after the changeover is re-multiplied with the 2027 multipliers on its 2026 day rate (a 3-day
-   Premium: £513 instead of £510; 7 days: £1,039.50 instead of £1,050). Small, and only on edited jobs, but
-   check those in January if so.
+3. **A line follows a changed STRUCTURE but keeps its own day rate** (jon, confirmed from experience,
+   10 Nov 2026). So once Price A points at the 2027 structures, any 2026-priced job whose dates are edited
+   is re-multiplied with the 2027 multipliers on its 2026 day rate: a 3-day Premium becomes £513 instead
+   of £510, 7 days £1,039.50 instead of £1,050. Unbooked quotes are re-quoted anyway. **Booked jobs we
+   honour at 2026 prices need their van line checked by hand whenever their dates change in 2027.**
 
 After the changeover:
 - **A job copied by HireHop keeps its source's prices.** That covers "Quote another option" and Re-open, so an
