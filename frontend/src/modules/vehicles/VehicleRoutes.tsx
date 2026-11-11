@@ -29,6 +29,7 @@ import { SettingsPage } from './pages/SettingsPage'
 import { CostReportPage } from './pages/CostReportPage'
 import { VehicleSettingsPage } from './pages/VehicleSettingsPage'
 import { VehicleSalePage } from './pages/VehicleSalePage'
+import { vmPath } from './config/route-paths'
 
 /**
  * All Vehicle Management routes.
@@ -79,7 +80,9 @@ export function VehicleRoutes() {
         <Route path="fleet-map" element={<FleetMapPage />} />
         <Route path="costs" element={<CostReportPage />} />
         <Route path="settings" element={<SettingsPage />} />
-        <Route path="*" element={<Navigate to="" replace />} />
+        {/* Unknown address -> the vehicles home. A full path, not to="": react-router 7 resolves
+            "" inside this catch-all to the bad address itself, so it never redirected (Nov 2026). */}
+        <Route path="*" element={<Navigate to={vmPath('/')} replace />} />
       </Routes>
     </QueryClientProvider>
   )
