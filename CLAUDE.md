@@ -317,7 +317,7 @@ never for money in. **Its settings are `cashflow_settings`, NOT `system_settings
 reads that). Builder `services/cashflow-forecast.ts`, pure maths `cashflow-schedule.ts`. **§13 is what
 shipped and where it differs from the plan**; §11 the phases. **Phase 2 BUILT (§13.2):** freelancers booked and not yet invoiced, enquiries weighted by learned booking rates (the band), "What would fix it". THE deposit rule is `services/deposit-rule.ts` (+ frontend `lib/depositRule.ts`). **Phase 3 (§13.3):** regular-payment suggestions from Xero bank history, the card receipts check, Wise read live; **Xero's API can't give the statement balance** (unreconciled data is withheld), so the Monday check-in stays. **§13.4:** VAT typed by quarter on the check-in (`cashflow-vat.ts`; negative = HMRC owes us, never projected; a filed return is a planned item), warnings that name their vans/jobs, a cancelled job's banner that follows its refund reminders (`readRefundOutcome()`), and "Dealt with outside OP" on overpaid invoices (OP note only). Mockup in `docs/design/cashflow-forecast/`.
 
-**STEPS 1–2 BUILT, Nov 2026:** `docs/BUSINESS-FIGURES-SPEC.md` — enquiry-to-booking
+**STEPS 1–2 + MARKETING PAGE BUILT, Nov 2026:** `docs/BUSINESS-FIGURES-SPEC.md` — enquiry-to-booking
 conversion and reply speed by channel, admin-only, beside the cash forecast. Step 2 is Money › Business
 figures (`/money/business`, `services/business-figures.ts` + pure `business-figures-maths.ts`): booking rate
 by month / channel / likelihood / value / service / person, first reply and time to quote in office hours,
@@ -330,9 +330,11 @@ enquiry by guesswork** — the report finds the client's first email by address 
 Steps 2 (booking-rate tab) and 3 (reply speed, ~a month of data) are in the spec. **§7: where an enquiry came
 from** — "came in by" stays `jobs.enquiry_source`; "heard about us" (optional, never gates an enquiry) and the
 website's ad / campaign tags live in `job_marketing_source` (mig 341, `services/marketing-source.ts` — every
-value cleaned, never throws); returning client is worked out from history, never asked. §8 is the agreed
-marketing roadmap (tracked links / QR on `go.oooshtours.co.uk`, review requests — never only the happy ones,
-never rewarded — and referrals).
+value cleaned, never throws); returning client is worked out from history, never asked. **§8a is the Marketing
+page** (Jobs › Marketing, admin-only, mig 342): adverts with a "next thing due" To Do, and tracked links / QR on
+`go.oooshtours.co.uk/<code>` (`routes/go.ts` → `/api/go/<code>`, `services/marketing-links.ts`) — **a link's code
+never changes once made (it's printed); a bad or paused code goes to the home page, never a dead end.** §8b is the
+rest of the roadmap (review requests — never only the happy ones, never rewarded — and referrals).
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
