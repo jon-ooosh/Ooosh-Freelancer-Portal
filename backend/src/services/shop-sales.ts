@@ -50,6 +50,15 @@ const DEFAULT_DISCOUNT_CAPS: Record<string, number> = {
 /** Fallback hold before a sale drains to HireHop (Window A, §8). */
 const DEFAULT_PUSH_HOLD_SECONDS = 120;
 
+/**
+ * A sitter sale asks staff for a tick only at this much or more (gross, inc VAT)
+ * — jon, Nov 2026: the review queue was nearly all £1.50 / £3 cans. Applies to
+ * every tender, "on their bill" included. Per SALE, not per night; the night's
+ * total still shows on the lock-up email. 0 = review every sitter sale (the old rule).
+ */
+const SITTER_REVIEW_MIN_KEY = 'shop_sitter_review_min_gbp';
+const DEFAULT_SITTER_REVIEW_MIN_GBP = 100;
+
 export interface ShopSaleLineInput {
   hhStockId: number;
   qty: number;
@@ -168,6 +177,19 @@ export async function getPushHoldSeconds(): Promise<number> {
     // fall through
   }
   return DEFAULT_PUSH_HOLD_SECONDS;
+}
+
+/** The sitter-sale review threshold in £ (see SITTER_REVIEW_MIN_KEY). */
+export async function getSitterReviewMinGbp(): Promise<number> {
+  try {
+    const r = await query(`SELECT value FROM system_settings WHERE key = $1`, [SITTER_REVIEW_MIN_KEY]);
+    const raw = r.rows[0]?.value;
+    const n = Number(raw);
+    if (raw != null && String(raw).trim() !== '' && Number.isFinite(n) && n >= 0) return n;
+  } catch {
+    // fall through
+  }
+  return DEFAULT_SITTER_REVIEW_MIN_GBP;
 }
 
 // ── Pricing ──────────────────────────────────────────────────────────────
@@ -326,6 +348,9 @@ export async function createShopSale(
   const { priced, totals } = await validateShopSale(input, user);
 
   const holdSeconds = await getPushHoldSeconds();
+  // Only a sitter sale big enough to be worth a look waits for a staff tick.
+  const needsReview = (input.recordedIn || 'staff_till') === 'sitter_till'
+    && totals.gross >= await getSitterReviewMinGbp();
 
   const client = await getClient();
   try {
@@ -354,7 +379,7 @@ export async function createShopSale(
         input.recordedIn || 'staff_till',
         input.soldToPersonId || null,
         input.kind === 'sale' ? (input.soldToJobId || null) : null,
-        (input.recordedIn || 'staff_till') === 'sitter_till',
+        needsReview,
         input.notes || null,
         String(holdSeconds),
         user.personId || null,

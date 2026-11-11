@@ -53,6 +53,7 @@ async function freshModule(opts: {
   stock?: StockRow[];
   vatMap?: string | null;
   caps?: string | null;
+  reviewMin?: string | null;
 } = {}): Promise<ShopSales> {
   jest.resetModules();
   const db = await import('../../config/database');
@@ -67,7 +68,9 @@ async function freshModule(opts: {
         ? (opts.caps === undefined ? null : opts.caps)
         : key === 'shop_vat_rate_map'
           ? (opts.vatMap === undefined ? '{"0":20,"1":0,"2":5}' : opts.vatMap)
-          : null;
+          : key === 'shop_sitter_review_min_gbp'
+            ? (opts.reviewMin === undefined ? null : opts.reviewMin)
+            : null;
       return { rows: value === null ? [] : [{ value }] };
     }
     return { rows: [] };
@@ -200,5 +203,67 @@ describe('the card reader tender (STRIPE-TERMINAL-SPEC §14)', () => {
       { id: 'u1', role: 'admin' },
     );
     expect(r.totals.gross).toBe(18);
+  });
+});
+
+/**
+ * Sitter sales ask for a staff tick only at £100 or more (jon, Nov 2026) — the
+ * queue was nearly all £1.50 / £3 cans. Per sale, gross, any tender.
+ */
+describe('which sitter sales wait for a staff tick', () => {
+  it('reads the threshold, defaulting to £100', async () => {
+    await expect((await freshModule()).getSitterReviewMinGbp()).resolves.toBe(100);
+    await expect((await freshModule({ reviewMin: '250' })).getSitterReviewMinGbp()).resolves.toBe(250);
+    // 0 = the old rule, every sitter sale.
+    await expect((await freshModule({ reviewMin: '0' })).getSitterReviewMinGbp()).resolves.toBe(0);
+    // Junk or blank never means "review nothing" — back to the default.
+    await expect((await freshModule({ reviewMin: 'lots' })).getSitterReviewMinGbp()).resolves.toBe(100);
+    await expect((await freshModule({ reviewMin: ' ' })).getSitterReviewMinGbp()).resolves.toBe(100);
+    await expect((await freshModule({ reviewMin: '-5' })).getSitterReviewMinGbp()).resolves.toBe(100);
+  });
+
+  /** Ring up a sale and return the needs_review value it was saved with. */
+  async function savedNeedsReview(
+    qty: number,
+    recordedIn: 'staff_till' | 'sitter_till',
+    reviewMin?: string,
+  ): Promise<unknown> {
+    const shop = await freshModule({ stock: [TAPE], reviewMin });
+    const db = await import('../../config/database');
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    (db.getClient as jest.Mock).mockResolvedValue({
+      query: jest.fn(async (sql: string, params?: unknown[]) => {
+        calls.push({ sql, params });
+        return sql.includes('INSERT INTO shop_sales')
+          ? { rows: [{ id: 'sale-1', push_after: new Date() }] }
+          : { rows: [] };
+      }),
+      release: jest.fn(),
+    });
+    await shop.createShopSale(
+      { kind: 'sale', lines: [{ hhStockId: 25, qty }], tender: 'cash', recordedIn },
+      { id: null, personId: 'p1', role: 'freelancer' },
+    );
+    const insert = calls.find(c => c.sql.includes('INSERT INTO shop_sales'));
+    // needs_review is the 11th value ($11) in the INSERT.
+    return insert?.params?.[10];
+  }
+
+  // TAPE is £7.50 ex VAT at 20% = £9.00 gross each.
+  it('a small sitter sale does not ask for a tick', async () => {
+    await expect(savedNeedsReview(1, 'sitter_till')).resolves.toBe(false);   // £9
+    await expect(savedNeedsReview(11, 'sitter_till')).resolves.toBe(false);  // £99
+  });
+
+  it('a sitter sale of £100 or more does', async () => {
+    await expect(savedNeedsReview(12, 'sitter_till')).resolves.toBe(true);   // £108
+  });
+
+  it('a threshold of 0 brings back the old rule — every sitter sale', async () => {
+    await expect(savedNeedsReview(1, 'sitter_till', '0')).resolves.toBe(true);
+  });
+
+  it('a staff till sale never asks, however big', async () => {
+    await expect(savedNeedsReview(20, 'staff_till')).resolves.toBe(false);
   });
 });

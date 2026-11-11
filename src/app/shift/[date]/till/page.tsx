@@ -15,8 +15,8 @@
  *
  * A sale lands in OP instantly and goes to HireHop a couple of minutes later,
  * exactly like one taken in the office — so it can be cancelled from tonight's
- * list until then. After that, refunds are the office's. Every sitter sale is
- * checked by staff the next morning.
+ * list until then. After that, refunds are the office's. A sitter sale of £100
+ * or more is checked by staff the next morning (shop_sitter_review_min_gbp).
  */
 
 import { useEffect, useState, useCallback, useRef } from 'react'
