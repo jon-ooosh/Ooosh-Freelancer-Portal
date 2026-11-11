@@ -34,10 +34,10 @@ updates:
       # TypeScript 7 broke the Netlify build (PR 1625). Revisit once Next supports it.
       - dependency-name: "typescript"
         versions: [">=7.0.0"]
-      # ESLint 10 broke the Netlify build: Next 15 lints during `next build` (PR 1626).
-      # Next 16 stops doing that - revisit after it is merged.
-      - dependency-name: "eslint"
-        versions: [">=9.0.0"]
+      # Tailwind 4 broke the Netlify build (PR 1653): it moves the config (tailwind.config.js,
+      # the portal's design tokens) into CSS - a planned migration, not a Dependabot merge.
+      - dependency-name: "tailwindcss"
+        versions: [">=4.0.0"]
       # Types must match the Node that runs the code: Netlify NODE_VERSION 22 (PR 1628
       # offered 26). Raise this with the Node major (docs/MAINTENANCE.md, Node 22 -> April 2027).
       - dependency-name: "@types/node"
@@ -63,6 +63,10 @@ updates:
       # Types must match the server's Node 22 - raise with the Node major (see the root entry).
       - dependency-name: "@types/node"
         versions: [">=23.0.0"]
+      # Express 5 broke the backend build (PR 1656): it changes route path syntax and
+      # error handling across every route - a planned migration, not a Dependabot merge.
+      - dependency-name: "express"
+        versions: [">=5.0.0"]
 
   # --- OP frontend (React + Vite SPA) ---
   - package-ecosystem: "npm"
@@ -80,6 +84,21 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # Skipped on purpose (Nov 2026) - planned migrations, not Dependabot merges.
+    ignore:
+      # React 19 broke the frontend build (PRs 1650, 1652 - Dependabot also split react and
+      # react-dom, which only work as a pair). Lift all four together.
+      - dependency-name: "react"
+        versions: [">=19.0.0"]
+      - dependency-name: "react-dom"
+        versions: [">=19.0.0"]
+      - dependency-name: "@types/react"
+        versions: [">=19.0.0"]
+      - dependency-name: "@types/react-dom"
+        versions: [">=19.0.0"]
+      # Tailwind 4 moves the config into CSS (see the root entry, PR 1653).
+      - dependency-name: "tailwindcss"
+        versions: [">=4.0.0"]
 
   # --- GitHub Actions used by workflows (e.g. deploy.yml) ---
   - package-ecosystem: "github-actions"
