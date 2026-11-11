@@ -981,6 +981,12 @@ export async function sendUnmatchedIncomingAlert(incomingId: string): Promise<vo
     : `<p>No job could be found from the reference or the payer name.</p>`;
   const html = `
     <p>A bank transfer has arrived in Wise that OP could not match to a job on its own.</p>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 8px;">
+      <tr><td style="border-radius:8px;background-color:#7B5EA7;">
+        <a href="${esc(link)}" style="display:inline-block;padding:12px 22px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">Match this payment in OP →</a>
+      </td></tr>
+    </table>
+    <p style="margin:0 0 16px;font-size:13px;color:#64748b;">Pick the job and whether it is hire money or the excess, and OP records it, creates the HireHop deposit and emails the client.</p>
     <table cellpadding="4" style="border-collapse:collapse">
       <tr><td><strong>From</strong></td><td>${esc(row.payer_name || 'unknown')}</td></tr>
       <tr><td><strong>Amount sent</strong></td><td>£${amount.toFixed(2)}${row.fee ? ` (fee £${parseFloat(row.fee).toFixed(2)}, £${parseFloat(row.amount_credited || row.amount).toFixed(2)} landed)` : ''}</td></tr>
@@ -991,7 +997,6 @@ export async function sendUnmatchedIncomingAlert(incomingId: string): Promise<vo
     </table>
     ${candidateHtml}
     ${xeroHtml}
-    <p><a href="${esc(link)}">Match it to a job in OP</a> — pick the job and whether it is hire money or the excess, and OP records it, creates the HireHop deposit and emails the client.</p>
   `;
   const subjectRef = row.reference ? ` (ref "${String(row.reference).slice(0, 40)}")` : '';
   const res = await emailService.sendRaw({
