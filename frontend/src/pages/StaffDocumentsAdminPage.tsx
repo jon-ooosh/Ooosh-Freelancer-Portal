@@ -23,6 +23,8 @@ export interface DocRow {
   shareable_with_freelancers: boolean;
   // Freelancers must confirm they've read it (backend services/freelancer-document-reads.ts).
   freelancer_read_required?: boolean;
+  // Attached to the "you're approved" email (backend services/approval-email-documents.ts).
+  attach_to_approval_email?: boolean;
   /** Approved freelancers with a portal login who have read the current version / are asked. */
   freelancer_read_count?: number | null;
   freelancer_audience_count?: number | null;
@@ -192,6 +194,7 @@ export function DocFormModal({ doc, users, canPublish = true, tagSuggestions = [
   const [review, setReview] = useState<string>(doc ? (doc.review_interval_months?.toString() || '') : '12');
   const [shareable, setShareable] = useState<boolean>(doc?.shareable_with_freelancers ?? false);
   const [readRequired, setReadRequired] = useState<boolean>(doc?.freelancer_read_required ?? false);
+  const [attachToApproval, setAttachToApproval] = useState<boolean>(doc?.attach_to_approval_email ?? false);
   const canShare = SHAREABLE_CATEGORIES.includes(category);
   const [tags, setTags] = useState<string[]>(doc?.tags || []);
   const [ownerIds, setOwnerIds] = useState<string[]>(doc?.owner_user_ids || []);
@@ -213,6 +216,7 @@ export function DocFormModal({ doc, users, canPublish = true, tagSuggestions = [
         || review !== (doc!.review_interval_months?.toString() || '')
         || shareable !== (doc!.shareable_with_freelancers ?? false)
         || readRequired !== (doc!.freelancer_read_required ?? false)
+        || attachToApproval !== (doc!.attach_to_approval_email ?? false)
         || contentReview !== (doc!.content_review_interval_months?.toString() || '')
         || JSON.stringify(roles) !== JSON.stringify(doc!.target_roles || [])
         || JSON.stringify(userIds) !== JSON.stringify(doc!.target_user_ids || [])
@@ -237,6 +241,7 @@ export function DocFormModal({ doc, users, canPublish = true, tagSuggestions = [
         review_interval_months: numOrNull(review),
         shareable_with_freelancers: canShare ? shareable : false,
         freelancer_read_required: canShare && shareable ? readRequired : false,
+        attach_to_approval_email: canShare && shareable ? attachToApproval : false,
         tags: tags.length ? tags : null,
         owner_user_ids: ownerIds.length ? ownerIds : null,
         content_review_interval_months: numOrNull(contentReview),
@@ -358,6 +363,14 @@ export function DocFormModal({ doc, users, canPublish = true, tagSuggestions = [
                   The portal shows it as &ldquo;To read&rdquo; until they tap &ldquo;I&apos;ve read and understood this&rdquo;,
                   and you can see who has. A new version asks them all again. Nothing is blocked if they don&apos;t.
                   Best for documents everyone needs (Working with Ooosh, Getting started, How to invoice).
+                </p>
+                <label className="mt-2 flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" checked={attachToApproval} onChange={(e) => setAttachToApproval(e.target.checked)} />
+                  Attach to the &ldquo;you&apos;re approved&rdquo; email
+                </label>
+                <p className="text-xs mt-1 text-gray-400">
+                  New freelancers get it with their approval email, so they can read it before they log in.
+                  Always the current version; only an uploaded file is attached, not a written document.
                 </p>
               </div>
             )}
@@ -881,6 +894,10 @@ export default function StaffDocumentsAdminPage() {
                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${approvalPill(d.approval_status)!.c}`}>{approvalPill(d.approval_status)!.t}</span>
                       )}
                       {reviewDue(d) && <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700">Review due</span>}
+                      {d.attach_to_approval_email && d.shareable_with_freelancers && (
+                        <span title="Attached to the email a freelancer gets when they're approved"
+                          className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700">In the approval email</span>
+                      )}
                       {d.ai_shared && (
                         <span title={`Claude reads this for: ${(d.ai_topics || []).map((t) => AI_TOPIC_LABELS[t as AiTopic]?.label || t).join(', ')}`}
                           className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-100 text-indigo-700">Shared with Claude</span>

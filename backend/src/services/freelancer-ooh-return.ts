@@ -9,9 +9,17 @@
  * (never the letterbox or the grey cupboard), leave the backline in the van, and
  * a link to tell us where they parked (the hirers' /return-parking/:token page).
  *
- * - Staff tick "Back out of hours" on the freelancer's job (`quotes.ooh_return`).
+ * - On by default when the van is due back late (Nov 2026, migration 339): a leg
+ *   whose van comes back to the yard (vanComesBack()) and is due back at or after
+ *   `ooh_auto_from` (16:40) or before `ooh_auto_until` (09:00), by the venue time
+ *   + about half an hour on site + the drive back (backAtYardMinutes()). The
+ *   automatic answer is worked out when it's needed, never stored, so a changed
+ *   time can't leave a stale copy.
+ * - Staff can still turn it on or off by hand on the freelancer's job
+ *   (`quotes.ooh_return`: NULL automatic, TRUE on, FALSE off).
  * - The email goes on the job's LAST day (a Van & Driver run may span days): at
- *   once if the tick lands on or after that day, otherwise by the 10:00 run.
+ *   once if a hand tick lands on or after that day, otherwise by the run every
+ *   half hour from 10:00 (so a time changed on the day is still caught).
  *   Once per freelancer per job (`freelancer_ooh_returns.info_sent_at`).
  * - It ignores the freelancer's email pause: it's an instruction for a job they
  *   have taken, like a cancellation (never shouldSuppressInformational()).
@@ -38,6 +46,79 @@ const LINK_DAYS_AFTER = 2;
 
 const newToken = () => randomBytes(24).toString('base64url');
 
+// ── The automatic rule ──────────────────────────────────────────────────────
+
+/** Roughly the calculator's on-site allowance for a delivery or collection (handover + unload). */
+const ON_SITE_MINS = 30;
+
+/** "16:40" (or "16:40:00") as minutes after midnight; null if it isn't a time. */
+export function hhmmToMinutes(v: unknown): number | null {
+  const m = /^\s*([01]?\d|2[0-3]):([0-5]\d)/.exec(String(v ?? ''));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+/** The facts on a quotes row the rule reads. */
+export interface OohLegFacts {
+  job_type?: unknown; what_is_it?: unknown; travel_method?: unknown;
+  arrival_time?: unknown; drive_time_mins?: unknown;
+}
+
+/**
+ * Does a van come back to our yard at the end of this leg? Any collection (by
+ * train there and the van back, or the van both ways), and a backline or People
+ * delivery driven there and back (the calculator's "vehicle" travel; a quick
+ * local quote stores none). Never a hire-van delivery: the van stays with the
+ * customer. Crew and Van & Driver work have no reliable return time, so they
+ * stay a tick by hand.
+ */
+export function vanComesBack(q: OohLegFacts): boolean {
+  if (q.job_type === 'collection') return true;
+  return q.job_type === 'delivery'
+    && (q.what_is_it === 'equipment' || q.what_is_it === 'people')
+    && q.travel_method !== 'public_transport';
+}
+
+/**
+ * When the van should be back in the yard, in minutes after midnight on the
+ * job's day (past 24:00 when it's after midnight): the venue time + about half
+ * an hour on site + the one-way drive. Null when no van comes back or there's
+ * no time on the quote.
+ */
+export function backAtYardMinutes(q: OohLegFacts): number | null {
+  if (!vanComesBack(q)) return null;
+  const at = hhmmToMinutes(q.arrival_time);
+  if (at == null) return null;
+  const drive = Math.max(0, Math.round(Number(q.drive_time_mins) || 0));
+  return at + ON_SITE_MINS + drive;
+}
+
+export interface OohAutoRule { from: number; until: number }
+
+/** The rule's times from Settings (16:40 and 09:00 unless changed). */
+export async function getAutoRule(): Promise<OohAutoRule> {
+  const s = await getSystemSettings(['ooh_auto_from', 'ooh_auto_until']);
+  return {
+    from: hhmmToMinutes(s.ooh_auto_from) ?? 16 * 60 + 40,
+    until: hhmmToMinutes(s.ooh_auto_until) ?? 9 * 60,
+  };
+}
+
+/** The automatic answer, and the estimated time back ("17:30") for the staff pill. */
+export function autoOohReturn(q: OohLegFacts, rule: OohAutoRule): { on: boolean; backAt: string | null } {
+  const back = backAtYardMinutes(q);
+  if (back == null) return { on: false, backAt: null };
+  const ofDay = back % 1440;
+  const backAt = `${String(Math.floor(ofDay / 60)).padStart(2, '0')}:${String(ofDay % 60).padStart(2, '0')}`;
+  return { on: back >= rule.from || back < rule.until, backAt };
+}
+
+/** On for this leg? A person's choice wins; otherwise the automatic rule. */
+export function effectiveOohReturn(q: OohLegFacts & { ooh_return?: unknown }, rule: OohAutoRule): boolean {
+  if (q.ooh_return === true) return true;
+  if (q.ooh_return === false) return false;
+  return autoOohReturn(q, rule).on;
+}
+
 /** Add whole days to a YYYY-MM-DD date. */
 function plusDays(ymd: string, days: number): string {
   const [y, m, d] = ymd.split('-').map(Number);
@@ -60,6 +141,7 @@ export function parkingUrl(token: string): string {
 const RECIPIENTS_SQL = `
   SELECT qa.person_id, p.first_name, p.last_name, p.preferred_name, p.email,
          q.id AS quote_id, q.job_id, j.hh_job_number, j.job_name,
+         q.ooh_return, q.job_type, q.what_is_it, q.travel_method, q.arrival_time, q.drive_time_mins,
          (${LAST_WORK_DAY_SQL})::text AS last_day,
          r.id AS row_id, r.parking_token, r.info_sent_at
     FROM quotes q
@@ -73,16 +155,17 @@ const RECIPIENTS_SQL = `
      AND COALESCE(p.is_deleted, false) = false
      AND p.email IS NOT NULL AND p.email <> ''`;
 
-/** Live quotes only: never for a cancelled job or leg. */
-const LIVE_QUOTE_SQL = `q.ooh_return = true
+/** Live quotes not turned off by hand (NULL is automatic): never for a cancelled job or leg. */
+const LIVE_QUOTE_SQL = `q.ooh_return IS NOT FALSE
      AND COALESCE(q.is_deleted, false) = false
      AND COALESCE(q.status, '') <> 'cancelled'
      AND COALESCE(q.ops_status, '') <> 'cancelled'
      AND (j.id IS NULL OR j.pipeline_status NOT IN ('lost', 'cancelled'))`;
 
-interface RecipientRow {
+interface RecipientRow extends OohLegFacts {
   person_id: string; first_name: string | null; last_name: string | null; preferred_name: string | null; email: string;
   quote_id: string; job_id: string | null; hh_job_number: number | null; job_name: string | null;
+  ooh_return: boolean | null;
   last_day: string | null; row_id: string | null; parking_token: string | null; info_sent_at: Date | null;
 }
 
@@ -124,7 +207,8 @@ async function sendTo(row: RecipientRow): Promise<boolean> {
 
 /**
  * Email everyone on one job who hasn't had it, if the job's last day has come.
- * Returns what happened, for the staff tick.
+ * For a hand tick (on), so it doesn't ask the automatic rule. Returns what
+ * happened, for the staff tick.
  */
 export async function sendForQuote(quoteId: string): Promise<{ due: boolean; sent: number; failed: number }> {
   const r = await query(
@@ -144,38 +228,62 @@ export async function sendForQuote(quoteId: string): Promise<{ due: boolean; sen
 }
 
 /**
- * Staff tick: on or off. Turning it on sends straight away when the day has come.
- * A job that finished more than LINK_DAYS_AFTER days ago is refused (`tooLate`):
- * its link would already be dead, so the email would be no use.
+ * Staff click: on, off, or back to automatic (`null`). Turning it on sends
+ * straight away when the day has come; back to automatic sends straight away
+ * if the rule says on and today is the day. A job that finished more than
+ * LINK_DAYS_AFTER days ago can't be turned on (`tooLate`): its link would
+ * already be dead, so the email would be no use. `on` in the answer is the
+ * effective state, `auto` whether it follows the rule.
  */
-export async function setOohReturn(quoteId: string, on: boolean): Promise<{ on: boolean; due: boolean; sent: number; failed: number; tooLate?: boolean } | null> {
-  if (on) {
+export async function setOohReturn(quoteId: string, on: boolean | null): Promise<{
+  on: boolean; auto: boolean; due: boolean; sent: number; failed: number; tooLate?: boolean;
+} | null> {
+  if (on === true) {
     const d = await query(`SELECT (${LAST_WORK_DAY_SQL})::text AS last_day FROM quotes q WHERE q.id = $1`, [quoteId]);
     if (!d.rows.length) return null;
     const lastDay = d.rows[0].last_day as string | null;
-    if (lastDay && ukToday() > plusDays(lastDay, LINK_DAYS_AFTER)) return { on: false, due: false, sent: 0, failed: 0, tooLate: true };
+    if (lastDay && ukToday() > plusDays(lastDay, LINK_DAYS_AFTER)) {
+      return { on: false, auto: false, due: false, sent: 0, failed: 0, tooLate: true };
+    }
   }
-  const r = await query(`UPDATE quotes SET ooh_return = $1, updated_at = NOW() WHERE id = $2 RETURNING id`, [on, quoteId]);
+  const r = await query(
+    `UPDATE quotes SET ooh_return = $1, updated_at = NOW() WHERE id = $2
+     RETURNING job_type, what_is_it, travel_method, arrival_time, drive_time_mins`,
+    [on, quoteId],
+  );
   if (!r.rows.length) return null;
-  if (!on) return { on, due: false, sent: 0, failed: 0 };
-  return { on, ...(await sendForQuote(quoteId)) };
+  if (on === false) return { on: false, auto: false, due: false, sent: 0, failed: 0 };
+  if (on === true) return { on: true, auto: false, ...(await sendForQuote(quoteId)) };
+  const rule = await getAutoRule();
+  const auto = autoOohReturn(r.rows[0], rule).on;
+  const run = await runFreelancerOohInfo(quoteId);
+  return { on: auto, auto: true, due: run.due, sent: run.sent, failed: run.failed };
 }
 
-/** The 10:00 run: every ticked job whose last day is today. */
-export async function runFreelancerOohInfo(): Promise<{ sent: number; failed: number }> {
+/**
+ * The run (every half hour from 10:00, config/scheduler.ts): every job whose
+ * last day is today and that is on, by hand or by the rule, for anyone not yet
+ * emailed. With a quote id, just that job (the staff click).
+ */
+export async function runFreelancerOohInfo(quoteId?: string): Promise<{ due: boolean; sent: number; failed: number }> {
+  const params: unknown[] = [ukToday()];
+  if (quoteId) params.push(quoteId);
   const r = await query(
     `${RECIPIENTS_SQL} AND ${LIVE_QUOTE_SQL}
        AND r.info_sent_at IS NULL
-       AND (${LAST_WORK_DAY_SQL}) = $1::date`,
-    [ukToday()],
+       AND (${LAST_WORK_DAY_SQL}) = $1::date
+       ${quoteId ? 'AND q.id = $2' : ''}`,
+    params,
   );
+  const rule = await getAutoRule();
+  const rows = (r.rows as RecipientRow[]).filter((row) => effectiveOohReturn(row, rule));
   let sent = 0; let failed = 0;
-  for (const row of r.rows as RecipientRow[]) {
+  for (const row of rows) {
     try { if (await sendTo(row)) sent++; else failed++; }
     catch (err) { failed++; console.error('[freelancer-ooh] run send failed', row.quote_id, row.person_id, err); }
   }
-  if (sent || failed) console.log(`[freelancer-ooh] 10:00 run: ${sent} sent, ${failed} failed`);
-  return { sent, failed };
+  if (!quoteId && (sent || failed)) console.log(`[freelancer-ooh] run: ${sent} sent, ${failed} failed`);
+  return { due: rows.length > 0, sent, failed };
 }
 
 /** The van this freelancer has on the job: the one they collected, or their Van & Driver van. */

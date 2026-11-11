@@ -427,6 +427,8 @@ const createSchema = z.object({
   shareable_with_freelancers: z.boolean().optional(),
   // Freelancers must confirm they've read it (only with shareable_with_freelancers).
   freelancer_read_required: z.boolean().optional(),
+  // Attach to the "you're approved" email (only with shareable_with_freelancers; migration 340).
+  attach_to_approval_email: z.boolean().optional(),
   category: z.enum(['policy', 'agreement', 'training', 'official_doc', 'contract', 'other']).default('policy'),
   completion_mode: z.enum(['read_only', 'tick', 'sign']).default('read_only'),
   tick_label: z.string().trim().max(200).nullable().optional(),
@@ -476,8 +478,8 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
           review_interval_months, created_by, approval_status,
           approved_by, approved_at, shareable_with_freelancers,
           tags, owner_user_ids, content_review_interval_months, content_review_due_date,
-          freelancer_read_required)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
+          freelancer_read_required, attach_to_approval_email)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING *`,
       [slug, d.title, d.category, d.completion_mode, d.tick_label || null, d.visibility,
        d.target_type, d.target_roles || null, d.target_user_ids || null,
        d.chase_interval_days || null, d.escalate_after_days || null, d.review_interval_months || null,
@@ -486,7 +488,7 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
        approvalStatus === 'approved' ? new Date() : null, shareable,
        d.tags && d.tags.length ? d.tags : null, d.owner_user_ids && d.owner_user_ids.length ? d.owner_user_ids : null,
        d.content_review_interval_months || null, contentReviewDue,
-       shareable && !!d.freelancer_read_required],
+       shareable && !!d.freelancer_read_required, shareable && !!d.attach_to_approval_email],
     );
     const doc = docRes.rows[0];
     await client.query(
@@ -531,6 +533,7 @@ const patchSchema = z.object({
   is_active: z.boolean().optional(),
   shareable_with_freelancers: z.boolean().optional(),
   freelancer_read_required: z.boolean().optional(),
+  attach_to_approval_email: z.boolean().optional(),
 });
 
 // PATCH /api/staff-documents/:id — update config. Managers: any document.
@@ -556,8 +559,20 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
         return;
       }
     }
-    // Asking freelancers to read it only makes sense while it's shared with them.
-    if (fields.shareable_with_freelancers === false) fields.freelancer_read_required = false;
+    // Asking freelancers to read it, or sending it with the approval email, only
+    // makes sense while it's shared with them.
+    if (fields.shareable_with_freelancers === false) {
+      fields.freelancer_read_required = false;
+      fields.attach_to_approval_email = false;
+    }
+    if (fields.attach_to_approval_email === true) {
+      const shared = fields.shareable_with_freelancers ?? (await query(
+        `SELECT shareable_with_freelancers FROM staff_documents WHERE id = $1`, [req.params.id])).rows[0]?.shareable_with_freelancers;
+      if (!shared) {
+        res.status(400).json({ error: 'Share it with freelancers first, then attach it to the approval email' });
+        return;
+      }
+    }
     if (fields.freelancer_read_required === true) {
       const shared = fields.shareable_with_freelancers ?? (await query(
         `SELECT shareable_with_freelancers FROM staff_documents WHERE id = $1`, [req.params.id])).rows[0]?.shareable_with_freelancers;

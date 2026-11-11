@@ -458,6 +458,31 @@ refused. Its own table (`freelancer_ooh_returns`) and `quotes.ooh_return`, NOT t
 against them. Found on the way: the hirer's "returning tonight" reminder email and text still went
 after a freelancer had already collected the van; both now skip a soft-checked-in van.
 
+**On by default for a late van (Nov 2026, migration 339):** jon: a van due back at 4:40pm or later should
+get it without anyone ticking. The office is open 09:00 to 17:00 every day, bank holidays included.
+- **Back-in-the-yard time, not the venue time:** the venue time + 30 minutes on site + the one-way drive
+  (`drive_time_mins`). A quick local quote has no drive time, so it's the venue time + 30. On when that's
+  16:40 or later, or before 09:00 (Settings › Out-of-Hours Returns: `ooh_auto_from`, `ooh_auto_until`).
+- **Only legs whose van comes back** (`vanComesBack()`): any collection, and a backline or People
+  delivery driven there and back. Never a hire-van delivery (the van stays with the customer). Crew and
+  Van & Driver work stay a tick by hand: no reliable return time.
+- **Never stored:** `quotes.ooh_return` is NULL (automatic), TRUE or FALSE (by hand), and the automatic
+  answer is worked out when it's needed, so a time changed later can't leave a stale copy. The
+  half-hourly run (10:00 to 20:30 UK) catches a time changed on the day.
+- **The pill:** "(auto)" when the rule turned it on, "(by hand)" when a person turned it off; its
+  tooltip says when the van is due back. A click flips what it shows; a flip that matches the rule goes
+  back to automatic, so two clicks always return to "auto".
+
+**The "you're approved" email carries guides (Nov 2026, migration 340,
+`services/approval-email-documents.ts`):** the portal's how-to guide was only readable after logging in
+to the portal. A Staff Document shared with freelancers can be ticked "Attach to the 'you're approved'
+email" (under Share with freelancers; "In the approval email" pill on the list).
+- **What goes:** the approval email (and Resend approval) attaches each ticked document's CURRENT
+  version, so a new version needs no other change, and names them ("Attached to this email: ...").
+- **Limits:** only an uploaded file, not a written document; at most 10 MB in all.
+- **Never blocks the email:** a file that can't be fetched is left off and the email still goes.
+- **Unsharing** a document clears its tick.
+
 **The shop-till guide** was rebuilt in the new look (Nov 2026): the same words (step 1 now matches the
 Jobs page), every screenshot retaken on the reskinned till, and its own styles, Inter font and PDF script
 replaced by the shared ones. Upload it as a new version of the same Staff Document.

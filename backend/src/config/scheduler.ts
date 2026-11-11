@@ -535,9 +535,7 @@ export function startScheduler() {
 
   // ── OOH Return Reminder ─────────────────────────────────────────────
   // Daily at 10:00 — send the day-before reminder for any vehicle with
-  // return_overnight=true and hire_end=tomorrow. Then the freelancers' own
-  // out-of-hours email for every ticked job whose last day is today
-  // (services/freelancer-ooh-return.ts; a separate try so one can't stop the other).
+  // return_overnight=true and hire_end=tomorrow.
   cron.schedule('0 10 * * *', async () => {
     try {
       const summary = await sendOohReminderEmails();
@@ -547,14 +545,23 @@ export function startScheduler() {
     } catch (err) {
       console.error('Scheduler: OOH reminder run failed:', err);
     }
+  });
+  console.log('Scheduler: OOH return reminders scheduled daily at 10:00');
+
+  // ── Freelancer out-of-hours emails ──────────────────────────────────
+  // Every half hour 10:00–20:30 UK: everyone bringing an Ooosh van back after
+  // we've closed today, ticked by hand or due back late by the automatic rule
+  // (services/freelancer-ooh-return.ts). Once per freelancer per job, so the
+  // repeats only catch a job ticked, added or re-timed during the day.
+  cron.schedule('*/30 10-20 * * *', async () => {
     try {
       const { runFreelancerOohInfo } = await import('../services/freelancer-ooh-return');
       await runFreelancerOohInfo();
     } catch (err) {
       console.error('Scheduler: freelancer OOH run failed:', err);
     }
-  });
-  console.log('Scheduler: OOH return reminders scheduled daily at 10:00');
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: freelancer OOH emails scheduled every 30 min 10:00–20:30 Europe/London');
 
   // ── OOH Approach SMS ────────────────────────────────────────────────
   // Every 3 min during CLOSED hours (17:00–08:59 Europe/London — office is open

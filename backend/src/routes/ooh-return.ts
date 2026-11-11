@@ -183,10 +183,11 @@ router.post(
 );
 
 // ── Staff: a freelancer's job is coming back out of hours ───────────
-// services/freelancer-ooh-return.ts. Turning it on emails the job's freelancers
-// the procedure straight away if the job's last day has come, otherwise the
-// 10:00 run sends it on that day. Once per freelancer per job.
-const freelancerToggleSchema = z.object({ on: z.boolean() });
+// services/freelancer-ooh-return.ts. `on`: true / false by hand, null back to
+// automatic (a van due back late is on by default). Turning it on emails the
+// job's freelancers the procedure straight away if the job's last day has come,
+// otherwise the half-hourly run sends it on that day. Once per freelancer per job.
+const freelancerToggleSchema = z.object({ on: z.boolean().nullable() });
 router.patch(
   '/quotes/:id',
   authenticate,
@@ -195,7 +196,7 @@ router.patch(
   async (req: AuthRequest, res: Response) => {
     if (!z.string().guid().safeParse(req.params.id).success) { res.status(404).json({ error: 'Job leg not found' }); return; }
     try {
-      const result = await setOohReturn(String(req.params.id), (req.body as { on: boolean }).on);
+      const result = await setOohReturn(String(req.params.id), (req.body as { on: boolean | null }).on);
       if (!result) { res.status(404).json({ error: 'Job leg not found' }); return; }
       res.json({ data: result });
     } catch (err) {

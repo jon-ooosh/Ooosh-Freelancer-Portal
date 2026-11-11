@@ -14,6 +14,7 @@ import { hhBroker } from '../services/hirehop-broker';
 import { shouldSuppressInformational } from '../services/portal-notification-prefs';
 import { greetingName } from '../services/display-name';
 import { resolveJobContactCandidates } from '../services/job-contact-candidates';
+import { getAutoRule, autoOohReturn } from '../services/freelancer-ooh-return';
 
 const router = Router();
 router.use(authenticate);
@@ -578,8 +579,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       params
     );
 
+    // Out-of-hours return: what the automatic rule says for each leg and when the
+    // van should be back, for the Job Detail pill (services/freelancer-ooh-return.ts).
+    const oohRule = await getAutoRule();
+    const rows = result.rows.map((row) => ({ ...row, ooh_auto: autoOohReturn(row, oohRule) }));
+
     res.json({
-      data: result.rows,
+      data: rows,
       pagination: {
         page: parseInt(page as string),
         limit: parseInt(limit as string),
