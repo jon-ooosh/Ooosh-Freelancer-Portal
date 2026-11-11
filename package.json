@@ -8,7 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
-    "@netlify/functions": "^2.0.0",
+    "@netlify/functions": "^6.1.1",
     "@netlify/plugin-nextjs": "^5.16.6",
     "@types/bcryptjs": "^3.0.0",
     "@types/node": "^22.20.5",
