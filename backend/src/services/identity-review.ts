@@ -127,6 +127,174 @@ export function identityHoldReason(status: string | null | undefined): string | 
   return null;
 }
 
+// ── A staff decision on a photo ID check (Nov 2026) ─────────────────────────
+//
+// Katje / job 16831: iDenfy couldn't read her paper licence, staff rejected it,
+// she re-sent photos, Matt typed her licence details in — and she stayed
+// "ID Rejected", because the panel only offered a decision while one was
+// waiting. And her name stayed her email address, because nothing asked.
+//
+// So accepting asks for what the webhook would have written had iDenfy read the
+// document, and refuses until the identity is complete. The check date is
+// ASKED, never assumed: the rule that one click must not mint a validity window
+// still stands — a person types the day they checked the documents.
+
+/** What the webhook fills in from a licence iDenfy could read. */
+export const IDENTITY_DETAIL_FIELDS = [
+  'full_name', 'date_of_birth', 'nationality',
+  'licence_number', 'licence_issued_by', 'licence_issue_country',
+  'licence_valid_from', 'licence_valid_to', 'licence_address',
+  'idenfy_check_date',
+] as const;
+export type IdentityDetailField = (typeof IDENTITY_DETAIL_FIELDS)[number];
+
+/** Without these the record isn't an identity: who, born when, which licence, checked when. */
+export const REQUIRED_IDENTITY_FIELDS: readonly IdentityDetailField[] = [
+  'full_name', 'date_of_birth', 'licence_number', 'licence_issued_by',
+  'licence_issue_country', 'idenfy_check_date',
+];
+
+const IDENTITY_FIELD_LABELS: Record<IdentityDetailField, string> = {
+  full_name: 'full name',
+  date_of_birth: 'date of birth',
+  nationality: 'nationality',
+  licence_number: 'licence number',
+  licence_issued_by: 'issued by',
+  licence_issue_country: 'country of issue',
+  licence_valid_from: 'valid from',
+  licence_valid_to: 'licence expiry',
+  licence_address: 'licence address',
+  idenfy_check_date: 'date you checked the documents',
+};
+
+const DATE_FIELDS = new Set<IdentityDetailField>([
+  'date_of_birth', 'licence_valid_from', 'licence_valid_to', 'idenfy_check_date',
+]);
+
+/** Age limits the webhook applies (insurer's): under 23 is blocked, over 75 refers. */
+export const MIN_DRIVER_AGE = 23;
+export const REFER_OVER_AGE = 75;
+
+export type IdentityDetails = Partial<Record<IdentityDetailField, string>> & { full_licence?: boolean };
+
+export type IdentityDecisionPlan =
+  | { ok: false; status: number; error: string }
+  | { ok: true; set: Record<string, unknown>; raisedReferral: string | null };
+
+/** A DATE column (node-postgres gives a local-midnight Date) or string, as YYYY-MM-DD. */
+function ymdOf(v: unknown): string | null {
+  if (v === null || v === undefined || v === '') return null;
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${v.getFullYear()}-${p(v.getMonth() + 1)}-${p(v.getDate())}`;
+  }
+  const s = String(v).slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return null;
+  // A real calendar date — 1976-13-45 has the right shape and isn't one.
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3] ? s : null;
+}
+
+/** Whole years between two YYYY-MM-DD dates. */
+export function ageOn(dob: string, today: string): number {
+  const [by, bm, bd] = dob.split('-').map(Number);
+  const [ty, tm, td] = today.split('-').map(Number);
+  return ty - by - (tm < bm || (tm === bm && td < bd) ? 1 : 0);
+}
+
+function hasValue(v: unknown): boolean {
+  return v !== null && v !== undefined && String(v).trim() !== '';
+}
+
+/**
+ * Work out what a staff decision writes, or why it can't be made. Pure: the
+ * route reads the driver, asks this, then writes `set` in one transaction.
+ *
+ *  - Reversing a REJECTION is manager-tier; any change of decision needs a reason.
+ *  - Accepting needs a complete identity (the record's values, overlaid with
+ *    what was typed). A name that is still the email address doesn't count.
+ *  - The webhook's age rules: under 23 is refused; over 75 raises a referral
+ *    (raise only — an approved or waived one is left alone).
+ */
+export function planIdentityDecision(input: {
+  current: Record<string, unknown>;
+  outcome: 'accepted' | 'rejected';
+  notes: string;
+  details?: IdentityDetails;
+  isManager: boolean;
+  today: string;
+}): IdentityDecisionPlan {
+  const { current, outcome, isManager, today } = input;
+  const notes = (input.notes || '').trim();
+  const was = (current.identity_check_status as string | null) ?? null;
+  const decided = was === 'accepted' || was === 'rejected';
+
+  if (was === 'rejected' && outcome === 'accepted' && !isManager) {
+    return { ok: false, status: 403, error: 'Only a manager can reverse a rejected ID check.' };
+  }
+  if (decided && was !== outcome && !notes) {
+    return { ok: false, status: 400, error: 'Say why the decision is changing.' };
+  }
+  if (outcome === 'rejected') return { ok: true, set: {}, raisedReferral: null };
+
+  const details = input.details || {};
+  const set: Record<string, unknown> = {};
+  for (const field of IDENTITY_DETAIL_FIELDS) {
+    const raw = details[field];
+    if (typeof raw !== 'string' || raw.trim() === '') continue;
+    set[field] = raw.trim();
+  }
+  if (details.full_licence === true) set.licence_type = 'full';
+
+  // Dates typed must be real dates; the check can't be in the future.
+  for (const field of IDENTITY_DETAIL_FIELDS) {
+    if (!DATE_FIELDS.has(field) || !(field in set)) continue;
+    if (!ymdOf(set[field])) {
+      return { ok: false, status: 400, error: `The ${IDENTITY_FIELD_LABELS[field]} isn't a date.` };
+    }
+  }
+  if (set.idenfy_check_date && String(set.idenfy_check_date) > today) {
+    return { ok: false, status: 400, error: 'The date you checked the documents can’t be in the future.' };
+  }
+
+  const merged: Record<string, unknown> = { ...current, ...set };
+  const missing = REQUIRED_IDENTITY_FIELDS.filter((f) => !hasValue(merged[f]));
+  if (hasValue(merged.full_name) && String(merged.full_name).includes('@') && !missing.includes('full_name')) {
+    missing.unshift('full_name');
+  }
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Fill in the ${missing.map((f) => IDENTITY_FIELD_LABELS[f]).join(', ')} before accepting.`,
+    };
+  }
+  if (String(merged.licence_type || '').toLowerCase().match(/provisional|learner/)) {
+    return { ok: false, status: 400, error: 'A provisional or learner licence can’t be accepted.' };
+  }
+
+  const dob = ymdOf(merged.date_of_birth);
+  if (!dob || dob >= today) {
+    return { ok: false, status: 400, error: 'The date of birth isn’t right.' };
+  }
+  const age = ageOn(dob, today);
+  if (age < MIN_DRIVER_AGE) {
+    return { ok: false, status: 400, error: `The driver is ${age} — we can’t insure drivers under ${MIN_DRIVER_AGE}.` };
+  }
+
+  let raisedReferral: string | null = null;
+  const referralSettled = current.referral_status === 'approved' || current.referral_status === 'waived';
+  if (age > REFER_OVER_AGE && current.requires_referral !== true && !referralSettled) {
+    raisedReferral = `Driver is ${age} years old (over ${REFER_OVER_AGE})`;
+    set.requires_referral = true;
+    set.referral_notes = [current.referral_notes, raisedReferral].filter(hasValue).join(' | ');
+  }
+
+  return { ok: true, set, raisedReferral };
+}
+
 export interface IdentityAlertResult {
   sent: boolean;
   reason?: 'already_sent' | 'not_required' | 'not_found' | 'send_failed';

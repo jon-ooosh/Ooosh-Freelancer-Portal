@@ -7,8 +7,8 @@
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { query, getClient } from '../config/database';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, isManagerTier } from '../middleware/auth';
 import { validate, partialForUpdate } from '../middleware/validate';
 import { generateDriverSnapshot, loadDriverDocuments, type DriverSnapshotData } from '../services/driver-snapshot-pdf';
 import { uploadToR2 } from '../config/r2';
@@ -17,7 +17,7 @@ import { encryptDriverPiiInto, decryptDriverRow, decryptDriverRows } from '../se
 import { persistableWindows, touchesValidity, backfillFromDates, isUkLicence, todayYmd } from '../services/driver-validity';
 import { computeLicenceExcess } from '../services/licence-excess';
 import { sendReferralAlert } from '../services/referral-alert';
-import { sendIdentityReviewAlert } from '../services/identity-review';
+import { sendIdentityReviewAlert, planIdentityDecision } from '../services/identity-review';
 import { computeVerificationState } from '../services/driver-verification-state';
 import { unsignedJobNumberSql, findUnsignedDriversForJob } from '../services/driver-hire-progress';
 import { DISPLAY_NAME_SQL } from '../services/display-name';
@@ -1054,20 +1054,38 @@ router.get('/:id/verification-state', async (req: AuthRequest, res: Response) =>
   }
 });
 
-// ── POST /api/drivers/:id/resolve-identity — accept or reject a face match ──
+// ── POST /api/drivers/:id/resolve-identity — accept or reject a photo ID check ──
 //
-// The staff counterpart to the automatic flag raised when iDenfy cannot match a
-// driver's selfie to their licence photo. A mismatch is usually innocent (an
-// older licence photo, a change in appearance), so the resolution is a human
-// looking at the two images on the driver record and saying which it is.
+// The staff counterpart to the automatic flag raised when iDenfy doesn't accept
+// a check. Usually innocent (an older licence photo, glare, a paper licence
+// iDenfy can't read), so the resolution is a human looking at the images.
 //
 // Deliberately STAFF_ROLES, not manager-only: unlike an insurance referral —
 // which needs the insurer's answer — this is a visual comparison anyone on the
-// desk can make, and keeping it narrow would rebuild the bottleneck this whole
-// piece of work exists to remove.
+// desk can make. The ONE manager-tier move is reversing a rejection (Nov 2026):
+// a rejection can be for fraud, so un-rejecting is an override, not a first call.
+//
+// Accepting also records what iDenfy would have read off the licence, and is
+// refused until the identity is complete — planIdentityDecision() is the rule.
+// Before Nov 2026 a decision could not be changed from the page at all (Katje,
+// job 16831: re-supplied photos, details typed in, still "ID Rejected").
+const ymdField = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const resolveIdentitySchema = z.object({
   outcome: z.enum(['accepted', 'rejected']),
   notes: z.string().max(2000).optional().default(''),
+  details: z.object({
+    full_name: z.string().max(200).optional(),
+    date_of_birth: ymdField.optional(),
+    nationality: z.string().max(100).optional(),
+    licence_number: z.string().max(50).optional(),
+    licence_issued_by: z.string().max(100).optional(),
+    licence_issue_country: z.string().max(100).optional(),
+    licence_valid_from: ymdField.optional(),
+    licence_valid_to: ymdField.optional(),
+    licence_address: z.string().max(500).optional(),
+    idenfy_check_date: ymdField.optional(),
+    full_licence: z.boolean().optional(),
+  }).optional(),
 });
 
 router.post(
@@ -1075,36 +1093,72 @@ router.post(
   authorize(...STAFF_ROLES),
   validate(resolveIdentitySchema),
   async (req: AuthRequest, res: Response) => {
+    const id = String(req.params.id);
+    const { outcome, notes, details } = req.body as z.infer<typeof resolveIdentitySchema>;
+    const client = await getClient();
     try {
-      const { id } = req.params;
-      const { outcome, notes } = req.body as { outcome: 'accepted' | 'rejected'; notes: string };
-
-      const result = await query(
-        `UPDATE drivers
-            SET identity_check_status = $1,
-                identity_reviewed_by  = $2,
-                identity_reviewed_at  = NOW(),
-                identity_review_notes = NULLIF($3, ''),
-                updated_at            = NOW()
-          WHERE id = $4
-          RETURNING id, full_name, identity_check_status`,
-        [outcome, req.user!.id, notes, id],
-      );
-      if (result.rows.length === 0) {
+      await client.query('BEGIN');
+      const found = await client.query('SELECT * FROM drivers WHERE id = $1 FOR UPDATE', [id]);
+      if (found.rows.length === 0) {
+        await client.query('ROLLBACK');
         res.status(404).json({ error: 'Driver not found' });
         return;
       }
+      const current = decryptDriverRow(found.rows[0]) as Record<string, unknown>;
 
-      await query(
-        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, new_values)
-         VALUES ($1, 'driver', $2, 'resolve_identity', $3)`,
-        [req.user!.id, id, JSON.stringify({ outcome, notes })],
+      const plan = planIdentityDecision({
+        current, outcome, notes, details,
+        isManager: isManagerTier(req.user!.role),
+        today: todayYmd(),
+      });
+      if (!plan.ok) {
+        await client.query('ROLLBACK');
+        res.status(plan.status).json({ error: plan.error });
+        return;
+      }
+
+      // The typed details, then the validity windows re-derived from them —
+      // the same derivation every driver write runs (services/driver-validity.ts).
+      const fields: Record<string, unknown> = { ...plan.set };
+      if (touchesValidity(Object.keys(fields))) {
+        Object.assign(fields, persistableWindows({ ...current, ...fields }));
+      }
+
+      const params: unknown[] = [outcome, req.user!.id, notes, id];
+      const sets = [
+        'identity_check_status = $1',
+        'identity_reviewed_by = $2',
+        'identity_reviewed_at = NOW()',
+        "identity_review_notes = NULLIF($3, '')",
+        'updated_at = NOW()',
+      ];
+      for (const [key, value] of Object.entries(fields)) {
+        params.push(value ?? null);
+        sets.push(`${key} = $${params.length}`);
+      }
+      const result = await client.query(
+        `UPDATE drivers SET ${sets.join(', ')} WHERE id = $4
+         RETURNING id, full_name, identity_check_status`,
+        params,
       );
+      await encryptDriverPiiInto(client, id, plan.set);
 
-      res.json({ data: result.rows[0] });
+      const previous: Record<string, unknown> = { identity_check_status: current.identity_check_status ?? null };
+      for (const key of Object.keys(plan.set)) previous[key] = current[key] ?? null;
+      await client.query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+         VALUES ($1, 'driver', $2, 'resolve_identity', $3, $4)`,
+        [req.user!.id, id, JSON.stringify(previous), JSON.stringify({ outcome, notes, ...plan.set })],
+      );
+      await client.query('COMMIT');
+
+      res.json({ data: { ...result.rows[0], raised_referral: plan.raisedReferral } });
     } catch (error) {
+      await client.query('ROLLBACK').catch(() => { /* already failed */ });
       console.error('[drivers] Resolve identity error:', error);
       res.status(500).json({ error: 'Failed to resolve identity check' });
+    } finally {
+      client.release();
     }
   },
 );
