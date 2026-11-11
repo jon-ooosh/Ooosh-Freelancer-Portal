@@ -61,7 +61,11 @@ const VALID_CATEGORIES = ['damaged', 'missing', 'broken', 'dispute', 'breakdown'
 const VALID_STATUSES = ['open', 'investigating', 'awaiting_quote', 'quoted', 'actioned', 'resolved', 'written_off', 'cancelled'] as const;
 const VALID_SEVERITY = ['low', 'normal', 'urgent'] as const;
 const VALID_SOURCES = ['manual', 'vehicle', 'backline', 'transport', 'client', 'driver'] as const;
-const VALID_RESOLUTION = ['claim_excess', 'charge_client', 'write_off', 'replaced', 'other'] as const;
+// How a Problem was resolved — WHAT HAPPENED to the thing. Who paid is the
+// Money card's job now (INCIDENT-CLAIMS-SPEC.md §23), so the money answers
+// ('claim_excess', 'charge_client') are no longer offered; they stay valid so
+// the rows that carry them can still be saved. Required to resolve.
+const VALID_RESOLUTION = ['repaired', 'replaced', 'found', 'write_off', 'no_action', 'other', 'claim_excess', 'charge_client'] as const;
 const VALID_SURFACES = ['vehicle_check_in', 'next_hire', 'next_book_out', 'job_close_out'] as const;
 
 const createSchema = z.object({
@@ -120,6 +124,7 @@ const updateSchema = z.object({
   due_date: z.string().optional().nullable(),
   surface_on: z.enum(VALID_SURFACES).optional().nullable(),
   resolution_path: z.enum(VALID_RESOLUTION).optional().nullable(),
+  resolution_note: z.string().trim().max(2000).optional().nullable(),
   estimated_cost: z.number().nonnegative().optional().nullable(),
   actual_cost: z.number().nonnegative().optional().nullable(),
   excess_id: z.string().guid().optional().nullable(),
@@ -183,7 +188,7 @@ const ISSUE_SELECT = `
   ji.id, ji.job_id, ji.vehicle_id, ji.driver_id, ji.person_id,
   ji.client_organisation_id, ji.hh_stock_item_id, ji.hh_stock_item_name, ji.barcode,
   ji.component_key,
-  ji.category, ji.source_module, ji.severity, ji.status, ji.resolution_path,
+  ji.category, ji.source_module, ji.severity, ji.status, ji.resolution_path, ji.resolution_note,
   ji.summary, ji.description,
   ji.reported_by, ji.assigned_to, ji.watchers,
   ji.due_date, ji.surface_on,
@@ -418,7 +423,7 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
       'vehicle_id', 'driver_id', 'person_id', 'client_organisation_id',
       'hh_stock_item_id', 'hh_stock_item_name', 'barcode',
       'assigned_to', 'due_date', 'surface_on',
-      'resolution_path', 'estimated_cost', 'actual_cost', 'excess_id',
+      'resolution_path', 'resolution_note', 'estimated_cost', 'actual_cost', 'excess_id',
     ];
     for (const key of editable) {
       if (key in body) {
@@ -427,6 +432,21 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
       }
     }
     if (updates.length === 0) return res.status(400).json({ error: 'No updatable fields supplied' });
+
+    // Resolved needs a reason ("How was it resolved?"), and "Other" a note.
+    // Checked whenever the result would be a resolved Problem missing one —
+    // resolving it, or clearing the reason on one already resolved.
+    const nextStatus = body.status ?? before.status;
+    if (nextStatus === 'resolved' && ('status' in body || 'resolution_path' in body || 'resolution_note' in body)) {
+      const nextPath = 'resolution_path' in body ? body.resolution_path : before.resolution_path;
+      const nextNote = 'resolution_note' in body ? body.resolution_note : before.resolution_note;
+      if (!nextPath) {
+        return res.status(400).json({ error: 'Say how it was resolved', code: 'resolution_required' });
+      }
+      if (nextPath === 'other' && !(nextNote && String(nextNote).trim())) {
+        return res.status(400).json({ error: 'Add a note saying how it was resolved', code: 'resolution_note_required' });
+      }
+    }
 
     // resolved_at clock — set when transitioning into a resolved state, clear on reopen.
     if ('status' in body && body.status) {
@@ -460,6 +480,12 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
       await logEvent(id, req.user!.id, 'due_date_change', null, {
         from: before.due_date, to: body.due_date ?? null,
       });
+    }
+    if (('resolution_path' in body && (body.resolution_path ?? null) !== (before.resolution_path ?? null))
+      || ('resolution_note' in body && (body.resolution_note || null) !== (before.resolution_note || null))) {
+      const path = 'resolution_path' in body ? body.resolution_path : before.resolution_path;
+      const note = 'resolution_note' in body ? body.resolution_note : before.resolution_note;
+      await logEvent(id, req.user!.id, 'resolution', null, { path: path ?? null, note: note || null });
     }
     if (('estimated_cost' in body || 'actual_cost' in body)) {
       await logEvent(id, req.user!.id, 'cost_estimate', null, {

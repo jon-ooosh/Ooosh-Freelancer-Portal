@@ -34,6 +34,11 @@ export interface ClaimFieldDef {
   placeholder?: string;
   /** Pre-filled value for a brand-new case. */
   defaultValue?: string | boolean;
+  /**
+   * Shown but not editable on the staff form: set somewhere else on the case
+   * page (named here). The form's save never writes it.
+   */
+  editedOn?: string;
   /** Needed (while shown) before the client form counts the section as done. */
   required?: boolean;
   /** Needed when any of these yes/no fields in the same section is Yes. */
@@ -244,7 +249,8 @@ export const CLAIM_SECTIONS: readonly ClaimSectionDef[] = [
     who: 'staff',
     fields: [
       { key: 'value', label: 'Approx. vehicle value (£, ex-VAT)', kind: 'money' },
-      { key: 'repair_cost', label: 'Approx. repair cost, if known (£)', kind: 'money' },
+      // Set on the case page's Money card (spec §23), which also shows what it costs us.
+      { key: 'repair_cost', label: 'Approx. repair cost, if known (£, ex-VAT)', kind: 'money', editedOn: 'the Money card' },
       { key: 'in_use', label: 'Is the vehicle in use?', kind: 'yesno' },
       { key: 'location', label: 'If not, where is it?', kind: 'text', showIf: { key: 'in_use', equals: false } },
       { key: 'storage_charges', label: 'Are storage charges being incurred?', kind: 'yesno' },

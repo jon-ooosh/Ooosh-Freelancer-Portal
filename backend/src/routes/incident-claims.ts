@@ -536,8 +536,23 @@ router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Respon
       // edited, so a client filling in the same form through their link at the
       // same time keeps everything else. Derive the list/filter columns from it.
       const fd = body.form_data as Record<string, Record<string, unknown> | unknown>;
+      // The repair estimate (our_vehicle.repair_cost) is edited ONLY on the
+      // Money card (§23, PUT /damage-money/claim/:id/estimate). This form saves
+      // whole sections, so a stale copy here would put an old estimate back:
+      // leave out whatever the form sent and keep the stored figure.
+      if (fd.our_vehicle && typeof fd.our_vehicle === 'object' && !Array.isArray(fd.our_vehicle)) {
+        const { repair_cost: _ignored, ...rest } = fd.our_vehicle as Record<string, unknown>;
+        fd.our_vehicle = rest;
+      }
       params.push(JSON.stringify(fd));
-      sets.push(`form_data = form_data || $${params.length}::jsonb`);
+      const fdParam = `$${params.length}::jsonb`;
+      sets.push(`form_data = CASE
+        WHEN jsonb_typeof(${fdParam}->'our_vehicle') = 'object'
+         AND jsonb_typeof(form_data->'our_vehicle') = 'object'
+         AND (form_data->'our_vehicle') ? 'repair_cost'
+        THEN jsonb_set(form_data || ${fdParam}, '{our_vehicle,repair_cost}', form_data->'our_vehicle'->'repair_cost')
+        ELSE form_data || ${fdParam}
+      END`);
       if (fd.incident && typeof fd.incident === 'object') {
         const inc = fd.incident as Record<string, unknown>;
         const date = typeof inc.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(inc.date) ? inc.date : null;
@@ -843,7 +858,7 @@ router.get('/:id/linkable-problems', async (req: AuthRequest, res: Response) => 
 // ─────────────────────────────────────────────────────────────────────────
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 2 } });
-const FILE_TYPES = ['photo', 'police_report', 'broker_correspondence', 'repair_quote', 'tts360_notice', 'other'] as const;
+const FILE_TYPES = ['photo', 'police_report', 'broker_correspondence', 'repair_quote', 'tts360_notice', 'authorisation_letter', 'other'] as const;
 
 router.post('/:id/files', upload.fields([{ name: 'file', maxCount: 1 }, { name: 'thumb', maxCount: 1 }]), async (req: AuthRequest, res: Response) => {
   try {

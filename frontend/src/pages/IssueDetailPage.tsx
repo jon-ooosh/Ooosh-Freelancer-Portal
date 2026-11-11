@@ -4,8 +4,9 @@
  * Top: header with summary, status, severity, anchors, assignee.
  * Middle: timeline of events (created, status changes, comments, etc.)
  *         + comment box.
- * Right: resolution panel (path, costs with amber "informational" note),
- *        watchers, due date, surface_on, dangerous-zone (resolve, cancel).
+ * Right: status, the Money card (components/damage-money — shared with the
+ *        claim page, INCIDENT-CLAIMS-SPEC.md §23), watchers, due date,
+ *        surface_on, and resolve — which asks how it was resolved.
  */
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
@@ -17,11 +18,14 @@ import { MentionComposer } from '../components/messaging/MentionComposer';
 import ImageLightbox from '../components/ImageLightbox';
 import { useOpenClaimsFor, ExistingClaimChoice } from '../components/claims/format';
 import { markMentionsSeen } from '../lib/mentionsSeen';
+import DamageMoneyCard from '../components/damage-money/DamageMoneyCard';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
 type IssueCategory = 'damaged' | 'missing' | 'broken' | 'dispute' | 'breakdown' | 'other';
 type IssueSeverity = 'low' | 'normal' | 'urgent';
-type ResolutionPath = 'claim_excess' | 'charge_client' | 'write_off' | 'replaced' | 'other';
+// 'claim_excess' / 'charge_client' are the old money answers — no longer
+// offered (the Money card says who paid), but still shown on the rows that have them.
+type ResolutionPath = 'repaired' | 'replaced' | 'found' | 'write_off' | 'no_action' | 'other' | 'claim_excess' | 'charge_client';
 
 interface IssueEvent {
   id: string;
@@ -78,6 +82,7 @@ interface Issue {
   severity: IssueSeverity;
   status: IssueStatus;
   resolution_path: ResolutionPath | null;
+  resolution_note: string | null;
   summary: string;
   description: string | null;
   reported_by: string;
@@ -128,12 +133,25 @@ const CATEGORY_LABELS: Record<IssueCategory, string> = {
 const CATEGORY_ICONS: Record<IssueCategory, string> = {
   damaged: '🔨', missing: '❓', broken: '⚙️', dispute: '⚖️', breakdown: '🚨', other: '⚠️',
 };
+// How it was resolved — what happened to the thing. Asked whenever a Problem
+// is marked resolved (the backend refuses it without one; "Other" needs a note).
+const RESOLUTION_CHOICES: Array<[ResolutionPath, string, string]> = [
+  ['repaired', 'Repaired', ''],
+  ['replaced', 'Replaced', ''],
+  ['found', 'Found / returned', ''],
+  ['write_off', 'Written off', 'not worth fixing, or gone'],
+  ['no_action', 'No action needed', 'already there before the hire, wear and tear, not a fault'],
+  ['other', 'Other', 'say how in the note'],
+];
 const RESOLUTION_LABELS: Record<ResolutionPath, string> = {
-  claim_excess: 'Claim against excess',
-  charge_client: 'Charge client',
-  write_off: 'Write off',
+  repaired: 'Repaired',
   replaced: 'Replaced',
+  found: 'Found / returned',
+  write_off: 'Written off',
+  no_action: 'No action needed',
   other: 'Other',
+  claim_excess: 'Claim against excess (old answer)',
+  charge_client: 'Charge client (old answer)',
 };
 
 interface User { id: string; first_name: string; last_name: string }
@@ -156,6 +174,10 @@ function IssueDetailContent() {
   const { id } = useParams<{ id: string }>();
   const [issue, setIssue] = useState<Issue | null>(null);
   const [showAddCost, setShowAddCost] = useState(false);
+  // Bumped when a cost is added from the header, so the Money card reads again.
+  const [moneyToken, setMoneyToken] = useState(0);
+  // "How was it resolved?" — open while resolving, or changing the answer.
+  const [resolving, setResolving] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [comment, setComment] = useState('');
@@ -355,7 +377,7 @@ function IssueDetailContent() {
           presetVehicleId={issue.vehicle_id || null}
           presetJobId={issue.job_id || null}
           onClose={() => setShowAddCost(false)}
-          onSaved={() => setShowAddCost(false)}
+          onSaved={() => { setShowAddCost(false); setMoneyToken((n) => n + 1); }}
         />
       )}
 
@@ -536,7 +558,11 @@ function IssueDetailContent() {
               <label className="block text-[11px] font-medium text-gray-600 mb-1">Status</label>
               <select
                 value={issue.status}
-                onChange={e => patch({ status: e.target.value })}
+                onChange={e => {
+                  // Resolving asks how first (below) — the status changes when that's saved.
+                  if (e.target.value === 'resolved') setResolving(true);
+                  else patch({ status: e.target.value });
+                }}
                 className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
               >
                 {(Object.keys(STATUS_LABELS) as IssueStatus[]).map(s => (
@@ -544,6 +570,26 @@ function IssueDetailContent() {
                 ))}
               </select>
             </div>
+            {issue.status === 'resolved' && (
+              resolving ? (
+                <ResolveReasonForm
+                  issue={issue}
+                  resolve={false}
+                  onCancel={() => setResolving(false)}
+                  onSaved={() => { setResolving(false); load(); }}
+                />
+              ) : (
+                <div className="text-xs text-gray-700">
+                  <span className="text-[11px] font-medium text-gray-600">How it was resolved: </span>
+                  {issue.resolution_path
+                    ? RESOLUTION_LABELS[issue.resolution_path] || issue.resolution_path
+                    : <span className="text-amber-700">not recorded</span>}
+                  {issue.resolution_note && <span className="text-gray-500"> — {issue.resolution_note}</span>}
+                  {' '}
+                  <button type="button" onClick={() => setResolving(true)} className="text-ooosh-600 hover:underline">change</button>
+                </div>
+              )
+            )}
             <div>
               <label className="block text-[11px] font-medium text-gray-600 mb-1">Severity</label>
               <select
@@ -648,63 +694,27 @@ function IssueDetailContent() {
             </div>
           </div>
 
-          {/* Resolution panel */}
-          <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
-            <h3 className="text-sm font-semibold text-gray-900">Resolution</h3>
-            <div>
-              <label className="block text-[11px] font-medium text-gray-600 mb-1">Path</label>
-              <select
-                value={issue.resolution_path || ''}
-                onChange={e => patch({ resolution_path: e.target.value || null })}
-                className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
-              >
-                <option value="">— None yet —</option>
-                {(Object.keys(RESOLUTION_LABELS) as ResolutionPath[]).map(r => (
-                  <option key={r} value={r}>{RESOLUTION_LABELS[r]}</option>
-                ))}
-              </select>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="block text-[11px] font-medium text-gray-600 mb-1">Estimated</label>
-                <input
-                  type="number"
-                  min={0}
-                  step={0.01}
-                  defaultValue={issue.estimated_cost ?? ''}
-                  onBlur={e => {
-                    const v = e.target.value === '' ? null : parseFloat(e.target.value);
-                    if (v !== issue.estimated_cost) patch({ estimated_cost: v });
-                  }}
-                  placeholder="£"
-                  className="w-full border border-gray-300 rounded px-2 py-1 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] font-medium text-gray-600 mb-1">Actual</label>
-                <input
-                  type="number"
-                  min={0}
-                  step={0.01}
-                  defaultValue={issue.actual_cost ?? ''}
-                  onBlur={e => {
-                    const v = e.target.value === '' ? null : parseFloat(e.target.value);
-                    if (v !== issue.actual_cost) patch({ actual_cost: v });
-                  }}
-                  placeholder="£"
-                  className="w-full border border-gray-300 rounded px-2 py-1 text-sm"
-                />
-              </div>
-            </div>
-            <div className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 leading-relaxed">
-              ℹ Cost is informational only — future wire-up to HireHop / Xero pending. Don’t double-enter into the Money tab.
-            </div>
-          </div>
+          {/* Money — the estimate, costs, what the client paid, what it cost us.
+              The same card as the claim page; a Problem on a claim points there. */}
+          <DamageMoneyCard
+            problemId={issue.id}
+            jobId={issue.job_id}
+            vehicleId={issue.vehicle_id}
+            reloadToken={moneyToken}
+          />
 
-          {/* Quick resolve */}
-          {!isResolved && (
+          {/* Resolve — asks how it was resolved first */}
+          {resolving && issue.status !== 'resolved' && (
+            <ResolveReasonForm
+              issue={issue}
+              resolve
+              onCancel={() => setResolving(false)}
+              onSaved={() => { setResolving(false); load(); }}
+            />
+          )}
+          {!isResolved && !resolving && (
             <button
-              onClick={() => patch({ status: 'resolved' })}
+              onClick={() => setResolving(true)}
               className="w-full px-3 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
             >
               ✓ Mark as resolved
@@ -719,6 +729,90 @@ function IssueDetailContent() {
             </button>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * "How was it resolved?" — asked when marking a Problem resolved (`resolve`),
+ * or to change the answer on one already resolved. What happened to the
+ * thing, not who paid: that's the Money card. "Other" needs a note; the
+ * backend refuses either without them.
+ */
+function ResolveReasonForm({ issue, resolve, onCancel, onSaved }: {
+  issue: Issue;
+  resolve: boolean;
+  onCancel: () => void;
+  onSaved: () => void;
+}) {
+  const offered = RESOLUTION_CHOICES.map(([k]) => k);
+  // An old money answer stays selectable only on a row that already has it.
+  const legacy = issue.resolution_path && !offered.includes(issue.resolution_path) ? issue.resolution_path : null;
+  const [path, setPath] = useState<ResolutionPath | ''>(issue.resolution_path || '');
+  const [note, setNote] = useState(issue.resolution_note || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  // Opened from the Status dropdown, the form sits lower down the sidebar.
+  useEffect(() => {
+    if (resolve) document.getElementById('resolve-reason-form')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [resolve]);
+
+  async function save() {
+    if (!path) { setError('Pick how it was resolved'); return; }
+    if (path === 'other' && !note.trim()) { setError('Add a note saying how'); return; }
+    setBusy(true);
+    setError('');
+    try {
+      await api.patch(`/problems/${issue.id}`, {
+        ...(resolve ? { status: 'resolved' } : {}),
+        resolution_path: path,
+        resolution_note: note.trim() || null,
+      });
+      onSaved();
+    } catch (err) {
+      setError((err as { body?: { error?: string } })?.body?.error || 'Could not save');
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div id="resolve-reason-form" className="bg-white rounded-xl border border-green-300 p-3 space-y-2">
+      <div className="text-xs font-semibold text-gray-900">How was it resolved?</div>
+      <div className="space-y-1">
+        {RESOLUTION_CHOICES.map(([k, label, hint]) => (
+          <label key={k} className="flex items-start gap-2 text-sm cursor-pointer">
+            <input type="radio" name="resolution" checked={path === k} onChange={() => setPath(k)} className="mt-1" />
+            <span>
+              {label}
+              {hint && <span className="block text-[11px] text-gray-400">{hint}</span>}
+            </span>
+          </label>
+        ))}
+        {legacy && (
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input type="radio" name="resolution" checked={path === legacy} onChange={() => setPath(legacy)} className="mt-1" />
+            <span className="text-gray-500">{RESOLUTION_LABELS[legacy]}</span>
+          </label>
+        )}
+      </div>
+      <textarea
+        value={note}
+        onChange={e => setNote(e.target.value)}
+        rows={2}
+        maxLength={2000}
+        placeholder={path === 'other' ? 'How was it resolved? (needed)' : 'Note (optional)'}
+        className="w-full border border-gray-300 rounded px-2 py-1 text-sm"
+      />
+      <p className="text-[11px] text-gray-400">Who paid goes in the Money card.</p>
+      {error && <div className="text-xs text-red-600">{error}</div>}
+      <div className="flex justify-end gap-2">
+        <button type="button" onClick={onCancel} className="px-3 py-1 text-xs border rounded">Cancel</button>
+        <button type="button" onClick={save} disabled={busy}
+          className="px-3 py-1 text-xs rounded bg-green-600 text-white disabled:opacity-50">
+          {busy ? 'Saving…' : resolve ? '✓ Mark as resolved' : 'Save'}
+        </button>
       </div>
     </div>
   );
@@ -757,10 +851,23 @@ function EventRow({ e }: { e: IssueEvent }) {
       icon = '📅';
       body = `Due date changed`;
       break;
-    case 'cost_estimate':
+    case 'cost_estimate': {
       icon = '💷';
-      body = `Cost updated`;
+      const est = e.metadata?.estimated;
+      body = est === null || est === undefined || est === '' ? 'Estimate cleared' : `Estimate: £${Number(est).toFixed(2)} ex VAT`;
       break;
+    }
+    case 'money':
+      // Recovered-from-client lines (the Money card) — the body says what.
+      icon = '💷';
+      break;
+    case 'resolution': {
+      icon = '✅';
+      const p = (e.metadata?.path as ResolutionPath | null) ?? null;
+      const n = (e.metadata?.note as string | null) ?? null;
+      body = `How it was resolved: ${p ? (RESOLUTION_LABELS[p] || p) : 'not recorded'}${n ? ` — ${n}` : ''}`;
+      break;
+    }
     case 'resolved':
       icon = '✅';
       body = body || 'Resolved';

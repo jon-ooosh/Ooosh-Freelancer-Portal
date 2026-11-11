@@ -26,6 +26,7 @@ import { DamageOutlineEditor } from '../components/claims/VanOutline';
 import { GpsTraceCard } from '../components/claims/GpsTraceCard';
 import { LinkifiedText } from '../components/LinkifiedText';
 import { FieldsGrid, ListEditor } from '../components/claims/FormFields';
+import DamageMoneyCard from '../components/damage-money/DamageMoneyCard';
 import {
   ClaimStage, ClaimStagePill, NextCheckCell, OUTCOME_LABEL, fmtClaimDate, ukDatePlus,
 } from '../components/claims/format';
@@ -132,6 +133,7 @@ const FILE_TYPE_LABEL: Record<string, string> = {
   broker_correspondence: 'Broker / insurer letter',
   repair_quote: 'Repair quote',
   tts360_notice: 'TTS360 notice',
+  authorisation_letter: 'Letter of authorisation',
   other: 'Other',
 };
 
@@ -250,6 +252,15 @@ function ClaimDetailContent() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
         <div className="lg:col-span-2 space-y-4">
           <DetailsCard claim={claim} patch={patch} />
+          {/* Estimate, costs, what the client and the insurer paid, what it cost us (spec §23).
+              Reads again when a Problem is linked or taken off; its saves reload the timeline. */}
+          <DamageMoneyCard
+            claimId={claim.id}
+            jobId={claim.job_id}
+            vehicleId={claim.vehicle_id}
+            reloadToken={claim.problems.map((p) => p.id).join(',')}
+            onChanged={load}
+          />
           <ClientLinksCard
             claim={claim}
             onChange={(m) => { if (m) setFlash(m); load(); }}
@@ -1053,6 +1064,7 @@ const EVENT_ICON: Record<string, string> = {
   form_sent: '📧', link_opened: '👀', link_revoked: '🚫', who_filling: '🙋', handed_off: '↪️', sent_to_driver: '📧',
   section_saved: '✅', driver_verified: '🔐', driver_signed: '✍️', damage_marked: '❌', sketch_saved: '✏️',
   chase_sent: '⏰', chase_escalated: '🚩', chase_paused: '⏸', chase_restarted: '🔁', gps_saved: '📍', sms_sent: '📱',
+  money: '💷',
 };
 
 function TimelineCard({ claim, onChange }: { claim: Claim; onChange: () => void }) {
