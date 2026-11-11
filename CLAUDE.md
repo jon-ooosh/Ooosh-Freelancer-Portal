@@ -667,12 +667,19 @@ var** when the value needs changing without a deploy.
 Production is at `49.13.158.66`; the user SSHs in as root. Claude cannot SSH — provide
 the commands.
 
+**Merging to `main` IS the deploy** (`.github/workflows/deploy.yml`: backend build, migrations,
+frontend build, restart). Never hand the user build commands for a merged change — a by-hand
+build beside the automatic one ran the 4 GB server out of memory and took the site down
+(11 Nov 2026). Deploys queue one at a time; the frontend is built by `deploy/build-frontend.sh`,
+which waits for any other build and swaps the new site in only on success (`dist-prev/` is the
+roll back). By hand (another branch, or Actions is down):
+
 ```bash
 cd /var/www/ooosh-portal
 git status                     # investigate unexpected local changes BEFORE pulling
 git pull origin <branch>
 cd backend  && npm install && npm run build
-cd ../frontend && npm install && npm run build
+cd ../frontend && npm install && bash ../deploy/build-frontend.sh
 sudo systemctl restart ooosh-portal
 sudo systemctl status ooosh-portal
 journalctl -u ooosh-portal -n 50 --no-pager

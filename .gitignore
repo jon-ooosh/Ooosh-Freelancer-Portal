@@ -8,6 +8,9 @@ node_modules/
 out/
 build/
 dist/
+# frontend build-in-progress and previous build (deploy/build-frontend.sh)
+dist-new/
+dist-prev/
 
 # Environment files (NEVER commit these!)
 .env

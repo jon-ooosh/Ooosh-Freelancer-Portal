@@ -4,6 +4,16 @@ on:
   push:
     branches:
       - main
+  # "Run workflow" button on the Actions tab - a by-hand redeploy of main.
+  workflow_dispatch:
+
+# One deploy at a time (11 Nov 2026 outage): two merges a couple of minutes apart
+# started two overlapping deploys, each building on the 4 GB server, and it ran out
+# of memory mid-build. A deploy now waits for the one before it. If several are
+# waiting, GitHub keeps only the newest - fine, every deploy builds the latest main.
+concurrency:
+  group: deploy-hetzner
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -16,11 +26,17 @@ jobs:
           host: ${{ secrets.HETZNER_HOST }}
           username: ${{ secrets.HETZNER_USER }}
           key: ${{ secrets.HETZNER_SSH_KEY }}
+          # The frontend build may wait for a by-hand build to finish (build-frontend.sh).
+          command_timeout: 30m
           script: |
+            # Stop at the first failure, so a failed build shows as a red deploy
+            # (and nothing is restarted) instead of carrying on and showing green.
+            set -e
             cd /var/www/ooosh-portal
             git fetch origin
             git checkout main
             git reset --hard origin/main
             cd backend && npm install && npm run build && npm run db:migrate
-            cd ../frontend && npm install && npm run build
+            # Builds beside the live site and swaps it in only on success.
+            cd ../frontend && npm install && bash ../deploy/build-frontend.sh
             sudo systemctl restart ooosh-portal

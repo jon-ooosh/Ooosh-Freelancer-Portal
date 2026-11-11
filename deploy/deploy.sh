@@ -73,8 +73,9 @@ npm run build
 # --- Build frontend ---
 echo ""
 echo "[4/5] Building frontend..."
-cd "${APP_DIR}/frontend"
-npm run build
+# Builds beside the live site and swaps it in only on success; waits if
+# another frontend build (e.g. an automatic deploy) is running.
+bash "${APP_DIR}/deploy/build-frontend.sh"
 
 # --- Run migrations ---
 echo ""
