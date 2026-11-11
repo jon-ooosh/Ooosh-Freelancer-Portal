@@ -253,7 +253,7 @@ export type QuoteStatus = 'not_quoted' | 'quoted' | 'revised' | 'accepted';
 export type Likelihood = 'hot' | 'warm' | 'cold';
 export type HoldReason = 'under_minimum' | 'fully_booked' | 'client_undecided' | 'too_early' | 'other';
 export type ConfirmedMethod = 'deposit' | 'full_payment' | 'po' | 'manual';
-export type EnquirySource = 'phone' | 'email' | 'web_form' | 'referral' | 'cold_lead' | 'forum' | 'repeat' | 'other';
+export type EnquirySource = 'phone' | 'email' | 'web_form' | 'in_person' | 'referral' | 'cold_lead' | 'forum' | 'repeat' | 'other';
 export type ChaseMethod = 'phone' | 'email' | 'text' | 'whatsapp';
 
 // Generic requirement / checklist status. Used by job_requirements (any

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
-import { ENQUIRY_SOURCE_CHOICES } from '../lib/enquirySource';
+import { ENQUIRY_SOURCE_CHOICES, HEARD_ABOUT_CHOICES, HEARD_ABOUT_DETAIL_PROMPT } from '../lib/enquirySource';
 import DatePicker from '../components/DatePicker';
 import ChaseModal from '../components/ChaseModal';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
@@ -922,6 +922,9 @@ function NewEnquiryModal({
   const [jobValue, setJobValue] = useState('');
   const [likelihood, setLikelihood] = useState<Likelihood>('warm');
   const [enquirySource, setEnquirySource] = useState('');
+  // Where they heard about us — optional (docs/BUSINESS-FIGURES-SPEC.md §7).
+  const [heardAbout, setHeardAbout] = useState('');
+  const [heardAboutDetail, setHeardAboutDetail] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -1575,7 +1578,7 @@ function NewEnquiryModal({
     // Required (jon, Nov 2026): the business figures compare channels, and a box
     // left optional stays blank on exactly the busy days that matter.
     if (!enquirySource) {
-      setError('How did they get in touch? Pick one.');
+      setError('Came in by: pick phone, email, website, in person or other.');
       return;
     }
 
@@ -1740,6 +1743,8 @@ function NewEnquiryModal({
         job_value: jobValue ? parseFloat(jobValue) : undefined,
         likelihood,
         enquiry_source: enquirySource || undefined,
+        heard_about: heardAbout || undefined,
+        heard_about_detail: heardAbout && HEARD_ABOUT_DETAIL_PROMPT[heardAbout] && heardAboutDetail.trim() ? heardAboutDetail.trim() : undefined,
         notes: notes || undefined,
         next_chase_date: nextChaseDate || undefined,
         chase_alert_user_id: chaseAlertUserId || undefined,
@@ -1849,7 +1854,7 @@ function NewEnquiryModal({
       setPersonFirstClickedId(null);
       setClientPeople([]);
       setPendingPerson(null);
-      setEnquirySource(''); setNotes(''); setShowOptional(false);
+      setEnquirySource(''); setHeardAbout(''); setHeardAboutDetail(''); setNotes(''); setShowOptional(false);
       setStagedFiles([]); setFileTag(''); setFileComment('');
       setNextChaseDate(addDaysToDate(5)); setSelectedChasePreset('5 days'); setChaseAlertUserId('');
       // Close first (clears `?newEnquiry=1` search param via setSearchParams)
@@ -2633,7 +2638,7 @@ function NewEnquiryModal({
 
           {/* How they got in touch — required (docs/BUSINESS-FIGURES-SPEC.md) */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">How did they get in touch? *</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Came in by *</label>
             <div className="flex flex-wrap gap-1.5">
               {ENQUIRY_SOURCE_CHOICES.map((o) => (
                 <button
@@ -2648,6 +2653,35 @@ function NewEnquiryModal({
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Where they heard about us — optional, one tap (docs/BUSINESS-FIGURES-SPEC.md §7) */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Heard about us <span className="font-normal text-gray-400">(optional)</span></label>
+            <div className="flex flex-wrap gap-1.5">
+              {HEARD_ABOUT_CHOICES.map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => setHeardAbout(heardAbout === o.value ? '' : o.value)}
+                  className={`px-2.5 py-1 rounded-full text-xs border ${heardAbout === o.value
+                    ? 'bg-ooosh-600 border-ooosh-600 text-white'
+                    : 'bg-white border-gray-300 text-gray-700 hover:border-ooosh-400'}`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+            {heardAbout && HEARD_ABOUT_DETAIL_PROMPT[heardAbout] && (
+              <input
+                type="text"
+                value={heardAboutDetail}
+                maxLength={300}
+                onChange={(e) => setHeardAboutDetail(e.target.value)}
+                placeholder={HEARD_ABOUT_DETAIL_PROMPT[heardAbout]}
+                className="mt-1.5 w-full border border-gray-300 rounded px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+            )}
           </div>
 
           {/* Dates — HireHop-style 4-date system with linking */}

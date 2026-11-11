@@ -28,6 +28,7 @@ import { JOB_OUTCOME_SQL, JOB_BOOKED_SQL } from './job-outcomes';
 import { ALTERNATIVE_QUOTE_LOST_REASON, nonLeadMemberIds } from './job-groups';
 import { fullDisplayName } from './display-name';
 import { EnquiryRow, FiguresSummary, Outcome, londonDate, londonToUtcMs, officeMinutesBetween, summarise } from './business-figures-maths';
+import { trackedSource } from './marketing-source';
 
 /** A client email this long before the enquiry was logged counts as its first contact. */
 const CONTACT_BEFORE_DAYS = 3;
@@ -65,7 +66,14 @@ interface JobRow {
   has_rehearsal: boolean | null;
   m_first: string | null; m_last: string | null; m_pref: string | null;
   c_first: string | null; c_last: string | null; c_pref: string | null;
+  returning: boolean;
+  heard_about: string | null;
+  ms_utm_source: string | null; ms_utm_medium: string | null; ms_gclid: string | null; ms_fbclid: string | null;
+  ms_link_code: string | null; ms_referrer: string | null;
 }
+
+/** The booked-outcome test for an earlier job aliased `p` (job-outcomes.ts is written for `j`). */
+const BOOKED_EARLIER_SQL = `(${JOB_BOOKED_SQL} OR ${JOB_OUTCOME_SQL.cancelled})`.replace(/\bj\./g, 'p.');
 
 export async function buildEnquiryFigures(from: string, to: string): Promise<EnquiryFigures> {
   const fromMs = londonToUtcMs(from, 0);
@@ -103,8 +111,17 @@ export async function buildEnquiryFigures(from: string, to: string): Promise<Enq
             (j.hh_derived_flags->>'has_backline')::boolean AS has_backline,
             (j.hh_derived_flags->>'has_rehearsal')::boolean AS has_rehearsal,
             pm.first_name AS m_first, pm.last_name AS m_last, pm.preferred_name AS m_pref,
-            pc.first_name AS c_first, pc.last_name AS c_last, pc.preferred_name AS c_pref
+            pc.first_name AS c_first, pc.last_name AS c_last, pc.preferred_name AS c_pref,
+            -- Returning: the client had already booked with us before this enquiry arrived.
+            (j.client_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM jobs p
+                WHERE p.client_id = j.client_id AND p.id <> j.id AND p.is_deleted = false
+                  AND LEAST(p.created_at, COALESCE(p.created_date, p.created_at)) < j.arrived
+                  AND ${BOOKED_EARLIER_SQL})) AS returning,
+            ms.heard_about, ms.utm_source AS ms_utm_source, ms.utm_medium AS ms_utm_medium, ms.gclid AS ms_gclid,
+            ms.fbclid AS ms_fbclid, ms.link_code AS ms_link_code, ms.referrer AS ms_referrer
        FROM base j
+       LEFT JOIN job_marketing_source ms ON ms.job_id = j.id
        LEFT JOIN people pm ON pm.id = j.manager1_person_id
        LEFT JOIN users uc ON uc.id::text = j.created_by
        LEFT JOIN people pc ON pc.id = uc.person_id
@@ -259,6 +276,12 @@ export async function buildEnquiryFigures(from: string, to: string): Promise<Enq
       replyMinutes: reply ? officeMinutesBetween(firstContact, reply.at) : null,
       replyBy: reply ? senderName(reply.from) : null,
       quoteMinutes: quoteAt !== null && quoteAt >= firstContact ? officeMinutesBetween(firstContact, quoteAt) : null,
+      heardAbout: j.heard_about,
+      tracked: trackedSource({
+        utm_source: j.ms_utm_source, utm_medium: j.ms_utm_medium, gclid: j.ms_gclid, fbclid: j.ms_fbclid,
+        link_code: j.ms_link_code, referrer: j.ms_referrer,
+      }),
+      returning: !!j.returning,
     };
   });
 

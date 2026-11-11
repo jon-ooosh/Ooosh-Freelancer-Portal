@@ -380,6 +380,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '338_towbars_and_price_group.sql',
         '339_ooh_return_auto.sql',
         '340_approval_email_documents.sql',
+        '341_enquiry_marketing_source.sql',
       ];
 
       for (const migration of migrations) {

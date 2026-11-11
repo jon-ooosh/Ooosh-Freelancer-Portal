@@ -23,6 +23,12 @@ export interface EnquiryRow {
   replyBy: string | null;                 // who sent that first email
   /** Office minutes from first contact to the first quote PDF sent; null when none was found. */
   quoteMinutes: number | null;
+  /** What they told us ("heard about us"), or null. */
+  heardAbout?: string | null;
+  /** What the website saw (marketing-source.ts trackedSource), or null. */
+  tracked?: string | null;
+  /** The client had booked with us before this enquiry (worked out from history, never asked). */
+  returning?: boolean;
 }
 
 // ── Office time ─────────────────────────────────────────────────────────────
@@ -173,6 +179,9 @@ export interface FiguresSummary {
   byOwner: Tally[];
   byReplier: Tally[];
   byReplySpeed: Tally[];
+  byHeardAbout: Tally[];
+  byTracked: Tally[];
+  byClientType: Tally[];
   lostReasons: Array<{ reason: string; count: number }>;
 }
 
@@ -193,6 +202,9 @@ export function summarise(rows: EnquiryRow[]): FiguresSummary {
     byOwner: groupBy(rows, (r) => [r.owner || 'Not recorded']),
     byReplier: groupBy(rows.filter((r) => r.replyBy), (r) => [r.replyBy as string]),
     byReplySpeed: groupBy(rows.filter((r) => r.replyMinutes !== null), (r) => [replyBucket(r.replyMinutes) as string], REPLY_BUCKET_ORDER),
+    byHeardAbout: groupBy(rows, (r) => [r.heardAbout || 'not_asked']),
+    byTracked: groupBy(rows.filter((r) => r.tracked), (r) => [r.tracked as string]),
+    byClientType: groupBy(rows, (r) => [r.returning ? 'Returning client' : 'New client'], ['New client', 'Returning client']),
     lostReasons: [...lostReasons.entries()].map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count),
   };
 }

@@ -4,7 +4,7 @@ import { vehiclePrepPill } from '../lib/vehiclePrep';
 import { referralBadge } from '../lib/driverStatus';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
-import { ENQUIRY_SOURCE_CHOICES, ENQUIRY_SOURCE_LABELS } from '../lib/enquirySource';
+import { ENQUIRY_SOURCE_CHOICES, ENQUIRY_SOURCE_LABELS, HEARD_ABOUT_CHOICES } from '../lib/enquirySource';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ActivityTimeline from '../components/ActivityTimeline';
 import JobProblemsPanel from '../components/JobProblemsPanel';
@@ -1621,6 +1621,15 @@ function JobDetailContent() {
   // to do, blue = waiting on the client, green = done, red = needs sorting). Read only
   // for returned jobs — the plan is a live HireHop read, shared (30 s) with the panel
   // and the Invoice card, so this costs nothing extra when either is on screen.
+  // Where the enquiry came from — what they told us and what the website saw (BUSINESS-FIGURES-SPEC §7).
+  const [marketing, setMarketing] = useState<{ heardAbout: string | null; heardAboutDetail: string | null; tracked: string | null; campaign: string | null } | null>(null);
+  const loadMarketing = useCallback(() => {
+    if (!id) return;
+    api.get<{ data: typeof marketing }>(`/pipeline/${id}/marketing-source`)
+      .then((r) => setMarketing(r.data))
+      .catch(() => setMarketing(null));
+  }, [id]);
+  useEffect(() => { loadMarketing(); }, [loadMarketing]);
   const [closeOutPlan, setCloseOutPlan] = useState<CloseOutPlan | null>(null);
   // The read failed — the cancelled banner falls back to the figure saved at cancellation.
   const [closeOutFailed, setCloseOutFailed] = useState(false);
@@ -4250,6 +4259,30 @@ function JobDetailContent() {
                     <option value={job.enquiry_source}>{ENQUIRY_SOURCE_LABELS[job.enquiry_source] || job.enquiry_source}</option>
                   )}
                 </select>
+
+                {/* Where they heard about us — optional */}
+                <select
+                  value={marketing?.heardAbout || ''}
+                  onChange={async (e) => {
+                    try {
+                      await api.patch(`/pipeline/${job.id}`, { heard_about: e.target.value || null, heard_about_detail: marketing?.heardAboutDetail ?? null });
+                      loadMarketing();
+                    } catch (err) {
+                      alert(err instanceof Error ? err.message : 'Could not save');
+                    }
+                  }}
+                  title={marketing?.heardAboutDetail ? `Heard about us: ${marketing.heardAboutDetail}` : 'Where did they hear about us?'}
+                  className="text-xs rounded-md border border-gray-200 px-1.5 py-1 text-gray-700"
+                >
+                  <option value="">Heard about us?</option>
+                  {HEARD_ABOUT_CHOICES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+                {marketing?.heardAboutDetail && <span className="text-xs text-gray-500">({marketing.heardAboutDetail})</span>}
+                {marketing?.tracked && (
+                  <span className="text-xs text-gray-500" title="What the website saw when they enquired">
+                    Website: {marketing.tracked}{marketing.campaign ? ` · ${marketing.campaign}` : ''}
+                  </span>
+                )}
 
                 {/* Next Chase Date — opens full chase modal (hidden for lost/operational statuses) */}
                 {!isOperational && job.pipeline_status !== 'lost' && (
