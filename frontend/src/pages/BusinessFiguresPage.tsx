@@ -9,7 +9,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import { ENQUIRY_SOURCE_LABELS } from '../lib/enquirySource';
+import { ENQUIRY_SOURCE_LABELS, HEARD_ABOUT_LABELS } from '../lib/enquirySource';
 
 interface Tally {
   key: string;
@@ -42,6 +42,9 @@ interface Figures {
     byOwner: Tally[];
     byReplier: Tally[];
     byReplySpeed: Tally[];
+    byHeardAbout: Tally[];
+    byTracked: Tally[];
+    byClientType: Tally[];
     lostReasons: Array<{ reason: string; count: number }>;
   };
 }
@@ -231,6 +234,17 @@ export default function BusinessFiguresPage() {
             <TallyTable title="Likelihood" note="As set on the enquiry." rows={s.byLikelihood} />
             <TallyTable title="Job value (inc VAT)" rows={s.byValue} />
             <TallyTable title="What they wanted" note="A van + backline hire counts under both." rows={s.byService} />
+          </div>
+          <TallyTable title="Where they heard about us"
+            note="What they told us — the website form's optional question, or staff on New Enquiry / the job page (asked from Nov 2026)."
+            rows={s.byHeardAbout} label={(k) => (k === 'not_asked' ? 'Not asked / not answered' : HEARD_ABOUT_LABELS[k] || k)} showValue />
+          <div className="space-y-3">
+            <TallyTable title="What the website saw"
+              note="Website enquiries only: the ad, campaign tag, tracked link or site that sent them on their first visit (stored only with cookie consent)."
+              rows={s.byTracked} showValue />
+            <TallyTable title="New or returning clients"
+              note="Returning = the client had booked with us before this enquiry. Worked out from history, never asked."
+              rows={s.byClientType} showValue />
           </div>
           <TallyTable title="Reply speed and booking"
             note="Enquiries we emailed back, by how long the first email took in office hours. Read with care — see above."

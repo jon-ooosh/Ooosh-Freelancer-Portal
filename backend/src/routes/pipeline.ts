@@ -44,6 +44,7 @@ import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
 import { forClientContext } from '../services/endorsements';
 import { retireDoneBells } from '../services/notification-resolve';
 import { startWatchFromCloseOut } from '../services/leads/band-watch';
+import { HEARD_ABOUT_VALUES, getMarketingSource, saveMarketingSource, setHeardAbout } from '../services/marketing-source';
 
 const router = Router();
 router.use(authenticate);
@@ -426,7 +427,7 @@ const createEnquirySchema = z.object({
   client_id: z.string().guid().optional().nullable(),
   venue_id: z.string().guid().optional().nullable(),
   venue_name: z.string().optional().nullable(),
-  enquiry_source: z.enum(['phone', 'email', 'web_form', 'referral', 'cold_lead', 'forum', 'repeat', 'other']).optional().nullable(),
+  enquiry_source: z.enum(['phone', 'email', 'web_form', 'in_person', 'referral', 'cold_lead', 'forum', 'repeat', 'other']).optional().nullable(),
   job_value: z.number().optional().nullable(),
   likelihood: z.enum(['hot', 'warm', 'cold']).optional().default('warm'),
   notes: z.string().optional().nullable(),
@@ -437,6 +438,9 @@ const createEnquirySchema = z.object({
   chase_alert_user_id: z.string().guid().optional().nullable(),
   service_types: z.array(z.enum(['self_drive_van', 'backline', 'rehearsal'])).optional().nullable(),
   band_name: z.string().optional().nullable(),
+  // Where they heard about us — optional (docs/BUSINESS-FIGURES-SPEC.md §7; stored by marketing-source.ts).
+  heard_about: z.enum(HEARD_ABOUT_VALUES).optional().nullable(),
+  heard_about_detail: z.string().max(300).optional().nullable(),
   // Per-job contact selection — landed in migration 086. The modal sends
   // the people staff ticked as contacts on this hire (a subset of the
   // client org's people), with one optional `primary_contact_person_id`
@@ -473,6 +477,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
     }
 
     const job = await createPipelineEnquiry(req.body, req.user!.id);
+    await saveMarketingSource(job.id as string, { heardAbout: req.body.heard_about, heardAboutDetail: req.body.heard_about_detail });
     res.status(201).json(job);
   } catch (error) {
     if (error instanceof EnquiryValidationError) {
@@ -937,9 +942,22 @@ const updatePipelineSchema = z.object({
   chase_alert_delivery: z.enum(['bell', 'bell_email', 'none']).optional().nullable(),
   job_value: z.number().optional().nullable(),
   quote_status: z.enum(['not_quoted', 'quoted', 'revised', 'accepted']).optional().nullable(),
-  enquiry_source: z.enum(['phone', 'email', 'web_form', 'referral', 'cold_lead', 'forum', 'repeat', 'other']).optional().nullable(),
+  enquiry_source: z.enum(['phone', 'email', 'web_form', 'in_person', 'referral', 'cold_lead', 'forum', 'repeat', 'other']).optional().nullable(),
   auto_chase_mode: z.enum(['off', 'draft', 'send']).optional(),
   notes: z.string().optional().nullable(),
+  // Where they heard about us — not a jobs column; saved by marketing-source.ts.
+  heard_about: z.enum(HEARD_ABOUT_VALUES).optional().nullable(),
+  heard_about_detail: z.string().max(300).optional().nullable(),
+});
+
+// GET /api/pipeline/:id/marketing-source — where the enquiry came from (job page).
+router.get('/:id/marketing-source', async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await getMarketingSource(String(req.params.id)) });
+  } catch (error) {
+    console.error('[pipeline] marketing-source read failed:', error);
+    res.status(500).json({ error: 'Failed to load where this enquiry came from' });
+  }
 });
 
 router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, res: Response) => {
@@ -982,6 +1000,16 @@ router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, re
       updates.push(`auto_chase_set_by = $${pIdx}`);
       params.push(req.user!.id);
       pIdx++;
+    }
+
+    // "Heard about us" lives in job_marketing_source, not on jobs.
+    const heardOnly = params.length === 0 && 'heard_about' in fields;
+    if ('heard_about' in fields) {
+      await setHeardAbout(jobId, fields.heard_about ?? null, fields.heard_about_detail ?? null);
+    }
+    if (heardOnly) {
+      res.json(current.rows[0]);
+      return;
     }
 
     if (params.length === 0) {

@@ -1,6 +1,6 @@
 # Business figures — enquiries, conversion and response times
 
-**Status: Steps 1–2 BUILT (Nov 2026). Step 3 (reply speed against booking, properly) waits for ~a month of recording.**
+**Status: Steps 1–2 BUILT (Nov 2026). Step 3 (reply speed against booking, properly) waits for ~a month of recording. §7 (where enquiries came from) BUILT; §8 is the agreed marketing roadmap.**
 Admin-only, its own tab beside the cash forecast (not on the cash page). Raised by jon
 alongside the cash forecast (`CASHFLOW-FORECAST-SPEC.md`), Nov 2026.
 
@@ -122,3 +122,62 @@ also go to the easy enquiries, so a raw "fast = books" chart proves nothing. Pho
 once the number is ported to Twilio and calls are matched (CALL-INTELLIGENCE-SPEC §I-b);
 the useful phone figures are missed calls and call-back time, not "reply time" (a call
 answered live has none).
+
+## 7. Where enquiries came from — marketing step 1 (BUILT Nov 2026)
+
+jon is expanding marketing in 2027 (print in music listings first, then Google / Meta ads) and wants
+one place to see what each effort produces. Two questions, deliberately kept apart:
+
+- **Came in by** (`jobs.enquiry_source`, required on New Enquiry): Phone / Email / Website / In person /
+  Other. Referral, Returning client and Forum used to be in this list; they answer the other question,
+  so they're no longer offered (old enquiries keep their label). `in_person` is new.
+- **Heard about us** (`job_marketing_source.heard_about`, optional everywhere — jon: never gate an
+  enquiry on it): Google search · Google ad · Facebook / Instagram · Magazine / print · Recommendation ·
+  Used us before · Asked an AI · Saw us at a venue · Other. Recommendation ("Who recommended us?") and
+  Other ("Where?") take a short note (`heard_about_detail`) — the start of referral tracking.
+- **What the website saw** (same table, migration 341): the FIRST visit's `utm_*` tags, `gclid`,
+  `fbclid`, `ol` (an Ooosh tracked link — coming with the Marketing page), referrer (site + path only,
+  never our own site) and landing path; plus `last_touch` when the visit they enquired on carried its
+  own tags (so a fresh ad click isn't lost to first-visit credit). Sent by the enquiry form (an iframe
+  on oooshtours.co.uk) through its Cloudflare Worker; the parent site stores the first visit only with
+  cookie consent, so expect blanks — the dropdown is the safety net. Cleaned and capped in
+  `services/marketing-source.ts` (`cleanAttribution()`), read off the raw body so a bad value never
+  costs the enquiry (`saveMarketingSource()` never throws). `trackedSource()` turns it into one label.
+- **Returning client** is never asked: Business figures works it out (the client had a booked job
+  before this enquiry arrived).
+
+Where it shows: New Enquiry (two rows of chips), the job page (both selects + "Website: …"),
+`GET /api/pipeline/:id/marketing-source`, and Business figures ("Where they heard about us", "What the
+website saw", "New or returning clients").
+
+The website half lives in the enquiry form's own repo (a separate Claude, Nov 2026): the parent-site
+snippet (site-wide header, put in by webboutiques), the form reading the tags from its iframe URL, the
+optional dropdown, and the Worker passing `attribution`, `attribution_last`, `heard_about`,
+`heard_about_detail` through.
+
+## 8. Next — agreed in outline, not built
+
+- **Marketing page (step 2, before the first print ad, ~late Nov 2026):** an advert register (where,
+  cost, dates, next one due → To Do reminder, artwork / proof received) and **tracked links + QR codes**
+  on `go.oooshtours.co.uk` (jon asked webboutiques for an A record → 49.13.158.66; then an nginx server
+  block + certificate here). A scan is counted (time only), then forwarded to the chosen page with the
+  tags, so Business figures can show scans → enquiries → bookings per advert, and a printed code's
+  destination can change later. Tip for print: a QR that lands straight on a page with the form
+  survives no-consent visitors best.
+- **Review requests (step 3, wording to be agreed with jon first):** from jon personally ("This is
+  Jon here, owner of Ooosh Tours…"), one day after the job is **Completed**, only when completion came
+  within the usual ten days of the return (a long completion usually means a claim); at most once a
+  year per client; a "don't send" tick per job; a "don't ask me again" link; direct to the Google review
+  box `https://g.page/r/CSCv1HhULJ6nEAI/review`. **Never only the "Great" retros** — Google bans
+  selectively soliciting positive reviews ("review gating"); and **never a reward for a review**
+  (Google bans it; UK DMCC rules require any incentivised review to be labelled). Also QR posters to
+  the review box around the building (rehearsal rooms, the back of the loo door) and postcards.
+  To discuss: whether the ten-day rule reads as filtering out unhappy clients.
+- **Referrals (step 3):** a personal code / link per client (`go.oooshtours.co.uk/r/…`), the friend
+  tagged with who sent them, a To Do "reward due" when the friend's hire books (never automatic);
+  rewards on-brand (a free hour in The Loft, strings / sticks, a hoodie at three). One email may carry
+  the review ask AND a referral line provided the reward is plainly about referring, never about
+  reviewing. In the van / kit-case cards and the booking confirmation too.
+- **Content library (later, jon):** a register of the photos / videos used on Instagram etc. — the
+  files stay in the shared Google Drive; OP holds the link, description, where and when each was used,
+  and who to credit. On the Marketing page.

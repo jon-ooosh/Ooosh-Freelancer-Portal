@@ -327,7 +327,12 @@ the figures need: the real time of every ingested email (`message_at`, Gmail's o
 touch?" required on New Enquiry (`lib/enquirySource.ts`), and `jobs.auto_lost` for enquiries the
 09:00 sweep closed ("not followed up" — never a lost sale). **Emails are never attached to an
 enquiry by guesswork** — the report finds the client's first email by address when it runs.
-Steps 2 (booking-rate tab) and 3 (reply speed, ~a month of data) are in the spec.
+Steps 2 (booking-rate tab) and 3 (reply speed, ~a month of data) are in the spec. **§7: where an enquiry came
+from** — "came in by" stays `jobs.enquiry_source`; "heard about us" (optional, never gates an enquiry) and the
+website's ad / campaign tags live in `job_marketing_source` (mig 341, `services/marketing-source.ts` — every
+value cleaned, never throws); returning client is worked out from history, never asked. §8 is the agreed
+marketing roadmap (tracked links / QR on `go.oooshtours.co.uk`, review requests — never only the happy ones,
+never rewarded — and referrals).
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**

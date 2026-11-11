@@ -31,6 +31,7 @@ import { verifyApiKey } from '../middleware/api-key';
 import { getFrontendUrl } from '../config/app-urls';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
+import { saveMarketingSource } from '../services/marketing-source';
 import {
   splitName, findOrCreatePersonByEmail, resolveOrCreateOrganisation, linkPersonToOrganisation,
 } from '../services/address-book-resolve';
@@ -401,6 +402,15 @@ router.post('/', intakeLimiter, authenticateEnquiryIntake, async (req: Request, 
     );
 
     const id = job.id as string;
+
+    // Where they came from (docs/BUSINESS-FIGURES-SPEC.md §7): read straight off the
+    // body — not the schema — and cleaned in saveMarketingSource, which never throws,
+    // so a bad tag can never cost us the enquiry.
+    const raw = req.body as Record<string, unknown>;
+    await saveMarketingSource(id, {
+      heardAbout: raw.heard_about, heardAboutDetail: raw.heard_about_detail,
+      first: raw.attribution, last: raw.attribution_last,
+    });
 
     // Attach any client-uploaded files (already pushed to OP's R2 by the Worker)
     // to the new job's Files tab. Fresh-create path only — the dedup return above
