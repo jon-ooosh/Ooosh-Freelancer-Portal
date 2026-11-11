@@ -155,15 +155,44 @@ snippet (site-wide header, put in by webboutiques), the form reading the tags fr
 optional dropdown, and the Worker passing `attribution`, `attribution_last`, `heard_about`,
 `heard_about_detail` through.
 
-## 8. Next — agreed in outline, not built
+## 8. The marketing roadmap
 
-- **Marketing page (step 2, before the first print ad, ~late Nov 2026):** an advert register (where,
-  cost, dates, next one due → To Do reminder, artwork / proof received) and **tracked links + QR codes**
-  on `go.oooshtours.co.uk` (jon asked webboutiques for an A record → 49.13.158.66; then an nginx server
-  block + certificate here). A scan is counted (time only), then forwarded to the chosen page with the
-  tags, so Business figures can show scans → enquiries → bookings per advert, and a printed code's
-  destination can change later. Tip for print: a QR that lands straight on a page with the form
-  survives no-consent visitors best.
+### 8a. Marketing page — step 2 (BUILT Nov 2026, migration 342)
+
+Jobs › Marketing (`/jobs/marketing`), **admin only** (page, nav item and every `/api/marketing` route).
+
+- **Adverts** (`marketing_placements`): name, type (print / online / social / search ads / event /
+  sponsorship / other), who with, cost, runs from–until, status (planned / live / ended / cancelled —
+  never deleted), next thing due + what's due, proof received date, artwork link (the file stays in
+  Google Drive), notes. **The "next thing due" is a To Do** for whoever saved it
+  (`source_type = 'marketing_placement'`, `services/marketing.ts` `syncDueReminder()`): one open reminder
+  per advert, replaced when the date / note / name changes, cancelled when the date is cleared or the
+  advert ends or is cancelled. Never fails the save.
+- **Tracked links** (`marketing_links`): `go.oooshtours.co.uk/<code>` (also `/api/go/<code>`,
+  `routes/go.ts`, public, 60 a minute per address). **The code never changes once made** — it's printed;
+  the destination can, even after printing. A paused, unknown or broken code goes to the home page — a
+  printed code never dead-ends. A scan is stored as time + rough device only (`marketing_link_scans`, no
+  address, no cookie); link previews and crawlers (WhatsApp, Facebook, empty user agent…) are kept as
+  `bot` and not counted. **QR** per link as SVG (for print) and a 1200px PNG.
+- **Forwarding** (`services/marketing-links.ts`, pure, tested): on our own site the link adds
+  `utm_source` (the link's, else the advert's "who with" as a slug, else `ooosh-link`), `utm_medium`
+  (the link's, else the advert's type, else `qr`), `utm_campaign=<code>` and `ol=<code>` — never
+  overwriting tags already in the destination. Any other site (e.g. the Google review box) gets the
+  address as it is, so only the scan is counted.
+- **What each advert brought in**: scans → enquiries → booked (+ value) → cost per enquiry / booking.
+  An enquiry counts for a link when its `job_marketing_source.link_code` **or** `utm_campaign` is the
+  link's code (the enquiry form hands both back); outcomes use `job-outcomes.ts`. Someone who saw the
+  advert and phoned is NOT counted here — they show under "Heard about us: Magazine / print" on
+  Business figures.
+- **Server (by hand, once the DNS record exists)** — a second nginx server block in
+  `/etc/nginx/sites-available/default` (reference copy at the end of `deploy/nginx-ooosh-portal.conf`),
+  then `certbot --nginx -d go.oooshtours.co.uk`. Until then the links work as
+  `https://staff.oooshtours.co.uk/api/go/<code>`; don't print anything until `go.` answers.
+- Tip for print: a QR that lands straight on a page with the form survives no-consent visitors best
+  (the cookie banner can't strip `ol`).
+
+### 8b. Next — agreed in outline, not built
+
 - **Review requests (step 3, wording to be agreed with jon first):** from jon personally ("This is
   Jon here, owner of Ooosh Tours…"), one day after the job is **Completed**, only when completion came
   within the usual ten days of the return (a long completion usually means a claim); at most once a

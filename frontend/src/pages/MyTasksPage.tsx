@@ -688,6 +688,7 @@ const SOURCE_LABEL: Record<string, string> = {
   staff_review: 'From your review',
   vehicle_sale: 'Van sale',
   quote_option: 'Quote options',
+  marketing_placement: 'Marketing',
 };
 
 const SERIES = 'staff_task_series';

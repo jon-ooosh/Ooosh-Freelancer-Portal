@@ -35,6 +35,7 @@ const navItems: NavItem[] = [
       { path: '/jobs/returns', label: 'Returns & Completed' },
       { path: '/jobs/lost-cancelled', label: 'Lost & Cancelled' },
       { path: '/jobs/leads', label: 'Leads' },
+      { path: '/jobs/marketing', label: 'Marketing', roles: ['admin'] },
     ],
   },
   {
