@@ -81,7 +81,7 @@ function readerSession(status, over = {}) {
 }
 
 const SHIFT = {
-  success: true, date: TODAY, planned_start: '16:45:00', planned_end: '22:30:00', status: 'scheduled',
+  success: true, date: TODAY, planned_start: '16:30:00', planned_end: '22:30:00', status: 'scheduled',
   fee: null, assignment_status: 'confirmed', jobs: [BAND_1, BAND_2], tasks: [], codes: null,
 }
 

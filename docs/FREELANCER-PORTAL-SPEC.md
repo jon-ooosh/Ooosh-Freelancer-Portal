@@ -7,6 +7,23 @@ touching completion, the chaser, Earnings, the guides or anything freelancer-fac
 
 ## 0. Start here (next session)
 
+**CLOSED, 11 Nov 2026.** Everything in §1 is merged and deployed. Since the state below, the guides (§8)
+went live: getting started, van delivery, van collection, backline, studio sitting (with the studio
+manager's changes), fire, working with Ooosh, and the shop till rebuilt in the new look. So did:
+- codes on the job and shift pages;
+- the "have they read it?" tick;
+- out-of-hours van returns for freelancers, on by default for a late van;
+- documents attached to the "you're approved" email.
+All of these are in §8. Freelancer emails now say "Sent to you as an Ooosh freelancer" in the footer,
+not "Internal use only" (`audience: 'freelancer'`, `email-templates/base.ts`).
+
+**Left open, on purpose:**
+- **Portal 2FA ships OFF** until jon sets `portal_2fa_enforced_from` (§7).
+- **Invoice upload through the portal is parked** (§5.1).
+- **The out-of-hours "30 minutes on site" is a constant** (`ON_SITE_MINS`), not a setting.
+- **Delivery quotes with no "what is it" don't turn on automatically** (§8).
+- **Costs went to its own thread** (`docs/design/cost-capture-redesign/DECISIONS.md`).
+
 **State on 22 Oct 2026:** PR 1 (completion fixes), the payment-terms PR, PR 2 (security) and PR 3 (the
 portal reskin) are merged and deployed. The "How to invoice Ooosh Tours Ltd" Google Doc and its copy in
 the portal's Resources are updated (§4). Past work on the Completed page (§10), PR 4 (the van screens in
@@ -55,7 +72,8 @@ them from the recipe there.
 | – | Costs follow-ups: job numbers in the work list, "no work ticked" prompt, recharge default (§5.1) | merged 22 Oct 2026 |
 | – | Calculator: setup premium charged to the client, crew fuel once (`PLATFORM-CONVENTIONS.md`) | merged 22 Oct 2026 |
 | 6b | Earnings part 2: the portal tab (§5.2), plus the portal favicon | built 22 Oct 2026 |
-| 7 | Four freelancer guides (§8) | after PR 4, so the screenshots show the new look |
+| 7 | Four freelancer guides (§8), then four more and the shop till rebuild | live, Oct to Nov 2026 |
+| – | Codes, read tick, out-of-hours returns, approval-email documents (§8) | merged Nov 2026 |
 | – | Pool transactions (`SECURITY-AUDIT-BRIEF.md` B.5) | built 26 Oct 2026 |
 
 ## 2. Completion: what PR 1 changed and why

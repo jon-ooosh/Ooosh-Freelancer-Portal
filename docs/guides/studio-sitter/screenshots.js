@@ -51,7 +51,7 @@ const JOBS_TONIGHT = [
   { job_id: 'j2', hh_job_number: 16852, label: 'The Lantern Thieves', rooms: ['Room 2'], files: [] },
 ]
 const SHIFT = {
-  success: true, date: TODAY, planned_start: '16:45:00', planned_end: '22:30:00', status: 'scheduled',
+  success: true, date: TODAY, planned_start: '16:30:00', planned_end: '22:30:00', status: 'scheduled',
   fee: null, assignment_status: 'confirmed', jobs: JOBS_TONIGHT, tasks: [],
   // Made-up codes: OP sends the real ones on the day of the shift only.
   codes: { gate: '2580', cupboard: '1470', lockbox: '3690' },

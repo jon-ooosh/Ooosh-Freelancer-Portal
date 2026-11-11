@@ -300,6 +300,7 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
           subject,
           html: htmlBody,
           variant: 'internal',
+          audience: 'freelancer',
         });
         sent++;
       } catch (err) {

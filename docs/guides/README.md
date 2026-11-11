@@ -13,9 +13,9 @@ The plan for the set is `docs/FREELANCER-PORTAL-SPEC.md` §8.
 | `van-delivery/` | Delivering a hire van (the book-out) | live, Nov 2026 |
 | `van-collection/` | Collecting a hire van | live, Nov 2026 |
 | `backline/` | Delivering and collecting backline | live, Nov 2026 |
-| `studio-sitter/` | Studio sitting (the evening, the phone, closing up, the lock-up checklist) | draft, Oct 2026 |
-| `fire-procedure/` | Fire: what to do (studio sitters and anyone in the building out of hours; the sitter guide points at it) | draft, Nov 2026 |
-| `working-with-ooosh/` | Working with Ooosh: what we expect, and what freelancers can expect from us (text only; freelancers will confirm they've read it) | draft, Nov 2026 |
+| `studio-sitter/` | Studio sitting (the evening, the phone, closing up, the lock-up checklist) | live, Nov 2026 (with the studio manager's changes) |
+| `fire-procedure/` | Fire: what to do (studio sitters and anyone in the building out of hours; the sitter guide points at it) | live, Nov 2026 |
+| `working-with-ooosh/` | Working with Ooosh: what we expect, and what freelancers can expect from us (text only; freelancers confirm they've read it) | live, Nov 2026 |
 | `shop-till/` | How to use the shop till (studio sitters); the till's **How to use** button opens Resources | live; rebuilt in the new look, Nov 2026 |
 
 ## How a guide is built

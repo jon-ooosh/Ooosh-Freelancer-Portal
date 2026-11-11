@@ -4,6 +4,9 @@
  * Two layout variants:
  * - 'client': Polished, full branding (logo, colours, professional footer)
  * - 'internal': Simpler but consistent styling for operational emails
+ *
+ * `audience: 'freelancer'` (Nov 2026): the plain layout sent to a freelancer
+ * says so in its footer, rather than "Internal use only".
  */
 
 const OOOSH_PURPLE = '#7B5EA7';
@@ -89,9 +92,9 @@ function renderClientSignature(): string {
  */
 export function wrapInBaseLayout(
   bodyHtml: string,
-  options: { variant: 'client' | 'internal'; preheader?: string } = { variant: 'internal' },
+  options: { variant: 'client' | 'internal'; preheader?: string; audience?: 'freelancer' } = { variant: 'internal' },
 ): string {
-  const { variant, preheader } = options;
+  const { variant, preheader, audience } = options;
 
   const preheaderHtml = preheader
     ? `<div style="display:none;font-size:1px;color:#f8f8f8;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${preheader}</div>`
@@ -169,7 +172,7 @@ export function wrapInBaseLayout(
           <tr>
             <td style="padding:12px 24px;">
               <p style="margin:0;font-size:11px;color:#94a3b8;text-align:center;">
-                Ooosh Operations Platform &bull; Internal use only
+                ${audience === 'freelancer' ? 'Ooosh Tours Ltd &bull; Sent to you as an Ooosh freelancer' : 'Ooosh Operations Platform &bull; Internal use only'}
               </p>
             </td>
           </tr>
