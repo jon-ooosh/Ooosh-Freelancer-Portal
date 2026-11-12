@@ -39,6 +39,20 @@ export const OPTION_COPY = {
   confirmLostDetail: (winnerNo: number, label: string | null, ref: string) => `Client took Option ${winnerNo}${label ? ` - ${label}` : ''} (${ref})`,
   confirmTransitionNote: (winnerNo: number, ref: string) => `Client confirmed Option ${winnerNo} (${ref})`,
 
+  // "None of them" — the client turned every option down (one reason, one go)
+  barNoneOfThem: 'None of them',
+  barNoneOfThemTitle: 'The client turned every option down - mark them all lost in one go',
+  barAllClosed: 'none going ahead',
+  noneTitle: 'None of the options going ahead',
+  noneIntro: 'Mark these lost with one reason. Untick any the client might still want.',
+  noneReason: 'Why was this lost?',
+  noneDetailPlaceholder: 'Any details... (goes on every option)',
+  noneExplain: 'Each option goes through the normal Lost step: open cards cancelled, chase date cleared, HireHop moved to Not Interested. This is a real loss, so it counts - once, as the group.',
+  noneSubmit: (n: number) => `Mark ${n === 1 ? 'it' : `all ${n}`} as Lost`,
+  noneMarking: 'Marking...',
+  noneCancel: 'Cancel',
+  noneTransitionNote: (total: number) => `Client chose none of the ${total} options`,
+
   // Lost banner on an option the client didn't pick
   lostAltBanner: 'The client chose another option of this enquiry - this slot is theirs, so there is no gap to fill.',
 

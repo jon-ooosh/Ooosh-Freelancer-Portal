@@ -3384,6 +3384,7 @@ function JobDetailContent() {
           refreshSignal={`${optionsRefresh}:${job.pipeline_status}`}
           onAdd={() => setShowAddOptionModal(true)}
           onRemoved={() => loadJob()}
+          onJobChanged={() => loadJob()}
         />
       )}
 

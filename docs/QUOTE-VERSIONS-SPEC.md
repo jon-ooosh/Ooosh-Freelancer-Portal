@@ -578,3 +578,16 @@ arguably still true, and staff who know the client is choosing between options c
 confirmation paths all call `afterOptionConfirmed()`; every user-facing string in
 `frontend/src/lib/optionCopy.ts`; the date rules in `frontend/src/lib/jobDates.ts` are shared
 with the Job Detail editor — never a second copy.
+
+## 15. "None of them" (12 Nov 2026)
+
+When the client turns every option down, the bar's **"None of them"** link (any staff; shown
+while no option is confirmed and at least one is open) closes them all in one go: one modal,
+each open option pre-ticked (untick to keep one), ONE lost reason + details, the band-watch tick
+asked once. Each ticked option goes through the ordinary lost transition (`PATCH
+/pipeline/:id/status`, `keep_requirement_ids: []`) — same loop as the Confirm panel, no backend
+change. The reason list leaves out `'Confirmed Alternative Quote (from us)'`: nobody chose
+another option, so it is a real loss (business figures count the group once, as its lead; the
+Lost & Cancelled page lists each job). The band watch goes with the first option marked lost
+only. After it, the bar's caption reads "none going ahead". `QuoteOptionsBar.tsx`
+`NoneOfThemModal`; copy in `optionCopy.ts` (`none*`).
