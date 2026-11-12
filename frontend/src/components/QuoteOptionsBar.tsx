@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import CompareOptionsPanel from './CompareOptionsPanel';
+import WatchBandTick from './leads/WatchBandTick';
 import { api } from '../services/api';
 import { OPTION_COPY } from '../lib/optionCopy';
 import { ALTERNATIVE_QUOTE_LOST_REASON, isOptionDead, isOptionOpen, optionDateSpan, optionStatusStyle } from '../lib/quoteOptions';
 import type { JobGroupMember } from '../../../shared/types';
 import type { JobGroupRead } from '../../../shared/types';
+import { LOST_REASON_OPTIONS } from '@shared/index';
 
 /**
  * The option bar on Job Detail (spec §6.1) — one pill per option of the
@@ -30,12 +32,15 @@ interface Props {
   onAdd: () => void;
   /** Called after this job leaves its group (the parent reloads the job). */
   onRemoved: () => void;
+  /** Called after "None of them" changed this job's status (the parent reloads the job). */
+  onJobChanged?: () => void;
 }
 
-export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, variant = 'top', onAdd, onRemoved }: Props) {
+export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, variant = 'top', onAdd, onRemoved, onJobChanged }: Props) {
   const [data, setData] = useState<JobGroupRead | null>(null);
   const [editingLabel, setEditingLabel] = useState(false);
   const [comparing, setComparing] = useState(false);
+  const [noneOpen, setNoneOpen] = useState(false);
   const [bottomOpen, setBottomOpen] = useState(false);
   // Confirm panel (spec §7): shown on a confirmed option while siblings are
   // still open. "Keep them open" hides it for this exact set of siblings;
@@ -80,6 +85,9 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, variant
   // Once an option has confirmed the group is settled: no Compare, no Remove,
   // no Add, no pinning — the record stays, the controls go.
   const settled = !!confirmed;
+  // "None of them": every option still in play while nobody has chosen.
+  const liveOptions = members.filter((m) => isOptionOpen(m.pipeline_status) && !m.dismissed_at);
+  const allClosed = !confirmed && liveOptions.length === 0 && members.every((m) => isOptionDead(m.pipeline_status));
   const hereConfirmed = !!confirmed && confirmed.id === jobId;
   if (variant === 'bottom' && !hereConfirmed) return null;
   if (variant === 'top' && hereConfirmed && !showConfirmPanel) return null;
@@ -216,8 +224,8 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, variant
             <span>·</span>
             <span>{OPTION_COPY.barCaption(members.length)}</span>
             <span>·</span>
-            <span className={confirmed ? 'text-green-700 font-medium' : 'text-amber-700'}>
-              {confirmed ? OPTION_COPY.barChosen(confirmed.option_no ?? 0) : OPTION_COPY.barNoneChosen}
+            <span className={confirmed ? 'text-green-700 font-medium' : allClosed ? 'text-gray-500' : 'text-amber-700'}>
+              {confirmed ? OPTION_COPY.barChosen(confirmed.option_no ?? 0) : allClosed ? OPTION_COPY.barAllClosed : OPTION_COPY.barNoneChosen}
             </span>
           </>
         )}
@@ -230,6 +238,16 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, variant
             >
               {OPTION_COPY.barCompare}
             </button>
+            {liveOptions.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setNoneOpen(true)}
+                className="text-gray-500 hover:text-red-600"
+                title={OPTION_COPY.barNoneOfThemTitle}
+              >
+                {OPTION_COPY.barNoneOfThem}
+              </button>
+            )}
             <button
               type="button"
               onClick={removeFromGroup}
@@ -317,6 +335,21 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, variant
           onChanged={(next) => setData(next)}
         />
       )}
+
+      {noneOpen && (
+        <NoneOfThemModal
+          jobId={jobId}
+          options={liveOptions}
+          total={members.length}
+          onClose={async (changed, hereChanged, failures) => {
+            setNoneOpen(false);
+            if (failures.length) setError(failures.join(' · '));
+            if (!changed) return;
+            await load();
+            if (hereChanged) onJobChanged?.();
+          }}
+        />
+      )}
     </div>
   );
 
@@ -372,4 +405,137 @@ export default function QuoteOptionsBar({ jobId, groupId, refreshSignal, variant
         </div>
     );
   }
+}
+
+/**
+ * "None of them" — the client turned every option down. One reason and one
+ * details box for all of them, then each ticked option goes through the
+ * ordinary lost transition (PATCH /pipeline/:id/status), exactly like the
+ * Confirm panel above — so requirements, transport, chase date and the
+ * HireHop status 10 write-back all run as for any lost job.
+ *
+ * The alternative-quote reason is left off the list: nobody chose another
+ * option, so this is a real loss (business figures count the group once).
+ * No open cards are kept — the full Lost box on one job is the route for that.
+ */
+function NoneOfThemModal({ jobId, options, total, onClose }: {
+  jobId: string;
+  options: JobGroupMember[];
+  total: number;
+  /** changed: anything was marked lost · hereChanged: this page's job was · failures: per-option errors */
+  onClose: (changed: boolean, hereChanged: boolean, failures: string[]) => void;
+}) {
+  const reasons = LOST_REASON_OPTIONS.filter((r) => r !== ALTERNATIVE_QUOTE_LOST_REASON);
+  const [ticked, setTicked] = useState<Set<string>>(() => new Set(options.map((m) => m.id)));
+  const [lostReason, setLostReason] = useState<string>('Price');
+  const [lostDetail, setLostDetail] = useState('');
+  // "Watch this band" — asked once, sent with the first option that is marked lost.
+  const [watchOrgId, setWatchOrgId] = useState<string | null>(null);
+  const [marking, setMarking] = useState(false);
+  const chosen = options.filter((m) => ticked.has(m.id));
+
+  async function submit() {
+    if (chosen.length === 0) return;
+    setMarking(true);
+    const failures: string[] = [];
+    let watchSent = false;
+    let changed = false;
+    let hereChanged = false;
+    for (const m of chosen) {
+      const body: Record<string, unknown> = {
+        pipeline_status: 'lost',
+        lost_reason: lostReason,
+        transition_note: OPTION_COPY.noneTransitionNote(total),
+        keep_requirement_ids: [],
+      };
+      if (lostDetail.trim()) body.lost_detail = lostDetail.trim();
+      if (watchOrgId && !watchSent) body.watch_band_org_id = watchOrgId;
+      try {
+        await api.patch(`/pipeline/${m.id}/status`, body);
+        changed = true;
+        if (body.watch_band_org_id) watchSent = true;
+        if (m.id === jobId) hereChanged = true;
+      } catch (e) {
+        failures.push(`Option ${m.option_no}: ${e instanceof Error ? e.message : 'failed'}`);
+      }
+    }
+    setMarking(false);
+    onClose(changed, hereChanged, failures);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => { if (!marking) onClose(false, false, []); }}>
+      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold px-6 pt-6 pb-2 shrink-0">{OPTION_COPY.noneTitle}</h3>
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 space-y-3">
+          <p className="text-sm text-gray-600">{OPTION_COPY.noneIntro}</p>
+          <ul className="space-y-1">
+            {options.map((m) => {
+              const style = optionStatusStyle(m);
+              return (
+                <li key={m.id}>
+                  <label className="inline-flex items-center gap-2 text-sm text-gray-800">
+                    <input
+                      type="checkbox"
+                      checked={ticked.has(m.id)}
+                      disabled={marking}
+                      onChange={(e) => setTicked((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(m.id); else next.delete(m.id);
+                        return next;
+                      })}
+                      className="h-4 w-4 rounded border-gray-300"
+                    />
+                    <span className="font-semibold">Option {m.option_no}</span>
+                    {m.option_label && <span>· {m.option_label}</span>}
+                    {m.hh_job_number && <span className="text-gray-400">· #{m.hh_job_number}</span>}
+                    <span className="text-xs" style={{ color: style.colour }}>· {style.label.toLowerCase()}</span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+          <label className="block text-sm font-medium text-gray-700">{OPTION_COPY.noneReason}</label>
+          <select
+            value={lostReason}
+            onChange={(e) => setLostReason(e.target.value)}
+            disabled={marking}
+            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+          >
+            {reasons.map((reason) => (
+              <option key={reason} value={reason}>{reason}</option>
+            ))}
+          </select>
+          <textarea
+            placeholder={OPTION_COPY.noneDetailPlaceholder}
+            value={lostDetail}
+            onChange={(e) => setLostDetail(e.target.value)}
+            disabled={marking}
+            rows={2}
+            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+          />
+          <WatchBandTick jobId={jobId} value={watchOrgId} onChange={setWatchOrgId} />
+          <p className="text-xs text-gray-500 pb-1">{OPTION_COPY.noneExplain}</p>
+        </div>
+        <div className="flex justify-end gap-2 px-6 py-4 shrink-0 border-t border-gray-100">
+          <button
+            type="button"
+            onClick={() => onClose(false, false, [])}
+            disabled={marking}
+            className="px-3.5 py-1.5 text-sm text-gray-600 hover:text-gray-800 disabled:opacity-50"
+          >
+            {OPTION_COPY.noneCancel}
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={marking || chosen.length === 0}
+            className="px-3.5 py-1.5 text-sm font-semibold bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+          >
+            {marking ? OPTION_COPY.noneMarking : OPTION_COPY.noneSubmit(chosen.length)}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
