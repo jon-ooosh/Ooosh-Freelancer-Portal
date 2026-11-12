@@ -13,6 +13,8 @@ export interface EmailTemplate {
   body: string;
   variant: 'client' | 'internal';
   preheader?: string;
+  /** Sent to a freelancer: the plain layout's footer says so, not "Internal use only". */
+  audience?: 'freelancer';
 }
 
 const templates: Record<string, EmailTemplate> = {
@@ -241,7 +243,7 @@ const templates: Record<string, EmailTemplate> = {
   freelancer_approved: {
     variant: 'client',
     preheader: "You're approved to freelance with Ooosh Tours",
-    subject: 'Welcome aboard — approved to freelance with Ooosh Tours',
+    subject: 'Welcome aboard: approved to freelance with Ooosh Tours',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">You're all set</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{firstName}},</p>
@@ -840,6 +842,7 @@ const templates: Record<string, EmailTemplate> = {
    */
   freelancer_day_offer: {
     variant: 'internal',
+    audience: 'freelancer',
     preheader: 'Can you work for us on {{bookingDate}}?',
     subject: 'Are you free on {{bookingDate}}?',
     body: `
@@ -890,6 +893,7 @@ const templates: Record<string, EmailTemplate> = {
   // template is just the shell.
   freelancer_tasks_updated: {
     variant: 'internal',
+    audience: 'freelancer',
     preheader: 'What we would like a hand with',
     subject: 'Your list for the day',
     body: '<p>Your list for the day is on the Ooosh freelancer portal.</p>',
@@ -904,6 +908,7 @@ const templates: Record<string, EmailTemplate> = {
    */
   freelancer_day_updated: {
     variant: 'internal',
+    audience: 'freelancer',
     preheader: 'A change to your day with us on {{bookingDate}}',
     subject: '{{bookingDate}} — a small change',
     body: `
@@ -946,6 +951,7 @@ const templates: Record<string, EmailTemplate> = {
    */
   freelancer_day_cancelled: {
     variant: 'internal',
+    audience: 'freelancer',
     preheader: 'The yard day on {{bookingDate}} is no longer going ahead',
     subject: '{{bookingDate}} — that day is off, sorry',
     body: `
@@ -987,6 +993,7 @@ const templates: Record<string, EmailTemplate> = {
   },
   freelancer_assignment: {
     variant: 'internal',
+    audience: 'freelancer',
     subject: 'Job Assignment — {{jobName}} (#{{jobNumber}}) ({{jobDate}})',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">You've Been Assigned</h2>
@@ -1069,6 +1076,7 @@ const templates: Record<string, EmailTemplate> = {
 
   job_change_notification: {
     variant: 'internal',
+    audience: 'freelancer',
     subject: 'Job Update — {{jobName}} (#{{jobNumber}}) ({{jobDate}})',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job Details Updated</h2>
@@ -1837,6 +1845,7 @@ const templates: Record<string, EmailTemplate> = {
 
   job_cancelled_crew: {
     variant: 'internal',
+    audience: 'freelancer',
     subject: 'Job Cancelled — {{jobName}} ({{jobNumber}})',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job Cancelled</h2>
@@ -1891,6 +1900,7 @@ const templates: Record<string, EmailTemplate> = {
   // never muted by "Job emails". British English, no em dashes (portal copy rule).
   portal_login_code: {
     variant: 'internal',
+    audience: 'freelancer',
     preheader: 'Your Ooosh portal sign-in code',
     subject: 'Your Ooosh portal sign-in code: {{code}}',
     body: `
@@ -1910,6 +1920,7 @@ const templates: Record<string, EmailTemplate> = {
 
   portal_verification_code: {
     variant: 'internal',
+    audience: 'freelancer',
     subject: 'Your Ooosh freelancer verification code',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Verify your email</h2>
@@ -1930,6 +1941,7 @@ const templates: Record<string, EmailTemplate> = {
 
   portal_password_reset: {
     variant: 'internal',
+    audience: 'freelancer',
     subject: 'Reset your Ooosh freelancer password',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Reset your password</h2>
@@ -2433,6 +2445,7 @@ const templates: Record<string, EmailTemplate> = {
   // British English, no em dashes: freelancers read this.
   freelancer_ooh_return_info: {
     variant: 'internal',
+    audience: 'freelancer',
     preheader: 'The gate code and what to do when you bring the van back',
     subject: 'Bringing the van back out of hours: {{jobDate}} (job #{{jobNumber}})',
     body: `

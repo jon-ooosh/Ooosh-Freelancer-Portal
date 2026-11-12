@@ -294,16 +294,20 @@ till is held to `KIOSK_TILL_ALLOW` on `routes/shop.ts` (sales only, cash or read
 from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), the reader behind
 `stripe_terminal_kiosk`. **Spec §8 is what shipped and where it differs from the design.**
 
-**IN PROGRESS, Oct 2026:** `docs/FREELANCER-PORTAL-SPEC.md` — the freelancer portal programme. Done:
+**CLOSED, 11 Nov 2026:** `docs/FREELANCER-PORTAL-SPEC.md` — the freelancer portal programme. Done:
 completion fixes, payment terms, security fixes, the Claude Design reskin of the portal (tokens in
 `tailwind.config.js` `hf`/`kind`, shared pieces in `src/components/ui.tsx`), past work on the Completed page
 (every kind, one window: `src/lib/history.ts`), the van screens in the portal look for freelancers only
 (`frontend/src/modules/vehicles/components/freelancer/`, colours from `shared/design/freelancer-tokens.cjs`),
 portal 2FA (emailed code + 90-day remembered phone; **ships OFF** until jon sets `portal_2fa_enforced_from`; §7.1),
 freelancer invoices linked to the freelancer and their work in Costs (§5.1; the past ones linked by hand, Oct 2026),
-the Earnings tab in the portal (§5.2: money by invoice, "To invoice" from 22 Oct 2026).
-Next: the four guides. The Costs form simplification is done (three PRs, Oct 2026: `docs/design/cost-capture-redesign/DECISIONS.md`).
-**§0 "Start here" is the handover; read it before touching anything freelancer-facing.**
+the Earnings tab in the portal (§5.2: money by invoice, "To invoice" from 22 Oct 2026), and (§8, Nov 2026)
+the freelancer guides in `docs/guides/` (one shared look and builder), the codes, the "have they read it?"
+tick, out-of-hours van returns, and documents attached to the "you're approved" email. A freelancer email
+on the plain layout carries `audience: 'freelancer'` (footer: "Sent to you as an Ooosh freelancer", never
+"Internal use only"). The Costs form simplification is done (three PRs, Oct 2026:
+`docs/design/cost-capture-redesign/DECISIONS.md`). **§0 "Start here" is the close and the short list left
+open; read it before touching anything freelancer-facing.**
 
 **DRAFT, Oct 2026:** `docs/DISCOUNTS-SPEC.md` — structured discounts (per group of things on a job ×
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).

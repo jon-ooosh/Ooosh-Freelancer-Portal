@@ -455,6 +455,7 @@ class EmailService {
     const html = wrapInBaseLayout(bodyHtml, {
       variant: template.variant,
       preheader: template.preheader ? substituteVariables(template.preheader, variables) : undefined,
+      audience: template.audience,
     });
     return { subject, html };
   }
@@ -493,6 +494,7 @@ class EmailService {
     const html = wrapInBaseLayout(bodyHtml, {
       variant: template.variant,
       preheader: template.preheader ? substituteVariables(template.preheader, variables) : undefined,
+      audience: template.audience,
     });
 
     // Send
@@ -570,6 +572,8 @@ class EmailService {
     html: string;
     cc?: string[];
     variant?: 'client' | 'internal';
+    /** Sent to a freelancer: the plain layout's footer says so (email-templates/base.ts). */
+    audience?: 'freelancer';
     attachments?: Array<{ filename: string; content: Buffer; contentType: string }>;
     /** When true, send `html` as-is without wrapping in the Ooosh base layout.
      *  Use for callers whose html is already a complete, self-contained email
@@ -591,7 +595,7 @@ class EmailService {
 
     const html = options.skipLayout
       ? bodyHtml
-      : wrapInBaseLayout(bodyHtml, { variant: options.variant || 'internal' });
+      : wrapInBaseLayout(bodyHtml, { variant: options.variant || 'internal', audience: options.audience });
 
     try {
       const mailOptions: SendMailOptions = {
