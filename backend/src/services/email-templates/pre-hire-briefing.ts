@@ -109,6 +109,11 @@ function pluralise(n: number, single: string, plural?: string): string {
   return n === 1 ? single : (plural || `${single}s`);
 }
 
+/** "A", "A and B", "A, B and C" — for names inside a client-facing sentence. */
+function joinNames(names: string[]): string {
+  return names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
 // ── Subject line ────────────────────────────────────────────────────────
 
 export function buildSubject(b: JobBriefing): string {
@@ -589,13 +594,41 @@ function buildClientDraft(b: JobBriefing): string {
     const link = b.hire_form_link;
     const linkSuffix = link ? ` Here's the link: ${link.url}` : '';
 
+    // A received form is only "approved" once any insurance referral on it
+    // has cleared — the same referral_status the staff panel's
+    // [REFERRAL PENDING] badge reads (renderDriver). Saying "all approved"
+    // while a referral is open told the client the opposite of the panel
+    // (job 16751, Nov 2026).
+    const referred = driversReceived.filter(d => d.referral_status === 'pending');
+    const declined = driversReceived.filter(d => d.referral_status === 'declined');
+    const approved = driversReceived.filter(d => d.referral_status !== 'pending' && d.referral_status !== 'declined');
+    let referralNote = '';
+    if (referred.length > 0) {
+      const names = joinNames(referred.map(d => d.name));
+      referralNote += referred.length === 1
+        ? ` ${names}'s form has been referred to our insurer for a final check — we'll let you know as soon as we hear back.`
+        : ` The forms for ${names} have been referred to our insurer for a final check — we'll let you know as soon as we hear back.`;
+    }
+    if (declined.length > 0) {
+      referralNote += ` Unfortunately we're unable to approve ${joinNames(declined.map(d => d.name))} to drive on this hire — we'll be in touch about this separately.`;
+    }
+
     if (totalDrivers > 0) {
       if (driversReceived.length === totalDrivers) {
         // All in — no need to re-share the link (the form journey is done).
-        paragraphs.push(`We've received hire form${pluralise(totalDrivers, '')} from ${driversReceived.map(d => d.name).join(', ')}, all approved. Please let us know if any other drivers will be on the hire so we can get their details too.`);
+        const receivedFrom = `We've received hire form${pluralise(totalDrivers, '')} from ${driversReceived.map(d => d.name).join(', ')}`;
+        let opening: string;
+        if (approved.length === driversReceived.length) {
+          opening = `${receivedFrom}, all approved.`;
+        } else if (approved.length > 0) {
+          opening = `${receivedFrom}. ${joinNames(approved.map(d => d.name))} ${pluralise(approved.length, 'is', 'are')} approved.`;
+        } else {
+          opening = `${receivedFrom}.`;
+        }
+        paragraphs.push(`${opening}${referralNote} Please let us know if any other drivers will be on the hire so we can get their details too.`);
       } else if (driversReceived.length > 0 && (driversSent.length > 0 || driversPending.length > 0)) {
         const stillNeeded = [...driversSent, ...driversPending].map(d => d.name).join(', ');
-        paragraphs.push(`We've received hire form${pluralise(driversReceived.length, '')} from ${driversReceived.map(d => d.name).join(', ')} so far. Still waiting on ${stillNeeded} — please could they fill in the hire form when they get a moment?${linkSuffix}`);
+        paragraphs.push(`We've received hire form${pluralise(driversReceived.length, '')} from ${driversReceived.map(d => d.name).join(', ')} so far.${referralNote} Still waiting on ${stillNeeded} — please could they fill in the hire form when they get a moment?${linkSuffix}`);
       } else if (driversSent.length > 0) {
         const sentTo = driversSent
           .filter(d => d.hire_form_emailed_to)
