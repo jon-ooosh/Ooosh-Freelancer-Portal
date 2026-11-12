@@ -98,7 +98,19 @@ export function FieldsGrid({ fields, row, onChange, hints, large }: {
               {isFieldRequired(f, row) && <span className="text-red-600" title="Needed"> *</span>}
             </span>
             {hints?.[f.key] && <span className="ml-2 text-[11px] text-indigo-600">{hints[f.key]}</span>}
-            <div className="mt-1"><FieldInput def={f} value={row[f.key]} onChange={(v) => onChange(f.key, v)} large={large} /></div>
+            {f.editedOn ? (
+              // Set elsewhere on the case page (e.g. the repair estimate, on the Money card) — shown, never edited here.
+              <div className="mt-1 text-sm text-slate-700">
+                {row[f.key] == null || row[f.key] === ''
+                  ? '—'
+                  : f.kind === 'money' && Number.isFinite(Number(row[f.key]))
+                    ? `£${Number(row[f.key]).toLocaleString('en-GB', { maximumFractionDigits: 2 })}`
+                    : String(row[f.key])}
+                <span className="ml-2 text-[11px] text-slate-400">set on {f.editedOn}</span>
+              </div>
+            ) : (
+              <div className="mt-1"><FieldInput def={f} value={row[f.key]} onChange={(v) => onChange(f.key, v)} large={large} /></div>
+            )}
             {formatError && <span className={`block mt-1 text-red-600 ${large ? 'text-sm' : 'text-xs'}`}>{formatError}</span>}
           </label>
         );

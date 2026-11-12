@@ -145,7 +145,7 @@ Phase 5 (linking a to-do to a person/org) was skipped; its shape is in `BACKLOG.
 **CLOSED, Oct 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
 (Vehicles › Claims, replacing the broker's Word claim form). Always opened from a Problem
 (`job_issues.claim_id`); the broker is never contacted automatically — only a manager's "Send to
-broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built), §22 troubleshooting. Claim files live under the
+broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built), §22 troubleshooting, **§23 the Money card** (Nov 2026 — shared with the Problem page; resolving a Problem now needs a reason). Claim files live under the
 `claims/` R2 prefix, which `GET /api/files/download` gates to staff — never file them under `files/`.
 
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
@@ -437,6 +437,7 @@ existing definition:
 | Which of Ooosh's own guides does an AI client draft read? | `services/house-knowledge.ts` `getGuidesFor(topics)` — Staff Documents an admin shared with Claude (`ai_shared`, `ai_topics`), current approved version only; a shared `voice` guide replaces the built-in voice. Never a second reader (`AI-KNOWLEDGE-SPEC.md` §4) |
 | Which Claude model? | `config/anthropic.ts` `CLAUDE_SONNET_MODEL` / `CLAUDE_HAIKU_MODEL` — never a model string in a service. Read a Claude structured-output reply with `readStructuredJson()`; Sonnet 5.5+ rejects forced `tool_choice` |
 | Opening a possible insurance claim | `services/incident-claims.ts` `createClaimFromIssue()` — always from a Problem |
+| What did this damage cost us? Estimate, costs, what the client / insurer paid (Problem or claim) | `services/damage-money.ts` (sums: `damage-money-maths.ts`) — read-only over Costs and the excess, plus `damage_money_lines`; everything ex VAT; frontend `components/damage-money/DamageMoneyCard.tsx`, shared by both pages (`INCIDENT-CLAIMS-SPEC.md` §23). A claim's estimate is the broker form's `repair_cost`, edited only on that card |
 | The claim form's fields (staff form, PDF, client form) | `services/claim-form-fields.ts` (frontend: `@claimform`) |
 | A claim's client links, driver code, damage marks, sketch | `services/claim-links.ts` (public routes: `routes/claim-form.ts` — every save through `sanitiseSection()`) |
 | Chasing a client for their claim form / how far it's got | `services/claim-chase.ts` (`runClaimClientChase()`, `formProgress()`) |

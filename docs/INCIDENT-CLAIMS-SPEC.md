@@ -3,7 +3,7 @@
 **Status:** ✅ CLOSED (Oct 2026) — all four phases built and live: the case file, the client form,
 client chasing, GPS trace and SMS. Video and retention flagging deliberately not built (§21). §18–21
 are what actually shipped and where it differs from the plan below; **§22 is the troubleshooting
-guide** — start there when something goes wrong.
+guide** — start there when something goes wrong. **§23 (Nov 2026) is the Money card** shared with the Problem page.
 **Shaped:** Sep 2026 — jon + Claude, revising a spec drafted months earlier in a non-code session
 against the codebase as it actually is. Where this document and that draft disagree, this wins.
 
@@ -832,3 +832,64 @@ Key files: `services/incident-claims.ts` (cases, reminders, attention), `claim-f
 (GPS), `claim-pdf.ts` (broker PDF), `routes/incident-claims.ts` (staff API); frontend
 `pages/ClaimDetailPage.tsx`, `pages/ClaimFormPage.tsx`, `components/claims/*`.
 
+
+## 23. Money — one card for Problems and claims (Nov 2026)
+
+**Why.** The vehicle manager had nowhere to put the estimated repair cost, the actual repair, or what
+the client was charged. Most of it already existed, in four places, none on the claim page: the broker
+form's "Approx. repair cost" box (buried in the form card), the Problem's "informational only"
+Estimated/Actual boxes, Costs entries linked to a Problem (`costs.job_issue_id`, which the Problem page
+saved but never listed), and the hire's excess (`job_excess.claim_amount`). Nothing recorded what the
+insurer paid.
+
+**Decided with jon (Nov 2026):**
+- **One Money card**, `components/damage-money/DamageMoneyCard.tsx`, on the Problem page (replacing its
+  Resolution panel) and the claim page. It mostly READS; it never moves money — excess and invoices
+  stay on the job's Money tab, bills and receipts in Money › Costs.
+- **Everything is compared ex VAT.** We reclaim VAT on what we spend; the VAT on what we charge a
+  client goes to HMRC. Ooosh's standard damage charge is £1,000 + VAT = £1,200. Amounts are entered
+  like Costs — net, VAT, gross, with 20% / No VAT / Manual — and all three are stored.
+- **The estimate** is the Problem's `estimated_cost`, or on a claim the broker form's
+  `form_data.our_vehicle.repair_cost` (so the broker PDF prints it — label now "(£, ex-VAT)"). On a
+  claim it is edited ONLY on the Money card: the form shows it read-only (`editedOn` in
+  `claim-form-fields.ts`), and `PATCH /claims/:id` keeps the stored figure whatever the form sends —
+  the form saves whole sections, so a stale copy would otherwise put an old estimate back.
+- **Our costs** are the Costs entries linked to the Problem(s). "+ Add cost" opens the normal cost form
+  (on a claim with several Problems, it asks which one). Until a cost exists the estimate stands in,
+  and the card says "Estimated".
+- **Recovered from the client** — `damage_money_lines` (`kind = 'client_recovery'`), one line per thing
+  charged (bumper from the excess, carpet on an invoice…), each saying how it was paid (from the
+  excess / on an invoice / another way). Typed by a person because OP cannot tell which part of a kept
+  excess paid for which damage (T&Cs: a client can use the whole £1,000 excess and still owe for other
+  things).
+- **The excess check** (read-only): the hire's excess kept (`job_excess.claim_amount`) against the
+  "from the excess" lines on all of that hire's Problems and claims — "£160 not against any damage
+  (fuel, lost items…)"; money still held (`v_excess_held`) is flagged. A pre-auth captured in full and
+  partly paid back shows whatever the Money tab ends up with — the card only reads it.
+- **Insurer payments** (claims only) — `kind = 'insurer_payment'`, paid **to us** or **straight to the
+  repairer**. Several are allowed (interim, final). A letter of authorisation is filed as a claim file
+  (new type `authorisation_letter`); the bodyshop's invoice to us for the excess + VAT goes in Costs.
+  **Money the insurer paid the repairer never reduces our cost** — it was never ours.
+- **What it cost Ooosh** = costs (or the estimate) − recovered from the client − insurer paid to us.
+- **A Problem on a claim** shows its costs and a pointer to the claim; its estimate, recoveries and
+  the total live on the claim with the claim's other Problems.
+- **"How was it resolved?" is required** to mark a Problem resolved (`PATCH /problems/:id` answers 400
+  `resolution_required` / `resolution_note_required`): Repaired · Replaced · Found / returned · Written
+  off · No action needed · Other (a note). It says what happened to the thing; who paid is the Money
+  card. The old money answers (`claim_excess`, `charge_client`) are no longer offered but still valid on
+  the rows that have them. The separate "Written off" STATUS overlaps "Resolved + Written off" — left
+  for the Problems tidy-up.
+- **The old "Actual" box is gone from screens** (column kept). Where a Problem has one, the card shows it
+  greyed as "noted before costs were linked". Production had four Problem rows with figures (all jon's,
+  Nov 2026) — re-entered by hand as costs / recovery lines, not migrated, because the one box held
+  both what we paid and what we charged.
+
+**Built:** migration `343_damage_money.sql` (`damage_money_lines`, `job_issues.resolution_note`, the
+claim file type); `services/damage-money-maths.ts` (pure sums, tested), `services/damage-money.ts`
+(THE read), `routes/damage-money.ts` at `/api/damage-money` (`GET /problem/:id`, `GET /claim/:id`,
+`PUT /claim/:id/estimate`, `POST/PATCH/DELETE /lines`). Every write goes on the Problem's or claim's
+timeline (`money` events). A line is never deleted, only stamped `deleted_at`. Any staff role.
+
+**Not built:** money charged after completion (`completed-charges.ts` invoices) is not read
+automatically — add it as an "on an invoice" line; no broker "update" email (the pack is re-sent when
+everything is in; earlier contact is by email or phone).
