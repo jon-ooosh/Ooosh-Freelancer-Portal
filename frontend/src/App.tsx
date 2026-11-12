@@ -30,6 +30,7 @@ import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import MoneyOverviewPage from './pages/MoneyOverviewPage';
 import CashflowForecastPage from './pages/CashflowForecastPage';
 import BusinessFiguresPage from './pages/BusinessFiguresPage';
+import MarketingPage from './pages/MarketingPage';
 import CostsPage from './pages/CostsPage';
 import ShopTillPage from './pages/ShopTillPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
@@ -281,6 +282,7 @@ export default function App() {
                 <Route path="/jobs/returns" element={<ReturnsPage />} />
                 <Route path="/jobs/lost-cancelled" element={<LostCancelledPage />} />
                 <Route path="/jobs/leads" element={<LeadsPage />} />
+                <Route path="/jobs/marketing" element={<MarketingPage />} />
                 <Route path="/jobs/:id" element={<JobDetailPage />} />
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/operations/transport" element={<TransportOpsPage />} />

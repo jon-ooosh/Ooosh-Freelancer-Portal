@@ -884,7 +884,7 @@ insurer paid.
   Nov 2026) — re-entered by hand as costs / recovery lines, not migrated, because the one box held
   both what we paid and what we charged.
 
-**Built:** migration `342_damage_money.sql` (`damage_money_lines`, `job_issues.resolution_note`, the
+**Built:** migration `343_damage_money.sql` (`damage_money_lines`, `job_issues.resolution_note`, the
 claim file type); `services/damage-money-maths.ts` (pure sums, tested), `services/damage-money.ts`
 (THE read), `routes/damage-money.ts` at `/api/damage-money` (`GET /problem/:id`, `GET /claim/:id`,
 `PUT /claim/:id/estimate`, `POST/PATCH/DELETE /lines`). Every write goes on the Problem's or claim's

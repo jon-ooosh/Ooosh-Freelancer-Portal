@@ -1,5 +1,5 @@
 -- ============================================================================
--- 342: damage money — one Money card for Problems and insurance claims
+-- 343: damage money — one Money card for Problems and insurance claims
 -- ============================================================================
 -- docs/INCIDENT-CLAIMS-SPEC.md §23. The money around a piece of damage was in
 -- four places and none of them on the claim page. Most of it stays where it
