@@ -338,8 +338,11 @@ only — "Didn't ask" is an answer; optional everywhere else) and the website's 
 client is worked out from history, never asked. **§8a is the Marketing
 page** (Jobs › Marketing, admin-only, mig 342): adverts with a "next thing due" To Do, and tracked links / QR on
 `go.oooshtours.co.uk/<code>` (`routes/go.ts` → `/api/go/<code>`, `services/marketing-links.ts`) — **a link's code
-never changes once made (it's printed); a bad or paused code goes to the home page, never a dead end.** §8b is the
-rest of the roadmap (review requests — never only the happy ones, never rewarded — and referrals).
+never changes once made (it's printed); a bad or paused code goes to the home page, never a dead end.** **§8c is Jon's review email**
+(mig 344, `services/review-requests.ts`, Marketing › Review emails — OFF until jon turns it on): 10:15 the day after
+Completed, not when completed >10 days after the return, once a year per client org or address, a "don't send" tick on
+the job, a "Don't ask me again" page with a button (never acts on the click — mail scanners open links), Reply-To jon@.
+§8b is the rest of the roadmap (referrals).
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
@@ -523,6 +526,7 @@ existing definition:
 | The client's payment portal link (and its hash) | `services/payment-portal-link.ts` `getPaymentPortalLink()` — computed live from HireHop, never stored; the hash changes with the hire dates |
 | A card-reader (S700) payment — sending, waiting, recording, test mode, who may use it | `services/stripe-terminal.ts` — `terminal_sessions` is the record AND the once-only gate; recorded through `recordPayment()` as `stripe_gbp` + `source = 'stripe_terminal'`; gated by `system_settings.stripe_terminal_roles` |
 | Which jobs belong to the same festival? Its value, lead, default dates | `services/job-projects.ts` (`getProject()` roll-ups; quote options inside count once) |
+| Jon's review email — who, when, why not, the "don't send" tick, opt-outs | `services/review-requests.ts` — one `review_requests` row per job, written before the send; `reviewDecision()` is every rule |
 | Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
 | A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee. Record refuses (409) when the same money is already on the job by hand — "Link to that payment" or "Record anyway" |
 | Which job does a HireHop invoice number (`OT-INV-12345`) belong to? | `services/hh-invoice-index.ts` (`hh_invoice_index`, mig 326) — filled from the Money tab summary's own billing read, HireHop's `invoice.*` webhooks and the matcher; never a sweep across jobs to answer it |
@@ -652,7 +656,7 @@ chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last mont
 auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
 09:20 · claim client chase 09:21 · claim check dates + GPS capture 09:22 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
 pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, list items to watchers, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
-09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 (hirers) · freelancer out-of-hours emails every 30 min 10:00–20:30 UK · sitter task summary 16:00 ·
+09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 (hirers) · Jon's review emails 10:15 (off until switched on, `review_requests_enabled`) · freelancer out-of-hours emails every 30 min 10:00–20:30 UK · sitter task summary 16:00 ·
 HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh daily 07:30 ·

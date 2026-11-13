@@ -29,6 +29,7 @@ import OohReturnModal from '../components/OohReturnModal';
 import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
 import JobContactsCard from '../components/JobContactsCard';
+import ReviewRequestLine from '../components/ReviewRequestLine';
 import { VenuePicker } from '../components/VenuePicker';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
@@ -4699,6 +4700,9 @@ function JobDetailContent() {
         {/* Per-job contacts (migration 086) — tick who's on this hire and
             mark a primary. Drives where client-facing emails route. */}
         {id && <JobContactsCard jobId={id} onChanged={loadJob} />}
+
+        {/* Jon's review request email — the "don't send" tick, then what happened (docs/BUSINESS-FIGURES-SPEC.md §8c) */}
+        {id && <ReviewRequestLine jobId={id} pipelineStatus={job.pipeline_status || ''} isInternal={!!job.is_internal} />}
 
         {/* Collapsible Details & Notes */}
         <div ref={detailsNotesRef} className="mt-3 pt-3 border-t border-gray-100">

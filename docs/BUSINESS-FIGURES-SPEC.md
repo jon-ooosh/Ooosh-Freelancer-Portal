@@ -206,15 +206,9 @@ Jobs › Marketing (`/jobs/marketing`), **admin only** (page, nav item and every
 
 ### 8b. Next — agreed in outline, not built
 
-- **Review requests (step 3, wording to be agreed with jon first):** from jon personally ("This is
-  Jon here, owner of Ooosh Tours…"), one day after the job is **Completed**, only when completion came
-  within the usual ten days of the return (a long completion usually means a claim); at most once a
-  year per client; a "don't send" tick per job; a "don't ask me again" link; direct to the Google review
-  box `https://g.page/r/CSCv1HhULJ6nEAI/review`. **Never only the "Great" retros** — Google bans
-  selectively soliciting positive reviews ("review gating"); and **never a reward for a review**
-  (Google bans it; UK DMCC rules require any incentivised review to be labelled). Also QR posters to
-  the review box around the building (rehearsal rooms, the back of the loo door) and postcards.
-  To discuss: whether the ten-day rule reads as filtering out unhappy clients.
+- **Review requests** — BUILT, §8c below. Still to do by hand: QR posters to the review box around
+  the building (rehearsal rooms, the back of the loo door — a tracked link on the Marketing page whose
+  destination is the review box counts the scans) and postcards.
 - **Referrals (step 3):** a personal code / link per client (`go.oooshtours.co.uk/r/…`), the friend
   tagged with who sent them, a To Do "reward due" when the friend's hire books (never automatic);
   rewards on-brand (a free hour in The Loft, strings / sticks, a hoodie at three). One email may carry
@@ -223,3 +217,39 @@ Jobs › Marketing (`/jobs/marketing`), **admin only** (page, nav item and every
 - **Content library (later, jon):** a register of the photos / videos used on Instagram etc. — the
   files stay in the shared Google Drive; OP holds the link, description, where and when each was used,
   and who to credit. On the Marketing page.
+
+### 8c. Jon's review request email (BUILT 13 Nov 2026, migration 344)
+
+**Off until jon turns it on** — Marketing › Review emails (`system_settings.review_requests_enabled`).
+Production sends every template for real, so that switch is the only guard. The tab also has "Send me a
+test" (the real email to the person pressing it, subject "[Test] …", greeting as the most recent
+completed job's client would see it; writes no row) and the last 50 jobs: sent, or why not.
+
+- **When:** daily 10:15 UK (`config/scheduler.ts`), for hires whose status went to Completed the day
+  before (UK date of `jobs.pipeline_status_changed_at` — every path to Completed stamps it). It looks back
+  3 days so a missed run catches up, and never further: switching it on emails at most ~3 days of hires.
+- **Not sent** (a `not_sent` row with the reason, `services/review-requests.ts` `reviewDecision()`):
+  completed more than **10 days** after the return (`return_date`, else `job_end` — jon's call, 13 Nov
+  2026: a long close-out usually means a claim; he knows Google frowns on asking selectively); no return
+  date; internal job; no client email (the resolver fell back to info@); the address used "Don't ask me
+  again"; the client **organisation or the address** was sent one in the last **365 days** (two jobs for
+  one client in one run send once).
+- **"Don't send":** the line under Contacts on the job page (`components/ReviewRequestLine.tsx`), from
+  Confirmed onwards, any staff role. Unticked = a `skipped` row; re-ticked removes it. A sent email is
+  never undone. After the day it shows what happened.
+- **Who:** `resolveClientEmailTarget(jobId, 'review_request')` — the PRIMARY only, never the CCs. Greeting
+  = the resolver's name for the primary; none (an org mailbox) → "Hi there," and the subject "How did it
+  go?" — never a placeholder. From **"Jon at Ooosh Tours"** on the usual sending address,
+  **Reply-To jon@oooshtours.co.uk** (`SendEmailOptions.fromName` / `replyTo`, new in `email-service.ts`).
+  The job number is in the small print, not the subject (a personal note).
+- **One row per job** (`review_requests`, UNIQUE job), written BEFORE the send; a failed send becomes
+  `not_sent` "Email failed: …" and is never retried. The job timeline gets "Jon's review request email
+  sent to …".
+- **Links:** the review box (`GOOGLE_REVIEW_URL`); the Mailchimp form with their email, first and last
+  name filled in (`mailingListUrl()` — the classic form, `legacy_form=1`, which fills MERGE0/1/2 from the
+  link; checked 13 Nov 2026 — it's still one press of Subscribe, so Mailchimp keeps their consent); and
+  **"Don't ask me again"** → `/api/review-requests/stop?t=…` (token audience `review_optout`, 2 years),
+  a page with a **button** — never on the click alone, because mail scanners open every link in an email.
+  Opt-outs are by address (`review_request_optouts`) and stop only this email.
+- The referral line ("ask them to mention your name") feeds New Enquiry's "Recommendation → who?" until
+  the referral scheme exists.

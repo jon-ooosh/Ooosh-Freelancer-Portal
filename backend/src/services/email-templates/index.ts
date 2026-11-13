@@ -2988,6 +2988,47 @@ const templates: Record<string, EmailTemplate> = {
     body: `<p>This template should be sent with bodyHtmlOverride. If you're seeing this, the caller forgot.</p>`,
   },
 
+  // Jon's review request (docs/BUSINESS-FIGURES-SPEC.md §8c) — the day after a hire
+  // is Completed, from "Jon at Ooosh Tours" with replies to jon@. Wording agreed with
+  // jon, 13 Nov 2026. The subject is set by services/review-requests.ts ("How did it
+  // go, Sam?", or "How did it go?" with no name), so no placeholder ever shows. The
+  // job number is in the small print rather than the subject: it's a personal note.
+  // Two flat blocks for the greeting (no {{else}}): hasName / noName.
+  review_request: {
+    variant: 'client',
+    preheader: 'Thanks for hiring with us — a quick favour?',
+    subject: 'How did it go?',
+    body: `
+      {{#if hasName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi {{name}},</p>{{/if}}
+      {{#if noName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi there,</p>{{/if}}
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">
+        This is Jon, owner of Ooosh Tours. Thanks very much for hiring with us. I really hope it all went well.
+      </p>
+      <p style="margin:0 0 18px;font-size:15px;color:#334155;line-height:1.6;">
+        If you've got two minutes, a Google review would mean a lot. We're a small team and a lot of our work comes
+        from reviews and word of mouth:
+      </p>
+      <p style="margin:0 0 22px;text-align:center;">
+        <a href="{{reviewUrl}}" style="display:inline-block;background-color:#7B5EA7;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:15px;font-weight:600;">Leave us a Google review</a>
+      </p>
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">
+        And if anything didn't go to plan, I'd like to know. Just reply to this email and it comes straight to me.
+        I'd much rather put it right.
+      </p>
+      <p style="margin:0 0 22px;font-size:15px;color:#334155;line-height:1.6;">
+        Thanks,<br>Jon<br>Director, Ooosh! Tours Ltd
+      </p>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        Know a band who needs vans, backline or rehearsal space? Send them our way and ask them to mention your name.
+      </p>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        Want our news and deals? <a href="{{signupUrl}}" style="color:#7B5EA7;">Join our mailing list</a>
+      </p>
+      <p style="margin:0 0 4px;font-size:12px;color:#94a3b8;line-height:1.5;">
+        {{#if jobNumber}}Job {{jobNumber}} · {{/if}}<a href="{{stopUrl}}" style="color:#94a3b8;">Don't ask me again</a>
+      </p>`,
+  },
+
 };
 
 export default templates;
