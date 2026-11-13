@@ -23,10 +23,10 @@ import { fl, noEmDash } from './ui'
 
 /** Four across leaves room for a few characters, so the tiles use short names (jon, Oct 2026). */
 const SHORT: Record<PhotoAngle, string> = {
-  front: 'Front', front_right: 'Front R', passenger_door: 'Pass door', interior_front: 'Int front',
-  sliding_door: 'Sliding', interior_rear: 'Int rear', right_panel: 'Right panel', rear_right: 'Rear R',
-  rear_doors: 'Rear door S', rear_door_driver: 'Rear door D', rear_left: 'Rear L', left_panel: 'Left panel',
-  driver_door: 'Driver door', front_left: 'Front L', windscreen_left: 'Screen D', windscreen_middle: 'Screen C',
+  front: 'Front', front_right: 'Front L', passenger_door: 'Pass door', interior_front: 'Int front',
+  sliding_door: 'Sliding', interior_rear: 'Int rear', right_panel: 'Left panel', rear_right: 'Rear L',
+  rear_doors: 'Rear door S', rear_door_driver: 'Rear door D', spare_tyre: 'Spare tyre', rear_left: 'Rear R', left_panel: 'Right panel',
+  driver_door: 'Driver door', front_left: 'Front R', windscreen_left: 'Screen D', windscreen_middle: 'Screen C',
   windscreen_right: 'Screen P', dashboard: 'Dashboard',
 }
 

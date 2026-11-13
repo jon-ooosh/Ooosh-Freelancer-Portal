@@ -3,11 +3,15 @@
  * Shows a simplified van outline with the camera position indicated,
  * helping users frame their photos consistently.
  *
- * 18 angles in clockwise walk-around order:
- * Front → Front Right → Passenger Door → Interior Front → Sliding Door →
- * Interior Rear → Right Panel → Rear Right → Rear Door (sliding-door side) →
- * Rear Door (driver side) → Rear Left → Left Panel → Driver Door → Front Left →
- * Windscreen L → Windscreen M → Windscreen R → Dashboard
+ * 19 angles in walk-around order (labels as shown; LEFT = passenger side):
+ * Front → Front Left → Passenger Door → Interior Front → Sliding Door →
+ * Interior Rear → Left Panel → Rear Left → Rear Door (sliding-door side) →
+ * Rear Door (driver side) → Spare Tyre → Rear Right → Right Panel → Driver Door →
+ * Front Right → Windscreen L → Windscreen M → Windscreen R → Dashboard
+ *
+ * The function names are the old viewer's-eye names, matching the angle keys
+ * (FrontRightGuide is the front-LEFT corner). The drawings were always right;
+ * only the words changed (Nov 2026).
  */
 
 import React from 'react'
@@ -61,10 +65,10 @@ function FrontRightGuide({ className }: GuideProps) {
       <circle cx="350" cy="270" r="8" stroke="white" strokeWidth="2" opacity="0.7" />
       <path d="M342 265 L300 220" stroke="white" strokeWidth="1" opacity="0.4" strokeDasharray="4 4" />
       <text x="200" y="30" textAnchor="middle" fill="white" opacity="0.7" fontSize="14" fontFamily="sans-serif">
-        Stand at front-right corner
+        Stand at front-left corner (passenger side)
       </text>
       <text x="200" y="50" textAnchor="middle" fill="white" opacity="0.5" fontSize="12" fontFamily="sans-serif">
-        Capture front bumper + right side
+        Capture front bumper + left side
       </text>
     </svg>
   )
@@ -74,7 +78,7 @@ function PassengerDoorGuide({ className }: GuideProps) {
   return (
     <svg viewBox="0 0 400 300" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
       <line x1="20" y1="260" x2="380" y2="260" stroke="white" strokeWidth="1" opacity="0.3" />
-      {/* Van side view - passenger (right) side, front section */}
+      {/* Van side view - passenger (left) side, front section */}
       <path d="M40 240 L40 110 Q40 90 60 90 L340 90 Q360 90 360 110 L360 240 Z" stroke="white" strokeWidth="2" opacity="0.5" fill="none" />
       {/* Front door highlighted */}
       <rect x="40" y="110" width="100" height="130" rx="2" stroke="white" strokeWidth="2" opacity="0.6" fill="white" fillOpacity="0.08" />
@@ -183,7 +187,7 @@ function RightPanelGuide({ className }: GuideProps) {
   return (
     <svg viewBox="0 0 400 300" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
       <line x1="20" y1="260" x2="380" y2="260" stroke="white" strokeWidth="1" opacity="0.3" />
-      {/* Van side view - right (sliding-door) side */}
+      {/* Van side view - left (sliding-door, passenger) side */}
       <path d="M40 240 L40 110 Q40 90 60 90 L340 90 Q360 90 360 110 L360 240 Z" stroke="white" strokeWidth="2" opacity="0.5" fill="none" />
       {/* Sliding door - already photographed, shown faint for reference */}
       <rect x="110" y="110" width="100" height="130" rx="2" stroke="white" strokeWidth="1" opacity="0.25" />
@@ -196,7 +200,7 @@ function RightPanelGuide({ className }: GuideProps) {
       <circle cx="280" cy="280" r="8" stroke="white" strokeWidth="2" opacity="0.7" />
       <path d="M280 272 L280 255" stroke="white" strokeWidth="1.5" opacity="0.5" />
       <text x="200" y="30" textAnchor="middle" fill="white" opacity="0.7" fontSize="14" fontFamily="sans-serif">
-        Stand level with the right panel
+        Stand level with the left panel
       </text>
       <text x="200" y="50" textAnchor="middle" fill="white" opacity="0.5" fontSize="12" fontFamily="sans-serif">
         Sliding door to rear corner, rear wheel arch in shot
@@ -219,10 +223,10 @@ function RearRightGuide({ className }: GuideProps) {
       <circle cx="350" cy="270" r="8" stroke="white" strokeWidth="2" opacity="0.7" />
       <path d="M342 265 L300 220" stroke="white" strokeWidth="1" opacity="0.4" strokeDasharray="4 4" />
       <text x="200" y="30" textAnchor="middle" fill="white" opacity="0.7" fontSize="14" fontFamily="sans-serif">
-        Stand at rear-right corner
+        Stand at rear-left corner (passenger side)
       </text>
       <text x="200" y="50" textAnchor="middle" fill="white" opacity="0.5" fontSize="12" fontFamily="sans-serif">
-        Capture rear doors + right side
+        Capture rear doors + left side
       </text>
     </svg>
   )
@@ -275,6 +279,25 @@ function RearDoorDriverGuide({ className }: GuideProps) {
   return <RearDoorGuide className={className} side="driver" />
 }
 
+function SpareTyreGuide({ className }: GuideProps) {
+  return (
+    <svg viewBox="0 0 400 300" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
+      {/* Tyre - face-on */}
+      <circle cx="200" cy="170" r="85" stroke="white" strokeWidth="2" opacity="0.6" fill="white" fillOpacity="0.05" />
+      <circle cx="200" cy="170" r="50" stroke="white" strokeWidth="1.5" opacity="0.4" />
+      <circle cx="200" cy="170" r="12" stroke="white" strokeWidth="1" opacity="0.4" />
+      {/* Tread marks */}
+      <path d="M200 85 L200 100 M285 170 L270 170 M200 255 L200 240 M115 170 L130 170" stroke="white" strokeWidth="1.5" opacity="0.3" />
+      <text x="200" y="30" textAnchor="middle" fill="white" opacity="0.7" fontSize="14" fontFamily="sans-serif">
+        Spare tyre
+      </text>
+      <text x="200" y="50" textAnchor="middle" fill="white" opacity="0.5" fontSize="12" fontFamily="sans-serif">
+        Whole tyre in shot, condition visible
+      </text>
+    </svg>
+  )
+}
+
 function RearLeftGuide({ className }: GuideProps) {
   return (
     <svg viewBox="0 0 400 300" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -289,10 +312,10 @@ function RearLeftGuide({ className }: GuideProps) {
       <circle cx="50" cy="270" r="8" stroke="white" strokeWidth="2" opacity="0.7" />
       <path d="M58 265 L100 220" stroke="white" strokeWidth="1" opacity="0.4" strokeDasharray="4 4" />
       <text x="200" y="30" textAnchor="middle" fill="white" opacity="0.7" fontSize="14" fontFamily="sans-serif">
-        Stand at rear-left corner
+        Stand at rear-right corner (driver side)
       </text>
       <text x="200" y="50" textAnchor="middle" fill="white" opacity="0.5" fontSize="12" fontFamily="sans-serif">
-        Capture rear doors + left side
+        Capture rear doors + right side
       </text>
     </svg>
   )
@@ -302,11 +325,11 @@ function LeftPanelGuide({ className }: GuideProps) {
   return (
     <svg viewBox="0 0 400 300" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
       <line x1="20" y1="260" x2="380" y2="260" stroke="white" strokeWidth="1" opacity="0.3" />
-      {/* Van side view - left side, middle/rear section */}
+      {/* Van side view - right (driver) side, middle/rear section */}
       <path d="M40 240 L40 110 Q40 90 60 90 L340 90 Q360 90 360 110 L360 240 Z" stroke="white" strokeWidth="2" opacity="0.5" fill="none" />
       {/* Middle/rear panel highlighted (no sliding door on this side) */}
       <rect x="140" y="110" width="180" height="130" rx="2" stroke="white" strokeWidth="2" opacity="0.6" fill="white" fillOpacity="0.08" />
-      {/* Solid panel - no windows typically on left side rear */}
+      {/* Solid panel - no windows typically on this side rear */}
       <rect x="150" y="115" width="60" height="50" rx="3" stroke="white" strokeWidth="1" opacity="0.2" />
       {/* Wheels */}
       <ellipse cx="100" cy="240" rx="25" ry="20" stroke="white" strokeWidth="1.5" opacity="0.4" />
@@ -315,10 +338,10 @@ function LeftPanelGuide({ className }: GuideProps) {
       <circle cx="250" cy="280" r="8" stroke="white" strokeWidth="2" opacity="0.7" />
       <path d="M250 272 L250 255" stroke="white" strokeWidth="1.5" opacity="0.5" />
       <text x="200" y="30" textAnchor="middle" fill="white" opacity="0.7" fontSize="14" fontFamily="sans-serif">
-        Stand level with left panel
+        Stand level with right panel
       </text>
       <text x="200" y="50" textAnchor="middle" fill="white" opacity="0.5" fontSize="12" fontFamily="sans-serif">
-        Full left side panel visible
+        Full right side panel visible
       </text>
     </svg>
   )
@@ -367,10 +390,10 @@ function FrontLeftGuide({ className }: GuideProps) {
       <circle cx="50" cy="270" r="8" stroke="white" strokeWidth="2" opacity="0.7" />
       <path d="M58 265 L100 220" stroke="white" strokeWidth="1" opacity="0.4" strokeDasharray="4 4" />
       <text x="200" y="30" textAnchor="middle" fill="white" opacity="0.7" fontSize="14" fontFamily="sans-serif">
-        Stand at front-left corner
+        Stand at front-right corner (driver side)
       </text>
       <text x="200" y="50" textAnchor="middle" fill="white" opacity="0.5" fontSize="12" fontFamily="sans-serif">
-        Capture front bumper + left side
+        Capture front bumper + right side
       </text>
     </svg>
   )
@@ -497,6 +520,7 @@ export function getPhotoGuide(angle: PhotoAngle): ((props: GuideProps) => React.
     rear_right: RearRightGuide,
     rear_doors: RearDoorSlidingGuide,
     rear_door_driver: RearDoorDriverGuide,
+    spare_tyre: SpareTyreGuide,
     rear_left: RearLeftGuide,
     left_panel: LeftPanelGuide,
     driver_door: DriverDoorGuide,
@@ -512,19 +536,20 @@ export function getPhotoGuide(angle: PhotoAngle): ((props: GuideProps) => React.
 /** Short instructional text for each angle */
 export const PHOTO_GUIDE_TIPS: Record<PhotoAngle, string> = {
   front: 'Stand 2-3 metres away, directly in front. Full front visible and centred, include registration plate.',
-  front_right: 'Stand 2-3 metres away at the front-right corner. Include the full front bumper and right side panel.',
+  front_right: 'Stand 2-3 metres away at the front-left corner (passenger side). Include the full front bumper and left side panel.',
   passenger_door: 'Stand level with the front passenger door. Full door visible including wing mirror.',
   interior_front: 'Stand at the sliding door or rear of cab. Show dashboard, steering wheel, and both front seats.',
   sliding_door: 'Stand level with the sliding door on the passenger side. Full door panel visible.',
   interior_rear: 'Stand at the cab partition looking rearward. Show the full seating area and rear doors.',
-  right_panel: 'Stand level with the panel behind the sliding door. Full panel visible from the sliding door to the rear corner, rear wheel arch included.',
-  rear_right: 'Stand 2-3 metres away at the rear-right corner. Include the full rear and right side panel.',
+  right_panel: 'Stand level with the left panel, behind the sliding door (passenger side). Full panel visible from the sliding door to the rear corner, rear wheel arch included.',
+  rear_right: 'Stand 2-3 metres away at the rear-left corner (passenger side). Include the full rear and left side panel.',
   rear_doors: 'Stand behind the rear door on the sliding-door side. That whole door visible, edges and hinges included.',
   rear_door_driver: 'Stand behind the rear door on the driver side. That whole door visible, edges and hinges included.',
-  rear_left: 'Stand 2-3 metres away at the rear-left corner. Include the full rear and left side panel.',
-  left_panel: 'Stand level with the left side panel. Full panel visible between wheel arches.',
+  spare_tyre: 'Find the spare tyre (usually under the back of the van or behind the rear doors). Show the whole tyre so its condition can be seen.',
+  rear_left: 'Stand 2-3 metres away at the rear-right corner (driver side). Include the full rear and right side panel.',
+  left_panel: 'Stand level with the right side panel (driver side). Full panel visible between wheel arches.',
   driver_door: 'Stand level with the driver door. Full door visible including wing mirror.',
-  front_left: 'Stand 2-3 metres away at the front-left corner. Include the full front bumper and left side panel.',
+  front_left: 'Stand 2-3 metres away at the front-right corner (driver side). Include the full front bumper and right side panel.',
   windscreen_left: 'Close-up of the driver-side third of the windscreen. Show any chips or cracks clearly.',
   windscreen_middle: 'Close-up of the centre third of the windscreen. Show any chips or cracks clearly.',
   windscreen_right: 'Close-up of the passenger-side third of the windscreen. Show any chips or cracks clearly.',

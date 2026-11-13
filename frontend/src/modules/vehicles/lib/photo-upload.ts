@@ -58,12 +58,13 @@ export async function uploadAllPhotos(
   eventId: string,
   vehicleReg: string,
   onProgress?: (completed: number, total: number) => void,
-): Promise<{ folderKey: string; uploadedCount: number; failedCount: number }> {
+): Promise<{ folderKey: string; uploadedCount: number; failedCount: number; reducedCount: number }> {
   const safeReg = vehicleReg.replace(/\s+/g, '-').toUpperCase()
   const folderKey = `events/${eventId}/${safeReg}`
 
   let completed = 0
   let failedCount = 0
+  let reducedCount = 0
 
   // Upload sequentially to avoid overwhelming the function.
   // Each photo retries ON ITS OWN: this function never throws, so the
@@ -76,8 +77,25 @@ export async function uploadAllPhotos(
       `Photo upload ${photo.angle}`,
     )
     if (!result.success) {
-      console.error(`Failed to upload ${photo.angle}:`, result.error)
-      failedCount++
+      // Last resort: send the ~800px copy made at capture time (the one the
+      // PDF uses) to the SAME key. An iPhone that reloaded the tab can lose
+      // the full-size blob while that copy, a plain string, survives — RX22SXL
+      // / 16157 (Nov 2026) uploaded 0 of 19 and the photos were rebuilt from
+      // the PDF by hand. Counted separately so the results screen says so.
+      const small = photo.pdfBase64 ? dataUriToJpegBlob(photo.pdfBase64) : null
+      const fallback = small
+        ? await withRetry(
+            () => uploadPhoto({ ...photo, blob: small }, eventId, vehicleReg),
+            `Photo upload ${photo.angle} (reduced size)`,
+          )
+        : null
+      if (fallback?.success) {
+        console.warn(`Uploaded ${photo.angle} at reduced size after the full-size upload failed:`, result.error)
+        reducedCount++
+      } else {
+        console.error(`Failed to upload ${photo.angle}:`, result.error)
+        failedCount++
+      }
     }
     completed++
     onProgress?.(completed, photos.length)
@@ -85,9 +103,32 @@ export async function uploadAllPhotos(
 
   return {
     folderKey,
+    // Includes the reduced-size ones; reducedCount says how many of those.
     uploadedCount: completed - failedCount,
     failedCount,
+    reducedCount,
   }
+}
+
+/** A capture-time thumbnail ("data:image/jpeg;base64,…" or bare base64) as a JPEG Blob. */
+function dataUriToJpegBlob(dataUri: string): Blob | null {
+  try {
+    const b64 = dataUri.includes(',') ? dataUri.slice(dataUri.indexOf(',') + 1) : dataUri
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return bytes.length > 0 ? new Blob([bytes], { type: 'image/jpeg' }) : null
+  } catch {
+    return null
+  }
+}
+
+/** The results-panel line for a photo upload — shared by book-out, check-in and collection. */
+export function photoUploadSummary(r: { uploadedCount: number; failedCount: number; reducedCount: number }): { success: boolean; detail: string } {
+  const parts = [`${r.uploadedCount} photos uploaded`]
+  if (r.reducedCount > 0) parts.push(`${r.reducedCount} of them at reduced size (the full-size photo couldn't be read)`)
+  if (r.failedCount > 0) parts.push(`${r.failedCount} failed`)
+  return { success: r.failedCount === 0 && r.reducedCount === 0, detail: parts.join(', ') }
 }
 
 /**

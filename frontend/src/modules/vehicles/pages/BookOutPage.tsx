@@ -4,7 +4,7 @@ import { vmPath } from '../config/route-paths'
 import { useAuth } from '../hooks/useAuth'
 import { useVehicles } from '../hooks/useVehicles'
 import { createVehicleEvent } from '../lib/events-api'
-import { uploadAllPhotos } from '../lib/photo-upload'
+import { uploadAllPhotos, photoUploadSummary } from '../lib/photo-upload'
 import { updateFleetHireStatus } from '../lib/fleet-status'
 import { getAllocations, saveAllocations } from '../lib/allocations-api'
 import { withRetry } from '../lib/retry'
@@ -705,12 +705,7 @@ export function BookOutPage() {
       )
 
       if (uploadResult.success && uploadResult.data) {
-        const { uploadedCount, failedCount } = uploadResult.data
-        if (failedCount === 0) {
-          results.push({ label: 'Photo upload', success: true, detail: `${uploadedCount} photos uploaded` })
-        } else {
-          results.push({ label: 'Photo upload', success: false, detail: `${uploadedCount} uploaded, ${failedCount} failed` })
-        }
+        results.push({ label: 'Photo upload', ...photoUploadSummary(uploadResult.data) })
       } else {
         results.push({ label: 'Photo upload', success: false, detail: uploadResult.error || 'Upload failed after 3 attempts' })
       }
