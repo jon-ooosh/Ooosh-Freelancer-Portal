@@ -62,6 +62,8 @@ invariants and multi-van scramble write-up in `docs/reference/SHARED-UTILITIES.m
 ## Drafts and flaky signal (do not regress)
 
 - **Resuming a draft must keep autosave ON** — use `acceptDraft()`, never `dismissDraft()` (that deletes the draft and stops saving; it is for Discard only). With dismiss on Resume, a phone that killed the tab a second time (camera + low memory) came back to an empty form (Oct 2026).
+- **Never store a photo or signature Blob in IndexedDB — store its bytes** (`lib/db.ts` "Photo bytes", Nov 2026). iPhone Safari loses Blobs kept there once it reloads the tab: RX22SXL / 16157 resumed at the signature page with 19 unreadable photos and uploaded none (rebuilt from the frozen PDF by hand). Each draft photo is its own record in `formDrafts` (`photo:<flow>:<angle>:<timestamp>`), written once; draft writes run one at a time (`inDraftQueue`). The offline queue stores bytes too.
+- **If a full-size photo won't upload, its capture-time ~800px copy goes to the same key** (`uploadAllPhotos`, `reducedCount`) and the results panel says so — never a silent gap. Book-out also refuses to submit with required photos missing, whatever step a draft resumed at.
 - **Every post-submit network step retries** (`lib/retry.ts` `withRetry`). A Wi-Fi/4G handover kills the request in flight as "Failed to fetch"; a single-shot call loses it for good. Photos retry ONE AT A TIME inside `uploadAllPhotos` / `uploadDamagePhotos` — those never throw, so an outer `withRetry` can't see a failed photo. Only retry steps that are safe to repeat.
 
 ## Photos — memory and speed (do not regress)

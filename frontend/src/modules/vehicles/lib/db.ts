@@ -96,11 +96,12 @@ interface OooshDB {
   }
   formDrafts: {
     key: string
-    value: FormDraft
+    // A draft (key = flow type) or one of its photos (key `photo:<flow>:…`)
+    value: StoredFormDraft | StoredDraftPhoto
   }
   pendingSubmissions: {
     key: string
-    value: PendingSubmission
+    value: StoredPendingSubmission
     indexes: { 'by-status': string }
   }
 }
@@ -166,21 +167,197 @@ export async function getSyncQueueCount(): Promise<number> {
   return db.count('syncQueue')
 }
 
+// ── Photo bytes (Nov 2026) ──
+//
+// iPhone Safari can lose a Blob kept in IndexedDB once it has reloaded the
+// tab (phone locked, tab killed): the record comes back but the photo inside
+// can no longer be read. RX22SXL / 16157: a book-out resumed at the signature
+// page, 0 of 19 photos uploaded, and the photos were rebuilt from the PDF by
+// hand. Plain bytes (ArrayBuffer) are kept reliably, so every photo and
+// signature is stored as bytes and turned back into a Blob when read.
+//
+// Each draft photo is its own record in the formDrafts store, written ONCE
+// when first saved (one photo's bytes in memory at a time) — an autosave then
+// rewrites only the small draft record, never 20 photos. Same store rather
+// than a new one: a new store needs a database upgrade, and an older Ooosh
+// tab left open would block that upgrade until it was closed.
+
+interface StoredBytes {
+  bytes: ArrayBuffer
+  type: string
+}
+
+interface StoredDraftPhoto extends StoredBytes {
+  id: string // `photo:<flow>:<angle>:<timestamp>`
+  kind: 'draft-photo'
+  flowType: DraftFlowType
+}
+
+interface StoredDraftPhotoRef {
+  angle: string
+  label: string
+  timestamp: number
+  pdfBase64?: string
+  /** Key of the StoredDraftPhoto holding the bytes */
+  photoId?: string
+  /** Drafts saved before Nov 2026 kept the Blob inline */
+  blob?: Blob
+}
+
+interface StoredFormDraft {
+  id: string
+  flowType: DraftFlowType
+  step: number
+  formData: Record<string, unknown>
+  photos: StoredDraftPhotoRef[]
+  signature?: StoredBytes | null
+  /** Drafts saved before Nov 2026 */
+  signatureBlob?: Blob | null
+  savedAt: string
+  vehicleReg: string
+}
+
+type PendingPhoto = PendingSubmission['photos'][number]
+
+interface StoredPendingSubmission extends Omit<PendingSubmission, 'photos' | 'signatureBlob'> {
+  photos: Array<Omit<PendingPhoto, 'blob'> & { data?: StoredBytes; blob?: Blob }>
+  signature?: StoredBytes | null
+  /** Submissions queued before Nov 2026 */
+  signatureBlob?: Blob | null
+}
+
+async function toBytes(blob: Blob): Promise<StoredBytes> {
+  return { bytes: await blob.arrayBuffer(), type: blob.type || 'image/jpeg' }
+}
+
+function fromBytes(s: StoredBytes): Blob {
+  return new Blob([s.bytes], { type: s.type })
+}
+
+/** Can this Blob still be read? (An old inline Blob may not be, on an iPhone.) */
+async function isReadable(blob: Blob): Promise<boolean> {
+  try {
+    await blob.slice(0, 1).arrayBuffer()
+    return true
+  } catch {
+    return false
+  }
+}
+
+function draftPhotoId(flowType: DraftFlowType, angle: string, timestamp: number): string {
+  return `photo:${flowType}:${angle}:${timestamp}`
+}
+
+function draftPhotoRange(flowType: DraftFlowType): IDBKeyRange {
+  return IDBKeyRange.bound(`photo:${flowType}:`, `photo:${flowType}:\uffff`)
+}
+
+// Draft writes run one at a time, in order. Two overlapping saves could
+// otherwise have the older one delete a photo the newer one had just added,
+// and a clear could land before a save still in flight.
+let draftQueue: Promise<unknown> = Promise.resolve()
+function inDraftQueue<T>(fn: () => Promise<T>): Promise<T> {
+  const run = draftQueue.then(fn, fn)
+  draftQueue = run.catch(() => undefined)
+  return run
+}
+
 // ── Form draft operations ──
 
-export async function saveDraft(draft: FormDraft): Promise<void> {
-  const db = await getDB()
-  await db.put('formDrafts', draft)
+export function saveDraft(draft: FormDraft): Promise<void> {
+  return inDraftQueue(async () => {
+    const db = await getDB()
+    const refs: StoredDraftPhotoRef[] = []
+    const keep = new Set<string>()
+    for (const p of draft.photos) {
+      const photoId = draftPhotoId(draft.flowType, p.angle, p.timestamp)
+      if ((await db.getKey('formDrafts', photoId)) === undefined) {
+        try {
+          const bytes = await toBytes(p.blob)
+          await db.put('formDrafts', { id: photoId, kind: 'draft-photo', flowType: draft.flowType, ...bytes })
+        } catch (err) {
+          // Left off the draft; the form still holds it until the page closes.
+          console.warn('[draft] Could not store photo', p.angle, err)
+          continue
+        }
+      }
+      keep.add(photoId)
+      refs.push({ angle: p.angle, label: p.label, timestamp: p.timestamp, pdfBase64: p.pdfBase64, photoId })
+    }
+
+    let signature: StoredBytes | null = null
+    if (draft.signatureBlob) {
+      try { signature = await toBytes(draft.signatureBlob) } catch { signature = null }
+    }
+
+    const record: StoredFormDraft = {
+      id: draft.id,
+      flowType: draft.flowType,
+      step: draft.step,
+      formData: draft.formData,
+      photos: refs,
+      signature,
+      savedAt: draft.savedAt,
+      vehicleReg: draft.vehicleReg,
+    }
+    await db.put('formDrafts', record)
+
+    // Photos retaken or removed since the last save
+    const ids = await db.getAllKeys('formDrafts', draftPhotoRange(draft.flowType))
+    for (const id of ids) {
+      if (!keep.has(String(id))) await db.delete('formDrafts', id)
+    }
+  })
 }
 
-export async function loadDraft(flowType: DraftFlowType): Promise<FormDraft | undefined> {
-  const db = await getDB()
-  return db.get('formDrafts', flowType)
+export function loadDraft(flowType: DraftFlowType): Promise<FormDraft | undefined> {
+  return inDraftQueue(async () => {
+    const db = await getDB()
+    const rec = (await db.get('formDrafts', flowType)) as StoredFormDraft | undefined
+    if (!rec) return undefined
+
+    const photos: FormDraft['photos'] = []
+    for (const p of rec.photos) {
+      let blob: Blob | null = null
+      if (p.photoId) {
+        const stored = (await db.get('formDrafts', p.photoId)) as StoredDraftPhoto | undefined
+        if (stored) blob = fromBytes(stored)
+      } else if (p.blob && (await isReadable(p.blob))) {
+        blob = p.blob
+      }
+      if (blob) {
+        photos.push({ angle: p.angle, label: p.label, blob, timestamp: p.timestamp, pdfBase64: p.pdfBase64 })
+      } else {
+        // Dropped rather than restored broken: the photo then shows as still
+        // to take, and the book-out won't submit without it.
+        console.warn('[draft] Photo could not be restored:', p.angle)
+      }
+    }
+
+    let signatureBlob: Blob | null = null
+    if (rec.signature) signatureBlob = fromBytes(rec.signature)
+    else if (rec.signatureBlob && (await isReadable(rec.signatureBlob))) signatureBlob = rec.signatureBlob
+
+    return {
+      id: rec.id,
+      flowType: rec.flowType,
+      step: rec.step,
+      formData: rec.formData,
+      photos,
+      signatureBlob,
+      savedAt: rec.savedAt,
+      vehicleReg: rec.vehicleReg,
+    }
+  })
 }
 
-export async function clearDraft(flowType: DraftFlowType): Promise<void> {
-  const db = await getDB()
-  await db.delete('formDrafts', flowType)
+export function clearDraft(flowType: DraftFlowType): Promise<void> {
+  return inDraftQueue(async () => {
+    const db = await getDB()
+    await db.delete('formDrafts', flowType)
+    const ids = await db.getAllKeys('formDrafts', draftPhotoRange(flowType))
+    for (const id of ids) await db.delete('formDrafts', id)
+  })
 }
 
 export async function hasDraft(flowType: DraftFlowType): Promise<boolean> {
@@ -201,23 +378,45 @@ export async function addPendingSubmission(
     retryCount: 0,
     status: 'pending',
   }
-  await db.put('pendingSubmissions', entry)
+  await db.put('pendingSubmissions', await pendingToStored(entry))
   return entry
+}
+
+/** Photos and signature as bytes (see "Photo bytes" above). Converted one at a time. */
+async function pendingToStored(sub: PendingSubmission): Promise<StoredPendingSubmission> {
+  const photos: StoredPendingSubmission['photos'] = []
+  for (const p of sub.photos) {
+    photos.push({ angle: p.angle, label: p.label, timestamp: p.timestamp, pdfBase64: p.pdfBase64, data: await toBytes(p.blob) })
+  }
+  const { signatureBlob, ...rest } = sub
+  return { ...rest, photos, signature: signatureBlob ? await toBytes(signatureBlob) : null }
+}
+
+function pendingFromStored(rec: StoredPendingSubmission): PendingSubmission {
+  const { signature, signatureBlob, photos, ...rest } = rec
+  return {
+    ...rest,
+    photos: photos.flatMap(p => {
+      const blob = p.data ? fromBytes(p.data) : p.blob
+      return blob ? [{ angle: p.angle, label: p.label, timestamp: p.timestamp, pdfBase64: p.pdfBase64, blob }] : []
+    }),
+    signatureBlob: signature ? fromBytes(signature) : (signatureBlob ?? null),
+  }
 }
 
 export async function getPendingSubmissions(): Promise<PendingSubmission[]> {
   const db = await getDB()
-  return db.getAll('pendingSubmissions')
+  return (await db.getAll('pendingSubmissions')).map(pendingFromStored)
 }
 
 export async function getPendingByStatus(status: PendingSubmission['status']): Promise<PendingSubmission[]> {
   const db = await getDB()
-  return db.getAllFromIndex('pendingSubmissions', 'by-status', status)
+  return (await db.getAllFromIndex('pendingSubmissions', 'by-status', status)).map(pendingFromStored)
 }
 
 export async function updatePendingSubmission(submission: PendingSubmission): Promise<void> {
   const db = await getDB()
-  await db.put('pendingSubmissions', submission)
+  await db.put('pendingSubmissions', await pendingToStored(submission))
 }
 
 export async function removePendingSubmission(id: string): Promise<void> {
