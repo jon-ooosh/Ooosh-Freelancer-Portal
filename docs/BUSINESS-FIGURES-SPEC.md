@@ -131,10 +131,15 @@ one place to see what each effort produces. Two questions, deliberately kept apa
 - **Came in by** (`jobs.enquiry_source`, required on New Enquiry): Phone / Email / Website / In person /
   Other. Referral, Returning client and Forum used to be in this list; they answer the other question,
   so they're no longer offered (old enquiries keep their label). `in_person` is new.
-- **Heard about us** (`job_marketing_source.heard_about`, optional everywhere — jon: never gate an
-  enquiry on it): Google search · Google ad · Facebook / Instagram · Magazine / print · Recommendation ·
-  Used us before · Asked an AI · Saw us at a venue · Other. Recommendation ("Who recommended us?") and
-  Other ("Where?") take a short note (`heard_about_detail`) — the start of referral tracking.
+- **Heard about us** (`job_marketing_source.heard_about`): Google search · Google ad · Facebook /
+  Instagram · Magazine / print · Recommendation · Used us before · Asked an AI · Saw us at a venue ·
+  Other · Didn't ask. Recommendation ("Who recommended us?") and Other ("Where?") take a short note
+  (`heard_about_detail`) — the start of referral tracking. **Required on New Enquiry for a NEW client
+  only** (jon, 13 Nov 2026 — it was optional, and a returning client was being asked again); "Didn't
+  ask" is an answer, so a missed question is recorded as missed and never guessed — Business figures
+  counts it with the blanks ("Not asked / not answered"). The form asks `GET /pipeline/returning-client`
+  as the client and contacts are picked; not known yet = asked as new. Optional everywhere else (job
+  page, website form).
 - **What the website saw** (same table, migration 341): the FIRST visit's `utm_*` tags, `gclid`,
   `fbclid`, `ol` (an Ooosh tracked link — coming with the Marketing page), referrer (site + path only,
   never our own site) and landing path; plus `last_touch` when the visit they enquired on carried its
@@ -143,8 +148,11 @@ one place to see what each effort produces. Two questions, deliberately kept apa
   cookie consent, so expect blanks — the dropdown is the safety net. Cleaned and capped in
   `services/marketing-source.ts` (`cleanAttribution()`), read off the raw body so a bad value never
   costs the enquiry (`saveMarketingSource()` never throws). `trackedSource()` turns it into one label.
-- **Returning client** is never asked: Business figures works it out (the client had a booked job
-  before this enquiry arrived).
+- **Returning client** is never asked: worked out from history by ONE rule,
+  `services/returning-client.ts` — the client organisation OR anyone named on the enquiry as a contact
+  had a booked (or booked-then-cancelled) job before it (a tour manager with a new band counts; a lost
+  enquiry doesn't). New Enquiry and Business figures both use it (Business figures counted the
+  organisation only until 13 Nov 2026).
 
 Where it shows: New Enquiry (two rows of chips), the job page (both selects + "Website: …"),
 `GET /api/pipeline/:id/marketing-source`, and Business figures ("Where they heard about us", "What the
@@ -173,7 +181,12 @@ Jobs › Marketing (`/jobs/marketing`), **admin only** (page, nav item and every
   the destination can, even after printing. A paused, unknown or broken code goes to the home page — a
   printed code never dead-ends. A scan is stored as time + rough device only (`marketing_link_scans`, no
   address, no cookie); link previews and crawlers (WhatsApp, Facebook, empty user agent…) are kept as
-  `bot` and not counted. **QR** per link as SVG (for print) and a 1200px PNG.
+  `bot` and not counted. **QR** per link as SVG (for print) and a 1200px PNG — **with the Ooosh record
+  in the middle** by default (jon, 13 Nov 2026): error correction H, the record drawn as shapes on a
+  white square of whole modules ~27% across (~7% of the area; `marketing-links.ts` `withCentreLogo()`),
+  checked by decoding renders at 110–800px. "With the Ooosh logo" untick gives the plain code (M) for
+  very small print. The PNG is drawn by the browser (no image library on the server). Print at least
+  2.5 cm with the logo (3 cm for a code over 30 characters — a long code makes a denser QR).
 - **Forwarding** (`services/marketing-links.ts`, pure, tested): on our own site the link adds
   `utm_source` (the link's, else the advert's "who with" as a slug, else `ooosh-link`), `utm_medium`
   (the link's, else the advert's type, else `qr`), `utm_campaign=<code>` and `ol=<code>` — never

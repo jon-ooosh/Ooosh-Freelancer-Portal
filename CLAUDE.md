@@ -332,9 +332,10 @@ touch?" required on New Enquiry (`lib/enquirySource.ts`), and `jobs.auto_lost` f
 09:00 sweep closed ("not followed up" — never a lost sale). **Emails are never attached to an
 enquiry by guesswork** — the report finds the client's first email by address when it runs.
 Steps 2 (booking-rate tab) and 3 (reply speed, ~a month of data) are in the spec. **§7: where an enquiry came
-from** — "came in by" stays `jobs.enquiry_source`; "heard about us" (optional, never gates an enquiry) and the
-website's ad / campaign tags live in `job_marketing_source` (mig 341, `services/marketing-source.ts` — every
-value cleaned, never throws); returning client is worked out from history, never asked. **§8a is the Marketing
+from** — "came in by" stays `jobs.enquiry_source`; "heard about us" (required on New Enquiry for a NEW client
+only — "Didn't ask" is an answer; optional everywhere else) and the website's ad / campaign tags live in
+`job_marketing_source` (mig 341, `services/marketing-source.ts` — every value cleaned, never throws); returning
+client is worked out from history, never asked. **§8a is the Marketing
 page** (Jobs › Marketing, admin-only, mig 342): adverts with a "next thing due" To Do, and tracked links / QR on
 `go.oooshtours.co.uk/<code>` (`routes/go.ts` → `/api/go/<code>`, `services/marketing-links.ts`) — **a link's code
 never changes once made (it's printed); a bad or paused code goes to the home page, never a dead end.** §8b is the
@@ -463,6 +464,7 @@ existing definition:
 | Which address-book tabs have content (main row vs "More")? | `frontend/src/hooks/useTabPresence.ts` + `components/EntityTabs.tsx` — asks each tab's own endpoint; an empty tab moves under More, never hidden; one opened during a visit stays in the row until you leave the page. Both pages keep the tab in `?tab=` |
 | Find-or-create a person (by email) / org (by exact name) from an inbound source | `services/address-book-resolve.ts` — exact only; shared by the website enquiry intake and Leads. Also `isGenericMailbox()` (info@, bookings@… is an org email, not a person) |
 | Did this job book, get lost, get cancelled? (history views) | `services/job-outcomes.ts` `JOB_OUTCOME_SQL` — org Hire History tab + Leads client history |
+| Is this a returning client? | `services/returning-client.ts` — the org OR a contact on the enquiry booked before (`returningClientSql()` for a saved job, `isReturningClient()` before saving). New Enquiry ("Heard about us" required only for a new client) and Business figures both use it |
 | What does OP know about a lead's band (enquiries, losses, retros)? | `services/leads/history.ts` `getClientHistory()` |
 | Which leads go on the dashboard? | `services/leads/attention.ts` `getLeadAttention()` |
 | Is this band watched for its next tour? Start / stop a watch, its Ticketmaster act, the weekly check | `services/leads/band-watch.ts` — one watch per org; `startWatchFromCloseOut()` from the close-outs (never fails them, never on an alternative-quote loss); a tour becomes a warm lead with `watch_id`; names looked up by `watch-tours.ts` `actSearchNames()` (company endings dropped); the back catalogue is `back-catalogue.ts` (TOUR-FINDER-SPEC §21) |

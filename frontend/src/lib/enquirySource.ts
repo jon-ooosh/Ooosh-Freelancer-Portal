@@ -7,7 +7,9 @@
  *
  *   "Heard about us" — WHERE they found us: `job_marketing_source.heard_about`
  *   (backend services/marketing-source.ts HEARD_ABOUT_LABELS — keep the two lists the same).
- *   Optional everywhere; the website form asks it too.
+ *   Required on New Enquiry for a NEW client only — "Didn't ask" is an answer, so a missed
+ *   question is recorded as missed, never guessed (jon, Nov 2026). Optional everywhere else;
+ *   the website form asks it too. Returning = backend services/returning-client.ts.
  *
  * Referral / Returning client / Forum used to sit in the first list; they answer the second
  * question, so they're no longer offered there (old enquiries keep their label). Whether a
@@ -39,6 +41,7 @@ export const HEARD_ABOUT_LABELS: Record<string, string> = {
   ai: 'Asked an AI (ChatGPT etc.)',
   saw_at_venue: 'Saw us at a venue',
   other: 'Other',
+  not_asked: "Didn't ask",
 };
 
 export const HEARD_ABOUT_CHOICES: Array<{ value: string; label: string }> =

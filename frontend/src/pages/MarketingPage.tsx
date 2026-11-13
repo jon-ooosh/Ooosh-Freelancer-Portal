@@ -249,15 +249,49 @@ function LinkModal({ link, adverts, onClose, onSaved }: { link: TrackedLink | nu
   );
 }
 
+/** An SVG QR code as a PNG data URL, drawn in the browser (the server has no image library). */
+async function svgToPng(svg: string, px: number): Promise<string> {
+  const sized = svg.replace('<svg ', `<svg width="${px}" height="${px}" `);
+  const img = new Image();
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error('Could not draw the PNG.'));
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(sized)}`;
+  });
+  const canvas = document.createElement('canvas');
+  canvas.width = px;
+  canvas.height = px;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Could not draw the PNG.');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, px, px);
+  ctx.drawImage(img, 0, 0, px, px);
+  return canvas.toDataURL('image/png');
+}
+
 function QrModal({ link, onClose }: { link: TrackedLink; onClose: () => void }) {
-  const [qr, setQr] = useState<{ url: string; svg: string; png: string } | null>(null);
+  const [qr, setQr] = useState<{ url: string; svg: string; svgPlain: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The Ooosh record in the middle (jon, Nov 2026). Plain is there for very small print.
+  const [withLogo, setWithLogo] = useState(true);
+  const [png, setPng] = useState<string | null>(null);
   useEffect(() => {
-    api.get<{ data: { url: string; svg: string; png: string } }>(`/marketing/links/${link.id}/qr`)
+    api.get<{ data: { url: string; svg: string; svgPlain: string } }>(`/marketing/links/${link.id}/qr`)
       .then((r) => setQr(r.data))
       .catch((e: Error) => setError(e.message || 'Could not make the QR code.'));
   }, [link.id]);
-  const svgHref = qr ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(qr.svg)}` : '';
+  const svg = qr ? (withLogo ? qr.svg : qr.svgPlain) : '';
+  useEffect(() => {
+    setPng(null);
+    if (!svg) return;
+    let live = true;
+    svgToPng(svg, 1200).then((d) => { if (live) setPng(d); }).catch(() => { /* PNG button stays hidden; the SVG still works */ });
+    return () => { live = false; };
+  }, [svg]);
+  const svgHref = svg ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}` : '';
+  const fileName = `ooosh-${link.code}${withLogo ? '' : '-plain'}`;
+  // A longer code makes a denser QR; the logo covers some of it, so print it a bit bigger.
+  const minCm = withLogo ? (link.code.length > 30 ? 3 : 2.5) : 2;
   return (
     <ModalShell title={`QR code — ${link.code}`} subtitle={link.shortUrl} onClose={onClose} width="max-w-md">
       {error && <p className="text-sm text-red-600">{error}</p>}
@@ -266,11 +300,18 @@ function QrModal({ link, onClose }: { link: TrackedLink; onClose: () => void }) 
         <div className="space-y-3 text-center">
           <img src={svgHref} alt={`QR code for ${qr.url}`} className="mx-auto w-56 h-56" />
           <p className="text-sm font-mono text-gray-700">{qr.url.replace('https://', '')}</p>
+          <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" checked={withLogo} onChange={(e) => setWithLogo(e.target.checked)} />
+            With the Ooosh logo
+          </label>
           <div className="flex flex-wrap justify-center gap-2">
-            <a href={svgHref} download={`ooosh-${link.code}.svg`} className="px-3 py-2 text-sm rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700">Download SVG (for print)</a>
-            <a href={qr.png} download={`ooosh-${link.code}.png`} className="px-3 py-2 text-sm rounded-lg border border-gray-300 hover:bg-gray-50">Download PNG</a>
+            <a href={svgHref} download={`${fileName}.svg`} className="px-3 py-2 text-sm rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700">Download SVG (for print)</a>
+            {png && <a href={png} download={`${fileName}.png`} className="px-3 py-2 text-sm rounded-lg border border-gray-300 hover:bg-gray-50">Download PNG</a>}
           </div>
-          <p className="text-[11px] text-gray-500">SVG stays sharp at any size — send that to the designer. Print it at least 2 cm across.</p>
+          <p className="text-[11px] text-gray-500">
+            SVG stays sharp at any size — send that to the designer. Print it at least {minCm} cm across
+            {withLogo ? ', and scan a proof with your phone before it goes to print.' : '.'}
+          </p>
         </div>
       )}
     </ModalShell>

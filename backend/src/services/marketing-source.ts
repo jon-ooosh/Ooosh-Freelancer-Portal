@@ -25,10 +25,12 @@ export const HEARD_ABOUT_LABELS: Record<string, string> = {
   ai: 'Asked an AI (ChatGPT etc.)',
   saw_at_venue: 'Saw us at a venue',
   other: 'Other',
+  // Staff didn't ask (New Enquiry needs an answer for a new client). Counts with the blanks.
+  not_asked: "Didn't ask",
 };
 
 /** The same list as a tuple, for zod. */
-export const HEARD_ABOUT_VALUES = ['google_search', 'google_ad', 'social', 'print', 'recommendation', 'returning', 'ai', 'saw_at_venue', 'other'] as const;
+export const HEARD_ABOUT_VALUES = ['google_search', 'google_ad', 'social', 'print', 'recommendation', 'returning', 'ai', 'saw_at_venue', 'other', 'not_asked'] as const;
 
 const OWN_SITE = /(^|\.)oooshtours\.co\.uk$/i;
 const CAP = 200;

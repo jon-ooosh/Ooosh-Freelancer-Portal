@@ -7,7 +7,7 @@
  *   GET   /links                 tracked links, with the same counts
  *   POST  /links                 make one (code from the name unless given)
  *   PATCH /links/:id             repoint / pause / rename it (the code never changes — it's printed)
- *   GET   /links/:id/qr          { url, svg, png } for the artwork
+ *   GET   /links/:id/qr          { url, svg (with the logo), svgPlain } for the artwork
  *
  * The public redirect is routes/go.ts.
  */

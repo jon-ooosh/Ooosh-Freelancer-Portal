@@ -10,7 +10,7 @@
 import QRCode from 'qrcode';
 import { query } from '../config/database';
 import { JOB_BOOKED_SQL, JOB_OUTCOME_SQL } from './job-outcomes';
-import { SHORT_LINK_BASE, FALLBACK_URL, deviceOf, forwardUrl } from './marketing-links';
+import { SHORT_LINK_BASE, FALLBACK_URL, deviceOf, forwardUrl, withCentreLogo } from './marketing-links';
 import { cancelTask, createTask, listTasksForSource, personIdForUser } from './staff-tasks';
 
 export const CHANNELS = ['print', 'online', 'social', 'search_ads', 'event', 'sponsorship', 'other'] as const;
@@ -165,13 +165,17 @@ export async function resolveScan(code: string, userAgent: string | undefined): 
   return forwardUrl(link.destination, link);
 }
 
-/** The QR code for a link, as SVG (for print) and a large PNG. */
-export async function linkQr(code: string): Promise<{ url: string; svg: string; png: string }> {
+/**
+ * The QR code for a link, as SVG: with the Ooosh record in the middle (error correction H,
+ * so the covered bit is rebuilt) and plain (M — fewer, bigger squares, for tiny print).
+ * The page turns either into a PNG itself.
+ */
+export async function linkQr(code: string): Promise<{ url: string; svg: string; svgPlain: string }> {
   const url = SHORT_LINK_BASE + code;
-  const opts = { errorCorrectionLevel: 'M' as const, margin: 2 };
-  const [svg, png] = await Promise.all([
-    QRCode.toString(url, { ...opts, type: 'svg' }),
-    QRCode.toDataURL(url, { ...opts, width: 1200 }),
+  const margin = 2;
+  const [withLogo, plain] = await Promise.all([
+    QRCode.toString(url, { type: 'svg', errorCorrectionLevel: 'H', margin }),
+    QRCode.toString(url, { type: 'svg', errorCorrectionLevel: 'M', margin }),
   ]);
-  return { url, svg, png };
+  return { url, svg: withCentreLogo(withLogo, margin), svgPlain: plain };
 }
