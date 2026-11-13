@@ -9,7 +9,7 @@ import { useDriverHireForms } from '../hooks/useDriverHireForms'
 import { useVehicleIssues } from '../hooks/useVehicleIssues'
 import { createVehicleEvent } from '../lib/events-api'
 import { fetchBookOutForVehicle } from '../lib/events-query'
-import { uploadAllPhotos } from '../lib/photo-upload'
+import { uploadAllPhotos, photoUploadSummary } from '../lib/photo-upload'
 import { updateFleetHireStatus } from '../lib/fleet-status'
 import { saveCollection } from '../lib/collection-api'
 import { sendConditionReport, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
@@ -438,12 +438,7 @@ export function CollectionPage() {
       )
 
       if (uploadResult.success && uploadResult.data) {
-        const { uploadedCount, failedCount } = uploadResult.data
-        if (failedCount === 0) {
-          results.push({ label: 'Photo upload', success: true, detail: `${uploadedCount} photos uploaded` })
-        } else {
-          results.push({ label: 'Photo upload', success: false, detail: `${uploadedCount} uploaded, ${failedCount} failed` })
-        }
+        results.push({ label: 'Photo upload', ...photoUploadSummary(uploadResult.data) })
       } else {
         results.push({ label: 'Photo upload', success: false, detail: uploadResult.error || 'Upload failed' })
       }

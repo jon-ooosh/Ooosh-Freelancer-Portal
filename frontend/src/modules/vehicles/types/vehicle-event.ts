@@ -74,7 +74,14 @@ export interface VehicleEvent {
 
 /**
  * Required photo angles for a condition report.
- * Ordered as a clockwise walk-around starting from the front of the van.
+ * Ordered as a walk-around starting from the front of the van, then down the
+ * passenger side first.
+ *
+ * LEFT means the passenger (nearside) side, RIGHT the driver side — the van's
+ * own left and right, as if sat in it (jon, Nov 2026). The angle KEYS are the
+ * old viewer's-eye names and are deliberately NOT renamed: check-in pairs its
+ * photos to the book-out's by key, and the keys are the R2 file names. So
+ * `front_right` is the front-LEFT corner — only the labels say left/right.
  */
 export type PhotoAngle =
   | 'front'
@@ -87,6 +94,7 @@ export type PhotoAngle =
   | 'rear_right'
   | 'rear_doors'
   | 'rear_door_driver'
+  | 'spare_tyre'
   | 'rear_left'
   | 'left_panel'
   | 'driver_door'
@@ -98,23 +106,24 @@ export type PhotoAngle =
 
 export const REQUIRED_PHOTOS: { angle: PhotoAngle; label: string }[] = [
   { angle: 'front', label: 'Front' },
-  { angle: 'front_right', label: 'Front Right' },
+  { angle: 'front_right', label: 'Front Left' },
   { angle: 'passenger_door', label: 'Passenger Door' },
   { angle: 'interior_front', label: 'Interior Front' },
   { angle: 'sliding_door', label: 'Sliding Door' },
   { angle: 'interior_rear', label: 'Interior Rear' },
-  { angle: 'right_panel', label: 'Right Panel' },
-  { angle: 'rear_right', label: 'Rear Right' },
+  { angle: 'right_panel', label: 'Left Panel' },
+  { angle: 'rear_right', label: 'Rear Left' },
   // One photo per rear door since Sep 2026. `rear_doors` keeps its key so a
   // book-out from before (one shot of both doors) still lines up with its
   // check-in; it now means the sliding-door side's door. Named by side, not
   // left/right, because which is "left" depends on where you stand.
   { angle: 'rear_doors', label: 'Rear Door — Sliding-Door Side' },
   { angle: 'rear_door_driver', label: 'Rear Door — Driver Side' },
-  { angle: 'rear_left', label: 'Rear Left' },
-  { angle: 'left_panel', label: 'Left Panel' },
+  { angle: 'spare_tyre', label: 'Spare Tyre' },
+  { angle: 'rear_left', label: 'Rear Right' },
+  { angle: 'left_panel', label: 'Right Panel' },
   { angle: 'driver_door', label: 'Driver Door' },
-  { angle: 'front_left', label: 'Front Left' },
+  { angle: 'front_left', label: 'Front Right' },
   { angle: 'windscreen_left', label: 'Windscreen — Driver Side' },
   { angle: 'windscreen_middle', label: 'Windscreen — Centre' },
   { angle: 'windscreen_right', label: 'Windscreen — Passenger Side' },

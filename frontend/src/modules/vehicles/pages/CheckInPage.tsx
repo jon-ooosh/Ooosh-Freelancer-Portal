@@ -8,7 +8,7 @@ import { createVehicleEvent } from '../lib/events-api'
 import { fetchBookOutForVehicle, checkAlreadyCheckedIn } from '../lib/events-query'
 import type { CheckInStatus } from '../lib/events-query'
 import { fetchBookOutPhotos } from '../lib/photo-retrieval'
-import { uploadAllPhotos, uploadDamagePhotos } from '../lib/photo-upload'
+import { uploadAllPhotos, uploadDamagePhotos, photoUploadSummary } from '../lib/photo-upload'
 import { updateFleetHireStatus } from '../lib/fleet-status'
 import { getAllocations, saveAllocations } from '../lib/allocations-api'
 import { getCollection } from '../lib/collection-api'
@@ -253,11 +253,15 @@ export function CheckInPage() {
   const handleFlagDamage = useCallback((angle: string) => {
     // Pre-populate a damage item for this angle's location
     const locationMap: Record<string, string> = {
-      front_left: 'Front Left',
-      front_right: 'Front Right',
-      rear_left: 'Rear Left',
-      rear_right: 'Rear Right',
+      // Keys are the old viewer's-eye names; the locations are the van's own
+      // left/right (left = passenger side) — see REQUIRED_PHOTOS.
+      front_left: 'Front Right',
+      front_right: 'Front Left',
+      rear_left: 'Rear Right',
+      rear_right: 'Rear Left',
       right_panel: 'Passenger Side',
+      left_panel: 'Driver Side',
+      spare_tyre: 'Underside',
       rear_doors: 'Rear Centre',
       rear_door_driver: 'Rear Centre',
       windscreen: 'Windscreen',
@@ -542,12 +546,7 @@ export function CheckInPage() {
       )
 
       if (uploadResult.success && uploadResult.data) {
-        const { uploadedCount, failedCount } = uploadResult.data
-        if (failedCount === 0) {
-          results.push({ label: 'Photo upload', success: true, detail: `${uploadedCount} photos uploaded` })
-        } else {
-          results.push({ label: 'Photo upload', success: false, detail: `${uploadedCount} uploaded, ${failedCount} failed` })
-        }
+        results.push({ label: 'Photo upload', ...photoUploadSummary(uploadResult.data) })
       } else {
         results.push({ label: 'Photo upload', success: false, detail: uploadResult.error || 'Upload failed' })
       }
