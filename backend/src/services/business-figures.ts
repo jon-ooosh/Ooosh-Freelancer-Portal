@@ -29,6 +29,7 @@ import { ALTERNATIVE_QUOTE_LOST_REASON, nonLeadMemberIds } from './job-groups';
 import { fullDisplayName } from './display-name';
 import { EnquiryRow, FiguresSummary, Outcome, londonDate, londonToUtcMs, officeMinutesBetween, summarise } from './business-figures-maths';
 import { trackedSource } from './marketing-source';
+import { returningClientSql } from './returning-client';
 
 /** A client email this long before the enquiry was logged counts as its first contact. */
 const CONTACT_BEFORE_DAYS = 3;
@@ -72,8 +73,6 @@ interface JobRow {
   ms_link_code: string | null; ms_referrer: string | null;
 }
 
-/** The booked-outcome test for an earlier job aliased `p` (job-outcomes.ts is written for `j`). */
-const BOOKED_EARLIER_SQL = `(${JOB_BOOKED_SQL} OR ${JOB_OUTCOME_SQL.cancelled})`.replace(/\bj\./g, 'p.');
 
 export async function buildEnquiryFigures(from: string, to: string): Promise<EnquiryFigures> {
   const fromMs = londonToUtcMs(from, 0);
@@ -112,12 +111,8 @@ export async function buildEnquiryFigures(from: string, to: string): Promise<Enq
             (j.hh_derived_flags->>'has_rehearsal')::boolean AS has_rehearsal,
             pm.first_name AS m_first, pm.last_name AS m_last, pm.preferred_name AS m_pref,
             pc.first_name AS c_first, pc.last_name AS c_last, pc.preferred_name AS c_pref,
-            -- Returning: the client had already booked with us before this enquiry arrived.
-            (j.client_id IS NOT NULL AND EXISTS (
-               SELECT 1 FROM jobs p
-                WHERE p.client_id = j.client_id AND p.id <> j.id AND p.is_deleted = false
-                  AND LEAST(p.created_at, COALESCE(p.created_date, p.created_at)) < j.arrived
-                  AND ${BOOKED_EARLIER_SQL})) AS returning,
+            -- Returning: the client (or a contact on it) had already booked with us before this enquiry arrived.
+            ${returningClientSql('j', 'j.arrived')} AS returning,
             ms.heard_about, ms.utm_source AS ms_utm_source, ms.utm_medium AS ms_utm_medium, ms.gclid AS ms_gclid,
             ms.fbclid AS ms_fbclid, ms.link_code AS ms_link_code, ms.referrer AS ms_referrer
        FROM base j

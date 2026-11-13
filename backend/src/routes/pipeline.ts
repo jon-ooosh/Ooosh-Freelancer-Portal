@@ -45,6 +45,7 @@ import { forClientContext } from '../services/endorsements';
 import { retireDoneBells } from '../services/notification-resolve';
 import { startWatchFromCloseOut } from '../services/leads/band-watch';
 import { HEARD_ABOUT_VALUES, getMarketingSource, saveMarketingSource, setHeardAbout } from '../services/marketing-source';
+import { isReturningClient } from '../services/returning-client';
 
 const router = Router();
 router.use(authenticate);
@@ -1030,6 +1031,29 @@ router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, re
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Update pipeline fields error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Returning client? ──────────────────────────────────────────────────────
+// New Enquiry asks before saving: has this client org, or any contact picked so far,
+// booked with us before? If not, "Heard about us" needs an answer (services/returning-client.ts).
+const returningQuery = z.object({
+  client_id: z.string().guid().optional(),
+  person_ids: z.string().max(2000).optional(),
+});
+
+router.get('/returning-client', validate(returningQuery, 'query'), async (req: AuthRequest, res: Response) => {
+  try {
+    const q = req.query as z.infer<typeof returningQuery>;
+    const personIds = (q.person_ids || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (personIds.some((id) => !z.string().guid().safeParse(id).success)) {
+      res.status(400).json({ error: 'person_ids must be ids' });
+      return;
+    }
+    res.json({ data: await isReturningClient(q.client_id || null, personIds.slice(0, 50)) });
+  } catch (error) {
+    console.error('Returning client check error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

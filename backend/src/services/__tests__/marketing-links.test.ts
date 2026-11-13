@@ -1,4 +1,5 @@
-import { checkDestination, deviceOf, forwardUrl, isValidCode, normaliseCode } from '../marketing-links';
+import QRCode from 'qrcode';
+import { checkDestination, deviceOf, forwardUrl, isValidCode, normaliseCode, withCentreLogo } from '../marketing-links';
 
 describe('link codes', () => {
   it('makes a tidy code from a name', () => {
@@ -48,5 +49,25 @@ describe('deviceOf', () => {
     expect(deviceOf('WhatsApp/2.23')).toBe('bot');
     expect(deviceOf('facebookexternalhit/1.1')).toBe('bot');
     expect(deviceOf(undefined)).toBe('bot');
+  });
+});
+
+describe('withCentreLogo', () => {
+  it('puts the record on a white square of whole modules, centred, inside the same SVG', async () => {
+    const plain = await QRCode.toString('https://go.oooshtours.co.uk/brighton-source-dec-vans', { type: 'svg', errorCorrectionLevel: 'H', margin: 2 });
+    const out = withCentreLogo(plain, 2);
+    const size = Number(/viewBox="0 0 (\d+)/.exec(plain)![1]);
+    const rect = /<rect x="([\d.]+)" y="([\d.]+)" width="(\d+)"/.exec(out)!;
+    const box = Number(rect[3]);
+    expect(out.startsWith(plain.slice(0, plain.lastIndexOf('</svg>')))).toBe(true);
+    expect(out.trimEnd().endsWith('</svg>')).toBe(true);
+    expect(out).toContain('#833781');
+    expect(Number(rect[1]) * 2 + box).toBe(size);                 // centred
+    expect(Number.isInteger(Number(rect[1]))).toBe(true);          // on the module grid
+    expect((box * box) / ((size - 4) * (size - 4))).toBeLessThan(0.1); // well inside what H rebuilds
+  });
+  it('leaves anything unexpected alone', () => {
+    expect(withCentreLogo('<svg></svg>', 2)).toBe('<svg></svg>');
+    expect(withCentreLogo('not svg', 2)).toBe('not svg');
   });
 });

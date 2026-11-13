@@ -925,6 +925,10 @@ function NewEnquiryModal({
   // Where they heard about us — optional (docs/BUSINESS-FIGURES-SPEC.md §7).
   const [heardAbout, setHeardAbout] = useState('');
   const [heardAboutDetail, setHeardAboutDetail] = useState('');
+  // Has this client (the org, or a contact picked) booked with us before? Then "Heard about
+  // us" stays optional; for a new client it needs an answer ("Didn't ask" counts).
+  // null = not known yet → treated as new (services/returning-client.ts).
+  const [returningClient, setReturningClient] = useState<{ returning: boolean; because: 'client' | 'contact' | null } | null>(null);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -1108,6 +1112,30 @@ function NewEnquiryModal({
       setHistoryLoading(false);
     }
   }, []);
+
+  // Returning client? Asked again whenever the client org or the picked contacts change
+  // (services/returning-client.ts). A brand-new org has no history, but a contact might.
+  const returningKey = [
+    !isNewClient && clientId ? clientId : '',
+    [...tickedExistingPersonIds, ...pendingContacts.map((c) => c.existing_person_id).filter((id): id is string => !!id)]
+      .sort().join(','),
+  ].join('|');
+  useEffect(() => {
+    setReturningClient(null);
+    if (!isOpen) return;
+    const [orgId, people] = returningKey.split('|');
+    if (!orgId && !people) return;
+    let live = true;
+    const t = setTimeout(() => {
+      const qs = new URLSearchParams();
+      if (orgId) qs.set('client_id', orgId);
+      if (people) qs.set('person_ids', people);
+      api.get<{ data: { returning: boolean; because: 'client' | 'contact' | null } }>(`/pipeline/returning-client?${qs.toString()}`)
+        .then((r) => { if (live) setReturningClient(r.data); })
+        .catch(() => { /* not known → asked as a new client; one tap on "Didn't ask" gets past it */ });
+    }, 300);
+    return () => { live = false; clearTimeout(t); };
+  }, [isOpen, returningKey]);
 
   // Load team users for alert dropdown
   useEffect(() => {
@@ -1581,6 +1609,11 @@ function NewEnquiryModal({
       setError('Came in by: pick phone, email, website, in person or other.');
       return;
     }
+    // A new client must say where they heard about us — "Didn't ask" is fine (jon, Nov 2026).
+    if (!heardAbout && !returningClient?.returning) {
+      setError("Heard about us: pick one for a new client — or \"Didn't ask\".");
+      return;
+    }
 
     // Auto-save any unsaved form data the user left dangling — the
     // forgot-to-click-Save trap. If the contact form has data, treat
@@ -1854,7 +1887,7 @@ function NewEnquiryModal({
       setPersonFirstClickedId(null);
       setClientPeople([]);
       setPendingPerson(null);
-      setEnquirySource(''); setHeardAbout(''); setHeardAboutDetail(''); setNotes(''); setShowOptional(false);
+      setEnquirySource(''); setHeardAbout(''); setHeardAboutDetail(''); setReturningClient(null); setNotes(''); setShowOptional(false);
       setStagedFiles([]); setFileTag(''); setFileComment('');
       setNextChaseDate(addDaysToDate(5)); setSelectedChasePreset('5 days'); setChaseAlertUserId('');
       // Close first (clears `?newEnquiry=1` search param via setSearchParams)
@@ -2657,7 +2690,11 @@ function NewEnquiryModal({
 
           {/* Where they heard about us — optional, one tap (docs/BUSINESS-FIGURES-SPEC.md §7) */}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Heard about us <span className="font-normal text-gray-400">(optional)</span></label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {returningClient?.returning
+                ? <>Heard about us <span className="font-normal text-gray-400">(optional — {returningClient.because === 'contact' ? 'this contact has' : 'this client has'} booked with us before)</span></>
+                : <>Heard about us * <span className="font-normal text-gray-400">(new client)</span></>}
+            </label>
             <div className="flex flex-wrap gap-1.5">
               {HEARD_ABOUT_CHOICES.map((o) => (
                 <button
