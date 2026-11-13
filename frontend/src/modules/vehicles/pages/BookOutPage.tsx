@@ -594,6 +594,18 @@ export function BookOutPage() {
   }
 
   async function handleSubmit() {
+    // The Photos step checks its count only while you're on it. A draft
+    // resumed past it (phone locked, tab reloaded) can come back with photos
+    // that couldn't be restored, so check again here (RX22SXL / 16157, Nov 2026).
+    // Same rule as the Photos step; read by freelancers too, so no em dash.
+    if (!TESTING_MODE && !isVanAndDriver && capturedRequiredCount < requiredPhotoCount) {
+      const missing = requiredPhotoCount - capturedRequiredCount
+      setSubmitError(
+        `${missing} of the ${requiredPhotoCount} photos ${missing === 1 ? 'is' : 'are'} missing. Go back to Photos and take ${missing === 1 ? 'it' : 'them'} again before finishing.`,
+      )
+      return
+    }
+
     // Require signature before submitting — EXCEPT on a V&D soft book-out, where
     // fuel + mileage are the only hard requirements (signature optional, staff
     // judge per case). Normal customer self-drive still requires the signature.
