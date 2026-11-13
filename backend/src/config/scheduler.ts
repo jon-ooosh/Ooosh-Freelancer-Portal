@@ -548,6 +548,25 @@ export function startScheduler() {
   });
   console.log('Scheduler: OOH return reminders scheduled daily at 10:00');
 
+  // ── Jon's review request email ─────────────────────────────────────
+  // Daily 10:15 UK: hires Completed yesterday (up to 3 days back if a run was
+  // missed) get Jon's "how did it go?" email — unless completed more than ten
+  // days after the return, ticked "don't send", asked in the last year, opted
+  // out, internal, or with no client email. One row per job, written before the
+  // send. Off until jon turns it on (services/review-requests.ts).
+  cron.schedule('15 10 * * *', async () => {
+    try {
+      const { runReviewRequests } = await import('../services/review-requests');
+      const s = await runReviewRequests();
+      if (s.enabled && (s.sent || s.notSent || s.failed)) {
+        console.log(`Scheduler: review requests — sent ${s.sent}, not sent ${s.notSent}, failed ${s.failed}`);
+      }
+    } catch (err) {
+      console.error('Scheduler: review request run failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: review request emails scheduled daily at 10:15 Europe/London');
+
   // ── Freelancer out-of-hours emails ──────────────────────────────────
   // Every half hour 10:00–20:30 UK: everyone bringing an Ooosh van back after
   // we've closed today, ticked by hand or due back late by the automatic rule

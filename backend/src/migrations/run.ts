@@ -383,6 +383,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '341_enquiry_marketing_source.sql',
         '342_marketing_register_and_links.sql',
         '343_damage_money.sql',
+        '344_review_requests.sql',
       ];
 
       for (const migration of migrations) {
