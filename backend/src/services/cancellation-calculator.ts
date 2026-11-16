@@ -77,6 +77,7 @@ export interface EarlyReturnResult {
  * be the ex-VAT figure here. When the minimum was £25, using £30
  * made the fee £25+VAT+VAT = £36 inc-VAT (VAT applied twice). Reported Jun 2026
  * (job 16114: showed £36 retained / £165.60 refund instead of £30 / £171.60).
+ * The minimum is capped at the hire fee — never more than the hire (jon, 16 Nov 2026).
  */
 const MIN_CANCELLATION_FEE = 50;
 
@@ -111,9 +112,12 @@ export function calculatePreHireCancellation(input: PreHireCancellationInput): C
     tier = '>7_days';
     const percentFee = totalHireCost * 0.10;
     if (percentFee < MIN_CANCELLATION_FEE) {
-      fee = MIN_CANCELLATION_FEE;
+      // The minimum never charges more than the hire itself: a £35 hire costs £35 (jon, 16 Nov 2026).
+      fee = Math.min(MIN_CANCELLATION_FEE, totalHireCost);
       minimumApplied = true;
-      breakdownParts.push(`10% of £${totalHireCost.toFixed(2)} = £${percentFee.toFixed(2)}, minimum £50+VAT applied (£${MIN_CANCELLATION_FEE.toFixed(2)} ex-VAT)`);
+      breakdownParts.push(fee < MIN_CANCELLATION_FEE
+        ? `10% of £${totalHireCost.toFixed(2)} = £${percentFee.toFixed(2)}, minimum £50+VAT capped at the hire fee (£${fee.toFixed(2)} ex-VAT)`
+        : `10% of £${totalHireCost.toFixed(2)} = £${percentFee.toFixed(2)}, minimum £50+VAT applied (£${MIN_CANCELLATION_FEE.toFixed(2)} ex-VAT)`);
     } else {
       fee = percentFee;
       breakdownParts.push(`10% of £${totalHireCost.toFixed(2)} = £${fee.toFixed(2)}`);
@@ -124,9 +128,12 @@ export function calculatePreHireCancellation(input: PreHireCancellationInput): C
     tier = '2_to_7_days';
     const percentFee = totalHireCost * 0.25;
     if (percentFee < MIN_CANCELLATION_FEE) {
-      fee = MIN_CANCELLATION_FEE;
+      // The minimum never charges more than the hire itself: a £35 hire costs £35 (jon, 16 Nov 2026).
+      fee = Math.min(MIN_CANCELLATION_FEE, totalHireCost);
       minimumApplied = true;
-      breakdownParts.push(`25% of £${totalHireCost.toFixed(2)} = £${percentFee.toFixed(2)}, minimum £50+VAT applied (£${MIN_CANCELLATION_FEE.toFixed(2)} ex-VAT)`);
+      breakdownParts.push(fee < MIN_CANCELLATION_FEE
+        ? `25% of £${totalHireCost.toFixed(2)} = £${percentFee.toFixed(2)}, minimum £50+VAT capped at the hire fee (£${fee.toFixed(2)} ex-VAT)`
+        : `25% of £${totalHireCost.toFixed(2)} = £${percentFee.toFixed(2)}, minimum £50+VAT applied (£${MIN_CANCELLATION_FEE.toFixed(2)} ex-VAT)`);
     } else {
       fee = percentFee;
       breakdownParts.push(`25% of £${totalHireCost.toFixed(2)} = £${fee.toFixed(2)}`);
@@ -288,7 +295,7 @@ function buildFeeBreakdown(
 
   if (tier === '>7_days') {
     if (minimumApplied) {
-      lines.push({ label: 'Minimum cancellation fee (£50+VAT)', amount: fee });
+      lines.push({ label: fee < MIN_CANCELLATION_FEE ? 'Minimum cancellation fee (capped at the hire fee)' : 'Minimum cancellation fee (£50+VAT)', amount: fee });
     } else {
       lines.push({ label: '10% cancellation fee', amount: fee });
     }
@@ -297,7 +304,7 @@ function buildFeeBreakdown(
 
   if (tier === '2_to_7_days') {
     if (minimumApplied) {
-      lines.push({ label: 'Minimum cancellation fee (£50+VAT)', amount: fee });
+      lines.push({ label: fee < MIN_CANCELLATION_FEE ? 'Minimum cancellation fee (capped at the hire fee)' : 'Minimum cancellation fee (£50+VAT)', amount: fee });
     } else {
       lines.push({ label: '25% cancellation fee', amount: fee });
     }
