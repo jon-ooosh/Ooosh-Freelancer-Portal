@@ -315,3 +315,17 @@ prints every field name HireHop sent. The answer decides phase 2:
 - **Found:** the hire check reads the line note.
 - **Not found:** hires stay on "Mark as applied", and only credit notes are checked automatically.
 
+**Result (jon, 16 Nov 2026, a test enquiry): FOUND — both fields read back.**
+- HireHop's **Item Note** comes back as `ADDITIONAL`. It prints on the client's quote and invoice.
+- **Item Memo** comes back as `TECHNICAL`. It is internal only.
+- Phase 2 looks for the code in **either** field (any text field on the line), so a code typed in
+  the wrong box is still found. The UI keeps asking for the Item Note, so the client sees the
+  goodwill applied.
+- **The same row shows the discount:** `UNIT_PRICE` 48.00 vs `PRICE` 45.60 (5% off). Phase 2 can
+  therefore warn "code found but the line isn't discounted" (`PRICE` = `UNIT_PRICE`).
+- **The amount stays the staff member's word.** A line's money also involves `MULTIPLIER` and
+  `PRICE_TYPE`, so OP doesn't re-derive the goodwill sum from it.
+- **Credit notes are NOT tested yet.** The test job had no invoice. `billing_list.php` already
+  gives a credit note's `DESCRIPTION` to the Money summary, so it is low risk, but check it the
+  first time one is used.
+
