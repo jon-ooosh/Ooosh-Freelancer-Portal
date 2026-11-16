@@ -624,7 +624,9 @@ New page, `frontend/src/pages/ShopTillPage.tsx`, reachable from Money and from Q
 Flow, optimised for someone standing at a counter with a customer waiting:
 
 1. **Search** — type-ahead over `shop_stock_cache` (Postgres, instant, zero HH calls).
-   Barcode field focused by default for scanner input. Show price and shelf count with an
+   Barcode field focused by default for scanner input (wired Nov 2026: Enter → `GET /shop/stock/barcode/:code`;
+   one match goes in the basket, several are listed, none says so; leading zeros ignored both sides,
+   `shop-stock.ts` `barcodeKey()`; a one-word search also matches a whole barcode). Show price and shelf count with an
    "as of 6 min ago" stamp so nobody trusts the count more than it deserves.
 2. **Basket** — qty adjustable, price editable by `MANAGER_ROLES` only (and never above
    `MAX_DISCOUNT`'s implied floor).

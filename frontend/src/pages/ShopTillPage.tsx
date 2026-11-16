@@ -242,6 +242,8 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
   const [term, setTerm] = useState('');
   const [results, setResults] = useState<StockItem[]>([]);
   const [searching, setSearching] = useState(false);
+  // What a scan that didn't land one item says (no match, or several sharing it).
+  const [scanNote, setScanNote] = useState<string | null>(null);
   const [basket, setBasket] = useState<BasketLine[]>([]);
   // Card is what almost every walk-in pays with, so it is the default.
   // Without the reader: Worldpay for an admin, Cash for everyone else — Worldpay,
@@ -567,6 +569,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
   const clearSearch = useCallback(() => {
     setTerm('');
     setResults([]);
+    setScanNote(null);
     searchRef.current?.focus();
   }, []);
 
@@ -580,9 +583,34 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
     });
     setTerm('');
     setResults([]);
+    setScanNote(null);
     setSaved(null);
     searchRef.current?.focus();
   }, []);
+
+  /**
+   * A scanner types the code and presses Enter, so Enter asks for an exact
+   * barcode match: one item goes straight in the basket (scan it again for
+   * qty 2), several are listed to pick from, none says so. The type-ahead
+   * search carries on regardless, so a typed name + Enter loses nothing.
+   */
+  const lookupBarcode = useCallback(async () => {
+    const code = term.trim();
+    if (!code || /\s/.test(code)) return;          // a barcode is one word
+    try {
+      const r = await api.get<{ data: StockItem[] }>(`/shop/stock/barcode/${encodeURIComponent(code)}`);
+      if (r.data.length === 1) {
+        addItem(r.data[0]);
+      } else if (r.data.length > 1) {
+        setResults(r.data);
+        setScanNote(`${r.data.length} items share barcode ${code} in HireHop. Pick the right one, and fix the duplicate in HireHop.`);
+      } else if (/^\d+$/.test(code)) {
+        setScanNote(`No item has barcode ${code}. Search by name instead, and add the barcode to the item in HireHop.`);
+      }
+    } catch {
+      // Lookup failed — the type-ahead search is still running underneath.
+    }
+  }, [term, addItem]);
 
   const setQty = (id: number, qty: number) =>
     setBasket(prev => qty <= 0
@@ -1040,9 +1068,12 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
             ref={searchRef}
             autoFocus
             value={term}
-            onChange={e => setTerm(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Escape') clearSearch(); }}
-            placeholder="Search or scan — name, part number…"
+            onChange={e => { setTerm(e.target.value); setScanNote(null); }}
+            onKeyDown={e => {
+              if (e.key === 'Escape') clearSearch();
+              if (e.key === 'Enter') { e.preventDefault(); void lookupBarcode(); }
+            }}
+            placeholder="Search or scan — name, part number, barcode…"
             className="w-full rounded border border-gray-300 py-3 pl-4 pr-10 text-base focus:border-ooosh-500 focus:outline-none"
           />
           {term && (
@@ -1059,6 +1090,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
           )}
         </div>
         {searching && <p className="mt-1 text-xs text-gray-400">Searching…</p>}
+        {scanNote && <p className="mt-1 text-sm text-amber-700">{scanNote}</p>}
         {results.length > 0 && (
           <ul className="mt-2 max-h-72 overflow-y-auto rounded border border-gray-200 divide-y">
             {results.map(item => (

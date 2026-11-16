@@ -428,9 +428,27 @@ export interface SearchOpts {
 }
 
 /**
+ * A barcode as the till compares it: trimmed, leading zeros dropped.
+ *
+ * The same pack reads as `749699128328` (UPC-A, 12 digits) or `0749699128328`
+ * (EAN-13) depending on how a scanner is set up, and HireHop holds whichever
+ * one somebody typed in. Dropping leading zeros on BOTH sides makes those one
+ * code. The SQL twin is `BARCODE_KEY_SQL` — keep the two in step.
+ * Returns '' for nothing usable (blank, or all zeros).
+ */
+export function barcodeKey(raw: string | null | undefined): string {
+  return String(raw ?? '').trim().replace(/^0+/, '');
+}
+
+/** `barcodeKey()` in SQL, over `shop_stock_cache.barcode`. */
+const BARCODE_KEY_SQL = `ltrim(btrim(barcode), '0')`;
+
+/**
  * Type-ahead search for the till. Matches name, alt name and part number —
  * staff type fragments and part numbers ("gree fl 1", "PROGAFF24"), never
- * sentences, which is why this is trigram rather than full-text.
+ * sentences, which is why this is trigram rather than full-text. A one-word
+ * term also matches a whole barcode (leading zeros ignored, `barcodeKey()`),
+ * ranked first, so a code typed by hand finds its item.
  */
 export async function searchShopStock(q: string, opts: SearchOpts = {}): Promise<ShopStockItem[]> {
   const term = (q || '').trim();
@@ -469,6 +487,17 @@ export async function searchShopStock(q: string, opts: SearchOpts = {}): Promise
     const n = params.length;
     tokenClauses.push(`(title ILIKE $${n} OR alt_title ILIKE $${n} OR part_number ILIKE $${n})`);
   }
+  let matchSql = tokenClauses.join(' AND ');
+  let barcodeRank = '';
+  // A barcode is one word, so only then is the whole term compared to it — and
+  // exactly, never as a fragment, or every number typed would drag in barcodes.
+  const code = tokens.length === 1 ? barcodeKey(term) : '';
+  if (code) {
+    params.push(code);
+    const n = params.length;
+    matchSql = `((${matchSql}) OR ${BARCODE_KEY_SQL} = $${n})`;
+    barcodeRank = `CASE WHEN ${BARCODE_KEY_SQL} = $${n} THEN 0 ELSE 1 END,`;
+  }
   let catSql = '';
   if (excluded.length) {
     params.push(excluded);
@@ -477,10 +506,11 @@ export async function searchShopStock(q: string, opts: SearchOpts = {}): Promise
 
   const r = await query(
     `SELECT * FROM shop_stock_cache
-      WHERE ${tokenClauses.join(' AND ')}
+      WHERE ${matchSql}
         ${statusClause}
         ${catSql}
       ORDER BY
+        ${barcodeRank}
         CASE WHEN title ILIKE $1 THEN 0 ELSE 1 END,
         similarity(title, $2) DESC,
         title
@@ -491,19 +521,25 @@ export async function searchShopStock(q: string, opts: SearchOpts = {}): Promise
 }
 
 /**
- * Exact barcode lookup — the scanner's path, and the fastest one.
+ * Barcode lookup — the scanner's path (the till calls it when a scan ends in Enter).
+ *
+ * Returns EVERY sellable item carrying the code, not the first one: two items
+ * sharing a barcode in HireHop is a data mistake, and quietly ringing up one of
+ * them would charge for a thing nobody chose. The till adds a single match
+ * straight to the basket and lists several for a person to pick.
  *
  * Deliberately NOT category-filtered: if someone physically scanned it, they
  * are holding it, and refusing to price a thing in the customer's hand because
  * of a category setting is the sort of gate that strands staff.
  */
-export async function findShopStockByBarcode(barcode: string): Promise<ShopStockItem | null> {
-  const code = (barcode || '').trim();
-  if (!code) return null;
+export async function findShopStockByBarcode(barcode: string): Promise<ShopStockItem[]> {
+  const code = barcodeKey(barcode);
+  if (!code) return [];
   const r = await query(
-    `SELECT * FROM shop_stock_cache WHERE barcode = $1 AND status = 0 LIMIT 1`, [code]);
-  if (!r.rows[0]) return null;
-  return (await withVat([rowToItem(r.rows[0])]))[0];
+    `SELECT * FROM shop_stock_cache
+      WHERE ${BARCODE_KEY_SQL} = $1 AND status = 0
+      ORDER BY title LIMIT 10`, [code]);
+  return withVat(r.rows.map(rowToItem));
 }
 
 export async function getShopStockItem(hhStockId: number): Promise<ShopStockItem | null> {
