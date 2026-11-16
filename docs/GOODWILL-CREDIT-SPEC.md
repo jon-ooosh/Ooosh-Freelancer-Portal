@@ -15,18 +15,22 @@ OP had no way to record a promise like that, so it would have lived in someone's
    Reason: a credit on account is the client's money (refundable, a liability with no end date),
    which is exactly what we don't want. A conditional offer with an expiry is not.
 2. **A fixed £ amount, entered ex VAT, always shown as "£X + VAT = £Y total"** (20%).
-3. **It belongs to an organisation** — the job's band when there is one, else the client org.
+3. **It belongs to an organisation** — the job's band when there is one, else the client org
+   (or, if §12 is agreed, a person when there is no org).
    It shows whenever that org is the client or the band on a later job, whoever books.
 4. **Use by: 12 months from the offer** by default; a manager can change it.
 5. **Managers only** (`MANAGER_ROLES`) to offer, edit, withdraw, or take a reservation off a job.
-   Reserving it on a job: any staff role (`STAFF_ROLES`) — it's the client's entitlement and the
-   person quoting is the one who'll see it. *(open — §11)*
+   **Any staff role** (`STAFF_ROLES`) can apply it to a job — it's the client's entitlement and the
+   person quoting is the one who'll see it (jon, 16 Nov 2026).
 6. **Used once, "up to £X".** One hire or one invoice takes what it can; anything left lapses.
 7. **It can go against money already owed**, not only a future hire (jon, 16 Nov 2026) — and
    that may well be the common use.
-8. **OP never writes it to HireHop.** Staff add the discount line / credit note by hand; OP
-   READS HireHop to see that it's there (§6). Every credit has a reference code (`GW-0012`) that
-   staff put in the line or credit note — the code is how OP finds it.
+8. **OP never writes it to HireHop — applying it is manual.** What gets discounted depends on what
+   the goodwill is for, so staff apply it however suits in HireHop: usually a **discount on an
+   existing line** equal to the goodwill (a negative line is awkward in HireHop), or a credit note
+   on an invoice already raised. Every credit has a reference code (`GW-0012`) that staff type into
+   that line's note or the credit note's description; OP READS HireHop to see the code is there (§6)
+   (jon, 16 Nov 2026).
 9. **OP sends no email.** The offer form shows the points to put in your own wrap-up email (§5),
    with a Copy button. The cancellation email is NOT changed.
 10. **Started from a menu item, never a button on the page** — it isn't the norm (§4).
@@ -40,7 +44,7 @@ OP had no way to record a promise like that, so it would have lived in someone's
 |---|---|---|
 | `offered` ("To use") | Offered, not on any job | yes |
 | `reserved` | Held for ONE job (a hire) or ONE invoice. Can't be reserved anywhere else | yes |
-| `used` | The code was found in HireHop on that job (or a manager marked it used, §6.4) | yes |
+| `used` | The code was found in HireHop on that job, or staff marked it applied (§6.4) | yes |
 | `withdrawn` | A manager took it back before use, with a reason | yes |
 | expired | `offered` and the use-by date has passed | **derived on read**, never stored — no sweep needed |
 
@@ -48,7 +52,7 @@ Moves:
 - offered → reserved: "Use on this job" (§4.3).
 - reserved → offered: the job goes lost / cancelled, or a manager takes it off. The use-by date
   does not move.
-- reserved → used: the check finds the code (§6), or a manager marks it used.
+- reserved → used: the check finds the code (§6), or staff mark it applied (§6.4).
 - offered / reserved → withdrawn: manager, reason required.
 - **A hire counts if it was reserved before the use-by date** — a booking made in October for a
   January hire, with the credit expiring in November, still gets it.
@@ -122,9 +126,11 @@ Green note: amount, offered date + source job + who, use-by, the reason in itali
 per-viewer convenience).
 
 **Use on this job** (screen 4): *Where does it go?*
-- **Off this job's hire** (not invoiced yet) → the discount line text `Goodwill credit GW-0012`
-  and the amount, capped at the job's ex-VAT value (warn when the hire is smaller: the rest
-  lapses), Copy + Open in HireHop.
+- **Off this job's hire** (not invoiced yet) → the amount to take off (defaults to the credit,
+  capped at the job's ex-VAT value — warn when the hire is smaller: the rest lapses) and the
+  instruction "discount the line(s) it's for by £X in HireHop and add **Goodwill credit GW-0012**
+  to that line's note" — Copy (the note text) + Open in HireHop. The note shows on the client's
+  quote and invoice, which is no bad thing: they see the goodwill applied.
 - **Against money they already owe** → pick one of the job's approved invoices with something
   owing (`hh_invoice_index` / the Money summary's own read); the instructions say "raise a
   credit note on OT-INV-… in HireHop with GW-0012 in its description".
@@ -156,8 +162,16 @@ line's NAME but **not its price**, and only for HireHop statuses 1–6 — not e
 
 - **Reserved credits: their own read.** For each `reserved` credit, read the job from HireHop
   through the broker (low priority): for `hire`, `items_to_supply_list.php`, looking for a line
-  whose name contains the ref, and its price; for `invoice`, the job's `billing_list.php`, looking
-  for an APPROVED credit note (`kind = 2`) whose description contains the ref. Reuse the existing
+  whose name or note contains the ref; for `invoice`, the job's `billing_list.php`, looking
+  for an APPROVED credit note (`kind = 2`) whose description contains the ref.
+- **PRE-REQUISITE, check before building phase 2:** that `items_to_supply_list.php` returns a line's
+  note text (the `add` field OP writes in `shop-drain.ts` `setLinePrice()`; OP has never READ it).
+  Test on one real job with a note typed in. If it doesn't, the hire case stays on the manual
+  "Mark as applied" (§6.4) and only the credit-note case is checked automatically.
+- **The amount is the staff member's word, not HireHop's.** A goodwill discount on a line looks
+  exactly like any other discount, so OP can't read "how much of this was goodwill". It records the
+  amount entered when the credit was applied; the read-back only proves the code is on the job.
+  For a credit note the amount IS readable (its value) and is checked against the credit. Reuse the existing
   parsers (the line-item fetch in `hirehop-job-sync.ts`, the billing read behind the Money summary)
   — never a second copy.
 - **Unreserved use: piggy-back on the stored lines.** After the hourly sync, look for
@@ -170,8 +184,8 @@ Gated on the job not being lost / cancelled; `is_internal` jobs are skipped.
 
 | Found | Result |
 |---|---|
-| Reserved, code found, amount ≤ credit | `used`, `used_amount_ex_vat` = the line / credit note's ex-VAT value, timeline line |
-| Reserved, code found, amount > credit | stays `reserved`, `check_problem` = "line is bigger than the credit" (amber) |
+| Reserved, code found | `used`, `used_amount_ex_vat` = the amount entered when applied (hire) or the credit note's ex-VAT value (invoice), timeline line |
+| Reserved for an invoice, credit note bigger than the credit | stays `reserved`, `check_problem` = "credit note is bigger than the credit" (amber) |
 | Reserved, nothing found, reserved > 24h ago | stays `reserved`, `check_problem` = "no goodwill line in HireHop yet" (amber on the job + close-out panel) |
 | Reserved job now lost / cancelled | back to `offered`, timeline line on both jobs |
 | Code found on a job it isn't reserved on, credit `offered` | reserved on that job and checked as above; FYI bell to whoever offered it |
@@ -182,28 +196,30 @@ All of these are **warnings, never gates** — nothing stops a job being confirm
 closed out.
 
 ### 6.3 The weak point
-OP can only find a line or credit note that carries the code. A goodwill line typed without it is
-invisible. The reservation (held at once, so nobody re-uses it) and the "no line after 24h" flag
+OP can only find a line or credit note that carries the code. A goodwill discount given without it
+is invisible, and on a hire OP can't check the amount (§6.1). The reservation (held at once, so nobody re-uses it) and the "no line after 24h" flag
 narrow that gap; they can't close it.
 
-### 6.4 Manual "Mark as used"
-For a manager, on the reserved chip: amount + a note, `used_how = 'manual'`. For the odd case the
-check can't see (a job never in OP, a credit note raised in Xero by mistake).
+### 6.4 "Mark as applied" (manual)
+Any staff, on the reserved chip, once they've put it in HireHop: the amount taken off (defaults to
+what was entered at Reserve) → `used`, `used_how = 'manual'`. In phase 1 this is the ONLY way a
+credit becomes used; phase 2's check then does it by itself when it finds the code, and this
+stays for whatever the check can't see (a job never in OP, a note it can't read, §6.1).
 
 ## 7. VAT
-Entered and shown ex VAT with 20% on top. On a hire that isn't 20% (an EU hire's zero-rated
-part), the line still takes £X ex VAT — the client simply gets less VAT back off; the "£Y total"
-is illustrative. *(open — §11.3)*
+**The credit is the net amount** (jon, 16 Nov 2026): £X ex VAT comes off, and VAT follows whatever
+it comes off. "£Y total" is shown for the usual 20% case; on a zero-rated part of an EU hire the
+client simply gets £X off with no VAT on top.
 
 ## 8. RBAC
-Offer / edit / withdraw / take off a job / mark used manually: `MANAGER_ROLES`. Reserve and read:
+Offer / edit / withdraw / take off a job: `MANAGER_ROLES`. Reserve, mark as applied and read:
 `STAFF_ROLES`. Routes under `/api/goodwill` (`routes/goodwill-credits.ts`), ids validated with
 `z.string().guid()`, edits through `partialForUpdate()`.
 
 ## 9. Phases
 
 1. **Record + offer + see it.** Migration, service, routes; the modal and doors 1a–1d; the
-   Client History note; Reserve; the org tab; manual "Mark as used"; "back to offered" when the
+   Client History note; Reserve; the org tab; "Mark as applied" (§6.4); "back to offered" when the
    reserved job is lost / cancelled (`job-close-cascade.ts`). Usable on its own.
 2. **The read-back check** (§6): reserved jobs read from HireHop, the stored-lines scan, the
    flags and bells, the close-out ledger line.
@@ -213,14 +229,35 @@ Offer / edit / withdraw / take off a job / mark used manually: `MANAGER_ROLES`. 
 ## 10. Not built, on purpose
 - OP writing the line or credit note to HireHop.
 - OP emailing the offer.
-- Credits held by a person rather than an org.
 - Carrying an unused remainder over.
 - Turning a credit into cash.
 
 ## 11. Open questions
-1. Reserve: any staff, or managers only? (proposed: any staff — §1.5)
-2. The discount line's nominal in HireHop — the same nominal as what it's taken off, or one
-   "Goodwill" nominal so the accounts show what goodwill cost? Ask the accountant; it decides what
-   the "Copy line" instructions say.
-3. VAT on a non-20% hire (§7) — fine as described?
-4. A self-drive client with no organisation — does it need person-held credits after all? (§10)
+1. ~~Reserve: any staff?~~ Yes — any staff applies, managers create (§1.5).
+2. ~~Nominal?~~ Settled by §1.8: it's a discount on the line it's for, so it sits on that line's
+   own nominal. The accounts won't show "what goodwill cost" as one figure; OP's own list
+   (§9.3) can.
+3. ~~VAT?~~ Net (§7).
+4. A client who is a person with no organisation — person-held credits (§12, proposed).
+
+## 12. Credits held by a person (proposed, 16 Nov 2026 — not yet agreed)
+
+For a client who is a person with no organisation: a self-drive hirer, a sole trader booked
+under their own name. `jobs.client_id` is always an organisation, so today such a job has no org
+to hold a credit. The person must be in the address book (a contact on the job); if they aren't,
+add them first. OP won't hold a credit against a bare name.
+
+How hard: **about a day on top of phase 1**, because endorsements already do "a person OR an org"
+and the shapes can be copied:
+- `goodwill_credits` gets `person_id` beside `organisation_id`, with a CHECK that exactly one is set
+  (the same shape as `artist_endorsements`).
+- **The offer modal's "For"** picks an org or a person. The default order is band, then client
+  org, then the job's primary contact when there's no org.
+- **Where it shows:** the Client History note also includes credits held by any person who is a
+  contact on the job (`job_contacts`; on New Enquiry, the contacts picked so far). It also includes
+  a person who is a current member of the client or band org, which is the same membership join
+  `endorsements.ts` `forClientContext()` uses.
+- **The person page** gets the same Goodwill tab and an Actions menu item as the org page.
+
+What it doesn't change: the GW code, states, read-back and RBAC are identical.
+
