@@ -313,6 +313,11 @@ open; read it before touching anything freelancer-facing.**
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
 Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisions only. The groundwork AI quoting will read.
 
+**DRAFT, Nov 2026:** `docs/GOODWILL-CREDIT-SPEC.md` — goodwill credit: "£X + VAT off your next hire (or
+what you owe), use by …", held by an org. **A promise, not money** — nothing moves in HireHop or Xero until
+it's used; OP never writes it to HireHop, it READS the `GW-0012` code back from the discount line / credit
+note. Nothing built; §1 is settled, §11 open.
+
 **PHASES 1–3 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
 (Money › Cash forecast, `/money/cashflow`): the committed line by week and the next 14 days by day,
 "cash that's yours" (minus excess held, refunds owed, VAT), a Monday balance check-in because Xero lags,
