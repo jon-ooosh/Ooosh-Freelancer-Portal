@@ -64,12 +64,15 @@ router.get('/stock/search', async (req: AuthRequest, res: Response) => {
  * Barcode lookup. Deliberately NOT category-filtered: if someone physically
  * scanned it they are holding it, and refusing to price a thing in the
  * customer's hand is a gate that strands staff (§2.4).
+ *
+ * Answers a LIST, empty when nothing carries the code — not a 404: "no match"
+ * is an ordinary answer to a scan and the till says so itself. More than one
+ * means HireHop has the barcode on several items; the till asks which.
  */
 router.get('/stock/barcode/:code', async (req: AuthRequest, res: Response) => {
   try {
-    const item = await findShopStockByBarcode(String(req.params.code));
-    if (!item) return res.status(404).json({ error: 'No stock item with that barcode.' });
-    res.json({ data: item });
+    const items = await findShopStockByBarcode(String(req.params.code));
+    res.json({ data: items });
   } catch (err) {
     console.error('[shop] barcode lookup failed:', err);
     res.status(500).json({ error: 'Could not look up that barcode.' });
