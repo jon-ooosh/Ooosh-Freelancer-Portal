@@ -1,9 +1,9 @@
 /**
  * Cancellation Calculator Service
  *
- * Implements Ooosh T&Cs clause 7:
- *   7.1 — Pre-hire cancellation (before hire starts)
- *   7.3 — Early return (after hire has started)
+ * Implements Ooosh T&Cs clause 8:
+ *   8.1 — Pre-hire cancellation (before hire starts)
+ *   8.3 — Early return (after hire has started)
  *
  * Uses post-VAT-adjustment figures when available for maximum accuracy.
  */
@@ -117,7 +117,7 @@ export function calculatePreHireCancellation(input: PreHireCancellationInput): C
       fee = percentFee;
       breakdownParts.push(`10% of £${totalHireCost.toFixed(2)} = £${fee.toFixed(2)}`);
     }
-    breakdownParts.push(`Notice period: ${noticeDays} days (>7 days — clause 7.1)`);
+    breakdownParts.push(`Notice period: ${noticeDays} days (>7 days — clause 8.1)`);
   } else if (noticeDays >= 2) {
     // 2-7 days notice: 25% of hire fee, minimum £25+VAT
     tier = '2_to_7_days';
@@ -130,7 +130,7 @@ export function calculatePreHireCancellation(input: PreHireCancellationInput): C
       fee = percentFee;
       breakdownParts.push(`25% of £${totalHireCost.toFixed(2)} = £${fee.toFixed(2)}`);
     }
-    breakdownParts.push(`Notice period: ${noticeDays} days (2-7 days — clause 7.1)`);
+    breakdownParts.push(`Notice period: ${noticeDays} days (2-7 days — clause 8.1)`);
   } else {
     // <2 days notice: 100% OR one week + early return sliding scale, whichever is LESSER
     tier = '<2_days';
@@ -148,12 +148,12 @@ export function calculatePreHireCancellation(input: PreHireCancellationInput): C
 
     if (cappedCharge < fullCharge) {
       fee = cappedCharge;
-      breakdownParts.push(`100% = £${fullCharge.toFixed(2)}, capped at one week + sliding scale = £${cappedCharge.toFixed(2)} (lesser applies — clause 7.1/7.3)`);
+      breakdownParts.push(`100% = £${fullCharge.toFixed(2)}, capped at one week + sliding scale = £${cappedCharge.toFixed(2)} (lesser applies — clause 8.1/8.3)`);
     } else {
       fee = fullCharge;
       breakdownParts.push(`100% of hire charge = £${fullCharge.toFixed(2)}`);
     }
-    breakdownParts.push(`Notice period: ${Math.max(0, noticeDays)} day${noticeDays !== 1 ? 's' : ''} (<2 days — clause 7.1)`);
+    breakdownParts.push(`Notice period: ${Math.max(0, noticeDays)} day${noticeDays !== 1 ? 's' : ''} (<2 days — clause 8.1)`);
   }
 
   // Build structured fee breakdown (only relevant tiers for this hire length)
@@ -181,8 +181,8 @@ export function calculatePreHireCancellation(input: PreHireCancellationInput): C
     tier === '2_to_7_days' ? `${noticeText} days' notice` :
     `less than 2 days' notice`;
   const summary = refundRounded > 0
-    ? `Cancelled with ${tierText}. £${feeRounded.toFixed(2)} retained as cancellation fee per hire terms (clause 7.1). See Cancellation Summary below for refund or balance owed.`
-    : `Cancelled with ${tierText}. Full hire charge of £${feeRounded.toFixed(2)} retained as cancellation fee per hire terms (clause 7.1).`;
+    ? `Cancelled with ${tierText}. £${feeRounded.toFixed(2)} retained as cancellation fee per hire terms (clause 8.1). See Cancellation Summary below for refund or balance owed.`
+    : `Cancelled with ${tierText}. Full hire charge of £${feeRounded.toFixed(2)} retained as cancellation fee per hire terms (clause 8.1).`;
 
   return {
     fee: feeRounded,
@@ -345,7 +345,7 @@ function buildFeeBreakdown(
 
 /**
  * Calculate tiered refund based on calendar day position.
- * Tiers (T&C clause 7.3):
+ * Tiers (T&C clause 8.3):
  *   Days 8-14:  50% refund per day
  *   Days 15-30: 75% refund per day
  *   Days 31+:   90% refund per day

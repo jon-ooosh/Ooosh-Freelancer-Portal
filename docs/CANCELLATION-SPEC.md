@@ -362,7 +362,8 @@ live plan (refund due / fee owing / settled) instead of the figure saved at canc
 refund" warns (confirm, not a gate) while the fee isn't invoiced yet.
 
 **The fee line's wording** (jon, 14 Oct 2026): `Cancellation fee (T&Cs clause 7) - cancelled 8 Oct 2026`
-(55 characters). The hire dates are left off because the invoice already prints Job Start / Job Finish.
+(55 characters). **Clause 8 since 16 Nov 2026** — cancellations are section 8 of the hire terms (8.1 cancellations,
+8.3 early returns); the code and its breakdown text now say 8 / 8.1 / 8.3. The hire dates are left off because the invoice already prints Job Start / Job Finish.
 16739's line read "…cancelled 8" only because HireHop cuts a line at 80 characters and the
 first version carried both. The Job Detail banner shows "Reading HireHop…" until the plan has
 answered, not the estimate saved at cancellation.
