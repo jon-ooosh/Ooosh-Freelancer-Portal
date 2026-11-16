@@ -24,6 +24,7 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import RecordActionsMenu from './RecordActionsMenu';
 import OfferGoodwillModal from './goodwill/OfferGoodwillModal';
+import { useGoodwillOnJob } from './goodwill/GoodwillJobChips';
 import {
   CloseOutPlan, CloseOutResult, loadCloseOutPlan, publishCloseOutPlan, subscribeCloseOutPlan,
   closeOutView, shortLine, TONE, money, fmtDay, fmtWhen, apiError, lastInvoiceStop,
@@ -81,6 +82,8 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
   const [notice, setNotice] = useState<string | null>(null);
   // "Offer goodwill credit" — the More menu, managers only (docs/GOODWILL-CREDIT-SPEC.md §4.1).
   const [offeringGoodwill, setOfferingGoodwill] = useState(false);
+  // Goodwill reserved / used on this job — a ledger line, for the record (spec §6).
+  const { credits: goodwillHere } = useGoodwillOnJob(jobId);
   const alive = useRef(true);
   useEffect(() => () => { alive.current = false; }, []);
 
@@ -531,6 +534,22 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
                 {plan.invoices.length > 1 && <span className={`mr-2 text-xs ${i.owing >= PENNY ? 'text-amber-700' : 'text-green-700'}`}>{i.owing >= PENNY ? `${money(i.owing)} owing` : 'paid'}</span>}
                 <span className="font-semibold">{money(i.gross)}</span>
               </span>
+            </div>
+          ))}
+          {/* Goodwill is already inside the figures above (a discount, or a credit note) —
+              shown for the record, never subtracted again. */}
+          {goodwillHere.map(g => (
+            <div key={g.id} className="flex justify-between gap-3 py-1.5 border-b border-gray-100" title={g.check_problem || undefined}>
+              <span className={g.status === 'used' && !g.check_problem ? 'text-gray-800' : 'text-amber-800'}>
+                Goodwill {g.ref}{' '}
+                <span className="text-xs text-gray-500">
+                  {g.status === 'used'
+                    ? (g.used_how === 'credit_note' ? `credit note ${g.used_hh_ref ?? ''}` : 'off the hire') + ' — already in the figures'
+                    : 'reserved — not in HireHop yet'}
+                </span>
+                {g.check_problem && <span className="block text-xs">⚠ {g.check_problem}</span>}
+              </span>
+              <span className="tabular-nums text-gray-600">{money(g.used_amount_ex_vat ?? g.reserved_amount_ex_vat ?? g.amount_ex_vat)} + VAT</span>
             </div>
           ))}
           {paidSoFar >= PENNY && (

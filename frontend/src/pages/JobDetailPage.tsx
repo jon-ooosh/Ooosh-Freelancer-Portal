@@ -65,6 +65,7 @@ import { loadCloseOutPlan, subscribeCloseOutPlan, closeOutView, TONE, CloseOutPl
 import { cancellationBalance, cancellationFeeGross } from '../lib/money';
 import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
 import GoodwillNote from '../components/goodwill/GoodwillNote';
+import GoodwillJobChips from '../components/goodwill/GoodwillJobChips';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -3659,6 +3660,9 @@ function JobDetailContent() {
                   NEW
                 </button>
               )}
+
+              {/* Goodwill reserved / used on this job (docs/GOODWILL-CREDIT-SPEC.md §6) — nothing when none */}
+              <GoodwillJobChips jobId={job.id} />
 
               {/* Create in HireHop button — only when no HH number */}
               {!job.hh_job_number && !editingHHNumber && (

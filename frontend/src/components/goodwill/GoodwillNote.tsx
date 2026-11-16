@@ -45,7 +45,7 @@ export default function GoodwillNote({ orgIds, personIds = [], jobId }: {
   const shown = credits.filter((c) => c.status === 'reserved' || !hidden.has(c.id));
   if (shown.length === 0 && !using) return null;
 
-  async function act(c: GoodwillCredit, path: 'applied' | 'unreserve', body: unknown = {}) {
+  async function act(c: GoodwillCredit, path: 'applied' | 'unreserve' | 'check', body: unknown = {}) {
     setBusy(c.id);
     setError('');
     try {
@@ -83,11 +83,15 @@ export default function GoodwillNote({ orgIds, personIds = [], jobId }: {
                 <div className="text-amber-900">
                   <b>Reserved on this job</b>: {money(c.reserved_amount_ex_vat ?? c.amount_ex_vat)} + VAT{' '}
                   {c.reserved_for === 'invoice' ? `against ${c.reserved_invoice_number || 'an invoice'} (a credit note in HireHop)` : 'off the hire (a discount in HireHop)'}.
-                  {' '}Put <b className="font-mono">{hireHopNote(c.ref)}</b> in {c.reserved_for === 'invoice' ? 'the credit note\'s description' : 'the line\'s note'}.
+                  {' '}Put <b className="font-mono">{hireHopNote(c.ref)}</b> in {c.reserved_for === 'invoice' ? 'the credit note\'s description' : 'the line\'s Item Note'}.
+                  {' '}OP checks HireHop every half hour and marks it used when it finds it.
                 </div>
+                {c.check_problem && <div className="mt-1 text-amber-900 font-medium">⚠ {c.check_problem}</div>}
                 <div className="flex flex-wrap gap-1.5 mt-1.5">
                   <button type="button" onClick={async () => { if (await copyText(hireHopNote(c.ref))) setCopied(c.id); }}
                     className="px-2 py-1 text-xs border border-gray-300 bg-white rounded hover:bg-gray-50">{copied === c.id ? '✓ Copied' : 'Copy note text'}</button>
+                  <button type="button" disabled={busy === c.id} onClick={() => void act(c, 'check')}
+                    className="px-2 py-1 text-xs border border-gray-300 bg-white rounded hover:bg-gray-50 disabled:opacity-50">{busy === c.id ? 'Checking…' : 'Check HireHop now'}</button>
                   <button type="button" disabled={busy === c.id}
                     onClick={() => { if (confirm(`Mark ${c.ref} as applied in HireHop? Anything it didn't take lapses.`)) void act(c, 'applied'); }}
                     className="px-2 py-1 text-xs bg-green-700 text-white rounded hover:bg-green-800 disabled:opacity-50">Mark as applied</button>
@@ -210,7 +214,7 @@ function UseGoodwillModal({ credit, jobId, onClose, onDone }: {
             <div className="text-xs font-semibold text-gray-700">Then in HireHop</div>
             <p className="text-xs text-gray-600">
               {where === 'hire'
-                ? `Discount the line(s) it's for by ${money(amountOk ? net : credit.amount_ex_vat)} in all, and put this in that line's note:`
+                ? `Discount the line(s) it's for by ${money(amountOk ? net : credit.amount_ex_vat)} in all, and put this in that line's Item Note:`
                 : `Raise a credit note for ${money(amountOk ? net : credit.amount_ex_vat)} + VAT on the invoice, with this in its description:`}
             </p>
             <div className="flex items-center gap-2">

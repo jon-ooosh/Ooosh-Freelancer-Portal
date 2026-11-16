@@ -7,8 +7,9 @@ import { query } from '../config/database';
 import { ukToday } from '../services/uk-date';
 import {
   listForOwner, listForContext, ownerChoicesForJob, getGoodwillCredit, offerGoodwill, editGoodwill,
-  reserveGoodwill, unreserveGoodwill, markGoodwillApplied, withdrawGoodwill, GoodwillError,
+  reserveGoodwill, unreserveGoodwill, markGoodwillApplied, withdrawGoodwill, GoodwillError, listOnJob,
 } from '../services/goodwill-credits';
+import { checkReservedGoodwill } from '../services/goodwill-check';
 
 // Goodwill credit (docs/GOODWILL-CREDIT-SPEC.md). Managers offer, change, withdraw
 // and take a credit off a job; any staff role reserves it on a job and marks it
@@ -51,6 +52,25 @@ router.get('/context', async (req: AuthRequest, res: Response) => {
     }
     res.json({ data: await listForContext({ orgIds: idList(req.query.org_ids), personIds, jobId }) });
   } catch (err) { fail(res, err, 'context'); }
+});
+
+// Reserved or used on this job — the job header chip and the close-out ledger line (phase 2)
+router.get('/on-job/:jobId', async (req: AuthRequest, res: Response) => {
+  try {
+    if (!isUuid(req.params.jobId)) { res.status(400).json({ error: 'Bad job id' }); return; }
+    res.json({ data: await listOnJob(String(req.params.jobId)) });
+  } catch (err) { fail(res, err, 'on job'); }
+});
+
+// "Check now" — read HireHop for one reserved credit straight away (spec §6.1)
+router.post('/:id/check', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    if (!isUuid(id)) { res.status(400).json({ error: 'Bad id' }); return; }
+    const g = await checkReservedGoodwill(id);
+    if (!g) { res.status(404).json({ error: 'Goodwill credit not found' }); return; }
+    res.json({ data: g });
+  } catch (err) { fail(res, err, 'check'); }
 });
 
 // Who a credit offered from this job could be for (the offer modal's "For")

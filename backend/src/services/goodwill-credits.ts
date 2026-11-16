@@ -48,6 +48,10 @@ export interface GoodwillCredit {
   used_how: string | null;
   withdrawn_at: string | null;
   withdrawn_reason: string | null;
+  /** What the HireHop read-back last found wrong (spec §6.2); null = nothing. */
+  check_problem: string | null;
+  last_checked_at: string | null;
+  used_hh_ref: string | null;
 }
 
 export class GoodwillError extends Error {
@@ -63,6 +67,13 @@ export const EFFECTIVE_STATUS_SQL = `CASE
   WHEN g.status = 'offered' AND g.expires_on < ${UK_TODAY_SQL} THEN 'expired'
   ELSE g.status END`;
 
+/** "Still free to reserve", for a guarded UPDATE on `goodwill_credits g` — the same answer as
+ *  EFFECTIVE_STATUS_SQL = 'offered', written so two people reserving at once can't both win. */
+export const FREE_TO_RESERVE_SQL = `g.expires_on >= ${UK_TODAY_SQL}
+        AND (g.status = 'offered'
+             OR (g.status = 'reserved' AND g.reserved_for = 'hire'
+                 AND EXISTS (SELECT 1 FROM jobs rj WHERE rj.id = g.reserved_job_id AND rj.pipeline_status IN ('lost', 'cancelled'))))`;
+
 const SELECT = `
   SELECT g.id, g.ref, g.organisation_id, g.person_id,
          COALESCE(o.name, NULLIF(TRIM(CONCAT_WS(' ', COALESCE(NULLIF(p.preferred_name, ''), p.first_name), p.last_name)), ''), '—') AS owner_name,
@@ -75,7 +86,7 @@ const SELECT = `
          g.reserved_for, g.reserved_invoice_number,
          g.reserved_amount_ex_vat::float AS reserved_amount_ex_vat, g.reserved_at,
          g.used_amount_ex_vat::float AS used_amount_ex_vat, g.used_at, g.used_how,
-         g.withdrawn_at, g.withdrawn_reason
+         g.withdrawn_at, g.withdrawn_reason, g.check_problem, g.last_checked_at, g.used_hh_ref
     FROM goodwill_credits g
     LEFT JOIN organisations o ON o.id = g.organisation_id
     LEFT JOIN people p ON p.id = g.person_id
@@ -99,6 +110,23 @@ async function getRow(id: string): Promise<GoodwillCredit | null> {
 
 export async function getGoodwillCredit(id: string): Promise<GoodwillCredit | null> {
   return getRow(id);
+}
+
+/** By its printed code (GW-0012), any case. */
+export async function getGoodwillByRef(ref: string): Promise<GoodwillCredit | null> {
+  const r = await query(`${SELECT} WHERE g.ref = $1`, [ref.toUpperCase()]);
+  return (r.rows[0] as GoodwillCredit) || null;
+}
+
+/** Reserved or used on this job — the job's goodwill chip and the close-out ledger line. */
+export async function listOnJob(jobId: string): Promise<GoodwillCredit[]> {
+  const r = await query(
+    `SELECT * FROM (${SELECT} WHERE g.reserved_job_id = $1) x
+      WHERE x.status IN ('reserved', 'used')
+      ORDER BY x.reserved_at`,
+    [jobId],
+  );
+  return r.rows;
 }
 
 /** Every credit an org or person holds, newest first (the Goodwill tab). */
@@ -163,7 +191,7 @@ export async function ownerChoicesForJob(jobId: string): Promise<Array<{ kind: '
 }
 
 /** A line on the timelines this credit touches. Never throws — a note never fails the action. */
-async function note(g: GoodwillCredit, text: string, userId: string, jobIds: Array<string | null>) {
+export async function noteGoodwill(g: GoodwillCredit, text: string, userId: string, jobIds: Array<string | null>) {
   try {
     const jobs = Array.from(new Set(jobIds.filter((j): j is string => !!j)));
     for (const jobId of jobs) {
@@ -203,7 +231,7 @@ export async function offerGoodwill(input: OfferInput, userId: string): Promise<
       input.expires_on || ukDatePlus(365)],
   );
   const g = (await getRow(r.rows[0].id))!;
-  await note(g, `🎁 Goodwill credit ${g.ref} offered to ${g.owner_name}: ${plusVat(g.amount_ex_vat)} off a future hire or money owed, use by ${day(g.expires_on)}. Why: ${g.reason}`,
+  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} offered to ${g.owner_name}: ${plusVat(g.amount_ex_vat)} off a future hire or money owed, use by ${day(g.expires_on)}. Why: ${g.reason}`,
     userId, [g.source_job_id]);
   return g;
 }
@@ -226,7 +254,7 @@ export async function editGoodwill(id: string, patch: { amount_ex_vat?: number; 
     patch.amount_ex_vat !== undefined && g.amount_ex_vat !== before.amount_ex_vat ? `amount ${money(before.amount_ex_vat)} → ${money(g.amount_ex_vat)} + VAT` : '',
     patch.expires_on !== undefined && g.expires_on !== before.expires_on ? `use by ${day(before.expires_on)} → ${day(g.expires_on)}` : '',
   ].filter(Boolean).join(', ');
-  if (changes) await note(g, `🎁 Goodwill credit ${g.ref} changed: ${changes}`, userId, []);
+  if (changes) await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} changed: ${changes}`, userId, []);
   return g;
 }
 
@@ -253,12 +281,8 @@ export async function reserveGoodwill(id: string, input: ReserveInput, userId: s
   const r = await query(
     `UPDATE goodwill_credits g
         SET status = 'reserved', reserved_job_id = $2, reserved_for = $3, reserved_invoice_number = $4,
-            reserved_amount_ex_vat = $5, reserved_by = $6, reserved_at = NOW(), updated_at = NOW()
-      WHERE g.id = $1
-        AND g.expires_on >= ${UK_TODAY_SQL}
-        AND (g.status = 'offered'
-             OR (g.status = 'reserved' AND g.reserved_for = 'hire'
-                 AND EXISTS (SELECT 1 FROM jobs rj WHERE rj.id = g.reserved_job_id AND rj.pipeline_status IN ('lost', 'cancelled'))))
+            reserved_amount_ex_vat = $5, reserved_by = $6, reserved_at = NOW(), check_problem = NULL, updated_at = NOW()
+      WHERE g.id = $1 AND ${FREE_TO_RESERVE_SQL}
       RETURNING g.id`,
     [id, input.job_id, input.reserved_for, input.reserved_for === 'invoice' ? (input.invoice_number || null) : null,
       input.amount_ex_vat, userId],
@@ -268,7 +292,7 @@ export async function reserveGoodwill(id: string, input: ReserveInput, userId: s
   const where = g.reserved_for === 'invoice'
     ? `against ${g.reserved_invoice_number || 'an invoice'} (a credit note in HireHop with ${g.ref} in its description)`
     : `off the hire (a discount in HireHop with "Goodwill credit ${g.ref}" in the line's note)`;
-  await note(g, `🎁 Goodwill credit ${g.ref} reserved on this job: ${money(input.amount_ex_vat)} + VAT ${where}.`, userId, [g.reserved_job_id]);
+  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} reserved on this job: ${money(input.amount_ex_vat)} + VAT ${where}.`, userId, [g.reserved_job_id]);
   return g;
 }
 
@@ -280,12 +304,12 @@ export async function unreserveGoodwill(id: string, userId: string): Promise<Goo
   await query(
     `UPDATE goodwill_credits SET status = 'offered', reserved_job_id = NULL, reserved_for = NULL,
             reserved_invoice_number = NULL, reserved_amount_ex_vat = NULL, reserved_by = NULL, reserved_at = NULL,
-            updated_at = NOW()
+            check_problem = NULL, updated_at = NOW()
       WHERE id = $1 AND status = 'reserved'`,
     [id],
   );
   const g = (await getRow(id))!;
-  await note(g, `🎁 Goodwill credit ${g.ref} taken off job ${before.reserved_job_number ?? ''} — it's free to use again.`, userId, [before.reserved_job_id]);
+  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} taken off job ${before.reserved_job_number ?? ''} — it's free to use again.`, userId, [before.reserved_job_id]);
   return g;
 }
 
@@ -298,13 +322,13 @@ export async function markGoodwillApplied(id: string, amountExVat: number | null
   if (amount <= 0 || amount > before.amount_ex_vat + 0.004) throw new GoodwillError(`Between £0.01 and ${money(before.amount_ex_vat)}`);
   await query(
     `UPDATE goodwill_credits SET status = 'used', used_amount_ex_vat = $2, used_at = NOW(), used_by = $3,
-            used_how = 'manual', updated_at = NOW()
+            used_how = 'manual', check_problem = NULL, updated_at = NOW()
       WHERE id = $1 AND status = 'reserved'`,
     [id, amount, userId],
   );
   const g = (await getRow(id))!;
   const lapsed = before.amount_ex_vat - amount;
-  await note(g, `🎁 Goodwill credit ${g.ref} applied on this job: ${money(amount)} + VAT off.${lapsed > 0.004 ? ` The other ${money(lapsed)} + VAT lapses.` : ''}`,
+  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} applied on this job: ${money(amount)} + VAT off.${lapsed > 0.004 ? ` The other ${money(lapsed)} + VAT lapses.` : ''}`,
     userId, [g.reserved_job_id]);
   return g;
 }
@@ -321,6 +345,6 @@ export async function withdrawGoodwill(id: string, reason: string, userId: strin
     [id, userId, reason.trim()],
   );
   const g = (await getRow(id))!;
-  await note(g, `🎁 Goodwill credit ${g.ref} withdrawn. Why: ${reason.trim()}`, userId, [before.reserved_job_id]);
+  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} withdrawn. Why: ${reason.trim()}`, userId, [before.reserved_job_id]);
   return g;
 }

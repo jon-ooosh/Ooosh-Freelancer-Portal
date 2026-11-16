@@ -229,6 +229,21 @@ export function startScheduler() {
   });
   console.log('Scheduler: card-reader receipt sweep scheduled every 5 minutes');
 
+  // Goodwill read-back (docs/GOODWILL-CREDIT-SPEC.md §6): reserved credits read from HireHop
+  // and GW codes on stored lines. Read-only on HireHop. At :15 and :45, between the job syncs.
+  if (isHireHopConfigured()) {
+    cron.schedule('15,45 * * * *', async () => {
+      try {
+        const { runGoodwillCheck } = await import('../services/goodwill-check');
+        const r = await runGoodwillCheck();
+        if (r.checked || r.codesSeen) console.log(`Scheduler: goodwill check — ${r.checked} reserved checked, ${r.codesSeen} codes on lines`);
+      } catch (err) {
+        console.error('Scheduler: goodwill check failed:', err instanceof Error ? err.message : err);
+      }
+    });
+    console.log('Scheduler: goodwill read-back scheduled at :15 and :45');
+  }
+
   // ── HireHop Job Sync ──────────────────────────────────────────────────
   if (!isHireHopConfigured()) {
     console.log('Scheduler: HireHop not configured — job sync disabled');
