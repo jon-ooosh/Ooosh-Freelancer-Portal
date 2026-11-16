@@ -19,6 +19,10 @@ import { api } from '../../services/api';
 import { gbp } from '../../lib/cashflow';
 import { ukToday } from '../../lib/ukDate';
 import CostCaptureModal from '../CostCaptureModal';
+import RecordActionsMenu from '../RecordActionsMenu';
+import OfferGoodwillModal from '../goodwill/OfferGoodwillModal';
+import { useAuthStore } from '../../hooks/useAuthStore';
+import { hasManagerRole } from '../../lib/roles';
 import {
   AmountInputs, EMPTY_AMOUNTS, amountsAddUp, amountsFromNumbers, inferVatMode, readAmounts,
   type AmountStrings, type VatMode,
@@ -98,6 +102,11 @@ export default function DamageMoneyCard({ problemId, claimId, jobId, vehicleId, 
   const [pickingProblem, setPickingProblem] = useState(false);
   const [editing, setEditing] = useState<{ kind: Kind; line: MoneyLine | null } | null>(null);
   const [editingEstimate, setEditingEstimate] = useState(false);
+  // "Offer goodwill credit" — a Problem's ⋯ menu, managers only (docs/GOODWILL-CREDIT-SPEC.md §4.1).
+  // On a Problem only: a claim's goodwill is offered from its Problem.
+  const user = useAuthStore((s) => s.user);
+  const canOfferGoodwill = !!problemId && hasManagerRole(user?.role);
+  const [offeringGoodwill, setOfferingGoodwill] = useState(false);
 
   const url = claimId ? `/damage-money/claim/${claimId}` : `/damage-money/problem/${problemId}`;
   const load = useCallback(async () => {
@@ -149,7 +158,13 @@ export default function DamageMoneyCard({ problemId, claimId, jobId, vehicleId, 
   const t = data.totals;
 
   return (
-    <Shell>
+    <Shell action={canOfferGoodwill ? (
+      <RecordActionsMenu actions={[{ label: 'Offer goodwill credit…', title: 'Say sorry with money off their next hire or what they owe — not a refund', onClick: () => setOfferingGoodwill(true) }]} />
+    ) : undefined}>
+      {offeringGoodwill && (
+        <OfferGoodwillModal jobId={jobId} sourceKind="problem" sourceJobId={jobId} sourceIssueId={problemId}
+          onClose={() => setOfferingGoodwill(false)} />
+      )}
       {error && <div className="text-xs text-red-600 mb-2">{error}</div>}
 
       {onClaim && (
@@ -348,10 +363,13 @@ export default function DamageMoneyCard({ problemId, claimId, jobId, vehicleId, 
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+function Shell({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) {
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-4">
-      <h3 className="text-sm font-semibold text-gray-900 mb-3">Money</h3>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-gray-900">Money</h3>
+        {action}
+      </div>
       {children}
     </div>
   );

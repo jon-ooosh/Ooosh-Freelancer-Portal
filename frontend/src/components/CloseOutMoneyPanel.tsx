@@ -22,6 +22,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
+import RecordActionsMenu from './RecordActionsMenu';
+import OfferGoodwillModal from './goodwill/OfferGoodwillModal';
 import {
   CloseOutPlan, CloseOutResult, loadCloseOutPlan, publishCloseOutPlan, subscribeCloseOutPlan,
   closeOutView, shortLine, TONE, money, fmtDay, fmtWhen, apiError, lastInvoiceStop,
@@ -77,6 +79,8 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
   // "Add a charge" — Completed jobs only, managers only (spec §4.6).
   const [charge, setCharge] = useState<{ description: string; amount: string; reason: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // "Offer goodwill credit" — the More menu, managers only (docs/GOODWILL-CREDIT-SPEC.md §4.1).
+  const [offeringGoodwill, setOfferingGoodwill] = useState(false);
   const alive = useRef(true);
   useEffect(() => () => { alive.current = false; }, []);
 
@@ -398,6 +402,11 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
           <button type="button" onClick={() => setExpanded(false)} aria-expanded
             className="ml-auto text-sm font-semibold text-ooosh-600 hover:text-ooosh-800">Hide ▴</button>
         )}
+        {isManager && (
+          <div className={notBack ? '' : 'ml-auto'}>
+            <RecordActionsMenu actions={[{ label: 'Offer goodwill credit…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setOfferingGoodwill(true) }]} />
+          </div>
+        )}
       </div>
 
       {/* Five steps */}
@@ -536,6 +545,10 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
             </button>
           </div>
         </div>
+      )}
+      {offeringGoodwill && (
+        <OfferGoodwillModal jobId={jobId} sourceKind={cancel ? 'cancellation' : 'close_out'} sourceJobId={jobId}
+          onClose={() => setOfferingGoodwill(false)} />
       )}
     </div>
   );

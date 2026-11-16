@@ -20,6 +20,8 @@ import EntityTabs from '../components/EntityTabs';
 import RecordActionsMenu from '../components/RecordActionsMenu';
 import WorkingTermsSummary from '../components/WorkingTermsSummary';
 import EndorsementsPanel from '../components/EndorsementsPanel';
+import GoodwillTab from '../components/goodwill/GoodwillTab';
+import OfferGoodwillModal from '../components/goodwill/OfferGoodwillModal';
 import EmailProblemFlag from '../components/EmailProblemFlag';
 import { useEmailProblems } from '../hooks/useEmailProblems';
 
@@ -105,7 +107,7 @@ interface Interaction {
 // would remount the page. The hand-written tab/cache resets below are kept as
 // belt-and-braces, and the tab effect still handles same-page ?tab= changes.
 const VALID_PERSON_TABS = [
-  'timeline', 'hire_history', 'freelancer', 'details', 'relationships', 'excess', 'held', 'storage', 'pcn',
+  'timeline', 'hire_history', 'freelancer', 'details', 'relationships', 'excess', 'held', 'storage', 'pcn', 'goodwill',
 ] as const;
 type PersonTab = (typeof VALID_PERSON_TABS)[number];
 
@@ -136,6 +138,9 @@ function PersonDetailContent() {
 
   // Edit panel
   const [showEdit, setShowEdit] = useState(false);
+  // Goodwill credit held by a person (docs/GOODWILL-CREDIT-SPEC.md §12) — the bump re-reads the tab.
+  const [showGoodwill, setShowGoodwill] = useState(false);
+  const [goodwillBump, setGoodwillBump] = useState(0);
 
   // Add relationship
   const [showAddRole, setShowAddRole] = useState(false);
@@ -421,6 +426,7 @@ function PersonDetailContent() {
             {/* Do Not Hire is set in Edit → Working Terms; Delete is rare, so it lives in ⋯ */}
             <RecordActionsMenu
               actions={[
+                ...(isAdmin ? [{ label: 'Offer goodwill credit…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setShowGoodwill(true) }] : []),
                 { label: 'Delete', danger: true, onClick: () => { if (confirm(`Delete ${person.first_name} ${person.last_name}?`)) handleDelete(); } },
               ]}
             />
@@ -497,6 +503,7 @@ function PersonDetailContent() {
           { key: 'held', label: heldCount ? `Held Items (${heldCount})` : 'Held Items', secondary: true, hasContent: tabPresence.held },
           { key: 'storage', label: 'Storage', secondary: true, hasContent: tabPresence.storage },
           ...(isFreelancer ? [{ key: 'pcn' as const, label: 'PCNs', secondary: true, hasContent: tabPresence.pcn }] : []),
+          { key: 'goodwill', label: 'Goodwill', secondary: true, hasContent: tabPresence.goodwill },
         ]}
       />
 
@@ -928,6 +935,15 @@ function PersonDetailContent() {
 
       {activeTab === 'pcn' && id && (
         <PcnHistorySection entityType="person" entityId={id} heading="🅿️ Penalty Charge Notices" />
+      )}
+
+      {/* Goodwill Tab — credits this person holds (docs/GOODWILL-CREDIT-SPEC.md §12) */}
+      {activeTab === 'goodwill' && id && (
+        <GoodwillTab key={goodwillBump} owner={{ kind: 'person', id, name: `${person.first_name} ${person.last_name}` }} />
+      )}
+      {showGoodwill && id && (
+        <OfferGoodwillModal owner={{ kind: 'person', id, name: `${person.first_name} ${person.last_name}` }} sourceKind="person"
+          onClose={() => setShowGoodwill(false)} onDone={() => setGoodwillBump((n) => n + 1)} />
       )}
 
       {/* Edit Panel */}

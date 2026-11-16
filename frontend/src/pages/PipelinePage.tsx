@@ -16,6 +16,7 @@ import WatchBandTick from '../components/leads/WatchBandTick';
 import { PROJECT_COPY } from '../lib/projectCopy';
 import { ukToday } from '../lib/ukDate';
 import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
+import GoodwillNote from '../components/goodwill/GoodwillNote';
 
 // Roles available for the "Linked organisations" picker on a job. These map
 // to `job_organisations.role` (VARCHAR(50), free-text). Keep aligned with the
@@ -3033,6 +3034,10 @@ function NewEnquiryModal({
                 )}
               </div>
             )}
+
+            {/* Goodwill credit to use — only when there is any (docs/GOODWILL-CREDIT-SPEC.md §4.3).
+                No job yet, so it can be seen here and used once the enquiry is saved. */}
+            <GoodwillNote orgIds={[clientId, bandId]} personIds={Array.from(tickedExistingPersonIds)} />
 
             {/* Endorsed artists — only when there are any */}
             <EndorsementsNote endorsements={clientHistory!.endorsements} />

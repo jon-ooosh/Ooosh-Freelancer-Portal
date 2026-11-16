@@ -13,6 +13,7 @@ import notificationsRouter from './notifications';
 import dashboardRouter from './dashboard';
 import duplicatesRouter from './duplicates';
 import endorsementsRouter from './endorsements';
+import goodwillCreditsRouter from './goodwill-credits';
 import hirehopRouter from './hirehop';
 import pipelineRouter from './pipeline';
 import jobProjectsRouter from './job-projects';
@@ -94,6 +95,7 @@ router.use('/notifications', notificationsRouter);
 router.use('/dashboard', dashboardRouter);
 router.use('/duplicates', duplicatesRouter);
 router.use('/endorsements', endorsementsRouter);
+router.use('/goodwill', goodwillCreditsRouter);  // goodwill credit (docs/GOODWILL-CREDIT-SPEC.md)
 router.use('/hirehop', hirehopRouter);
 router.use('/pipeline', pipelineRouter);
 router.use('/job-projects', jobProjectsRouter);  // festival-style "these jobs belong together" (docs/JOB-PROJECTS-SPEC.md)

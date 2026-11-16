@@ -65,6 +65,7 @@ import { ukToday } from '../lib/ukDate';
 import { loadCloseOutPlan, subscribeCloseOutPlan, closeOutView, TONE, CloseOutPlan } from '../lib/closeOutPlan';
 import { cancellationBalance, cancellationFeeGross } from '../lib/money';
 import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
+import GoodwillNote from '../components/goodwill/GoodwillNote';
 
 
 // Stable reference — HeldItemsSection takes `kinds` as an effect dependency, so
@@ -7013,6 +7014,9 @@ function JobDetailContent() {
                 )}
               </div>
             )}
+
+            {/* Goodwill credit to use, or reserved on this job (docs/GOODWILL-CREDIT-SPEC.md §4.3) */}
+            <GoodwillNote orgIds={[job.client_id, jobOrgs.find(jo => jo.role === 'band')?.organisation_id]} jobId={job.id} />
 
             {/* Endorsed artists — only when there are any */}
             <EndorsementsNote endorsements={clientHistoryData!.endorsements} />

@@ -28,6 +28,7 @@ function probesFor(entity: 'person' | 'organisation', id: string, opts: { pcn?: 
       ['rehearsal', `/rehearsals/profile/${id}`, (r) => !!r?.data],
       ['pcns', `/pcns/by-org/${id}`, rows],
       ['ooh', `/ooh-return/by-organisation/${id}`, (r) => (r?.data?.totalIncidents || 0) > 0],
+      ['goodwill', `/goodwill?organisation_id=${id}`, rows],
     ];
   }
   return [
@@ -35,6 +36,7 @@ function probesFor(entity: 'person' | 'organisation', id: string, opts: { pcn?: 
     ['held', `/holding/by-person/${id}`, rows],
     ['storage', `/storage/by-person/${id}`, (r) => (r?.data?.tenancies || []).length + (r?.data?.waiting || []).length > 0],
     ...(opts.pcn ? [['pcn', `/pcns/by-person/${id}`, rows] as Probe] : []),
+    ['goodwill', `/goodwill?person_id=${id}`, rows],
   ];
 }
 
