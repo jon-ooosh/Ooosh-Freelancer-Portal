@@ -29,7 +29,6 @@ import OohReturnModal from '../components/OohReturnModal';
 import JobOohReturns from '../components/JobOohReturns';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
 import JobContactsCard from '../components/JobContactsCard';
-import ReviewRequestLine from '../components/ReviewRequestLine';
 import { VenuePicker } from '../components/VenuePicker';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
@@ -4702,9 +4701,6 @@ function JobDetailContent() {
             mark a primary. Drives where client-facing emails route. */}
         {id && <JobContactsCard jobId={id} onChanged={loadJob} />}
 
-        {/* Jon's review request email — the "don't send" tick, then what happened (docs/BUSINESS-FIGURES-SPEC.md §8c) */}
-        {id && <ReviewRequestLine jobId={id} pipelineStatus={job.pipeline_status || ''} isInternal={!!job.is_internal} />}
-
         {/* Collapsible Details & Notes */}
         <div ref={detailsNotesRef} className="mt-3 pt-3 border-t border-gray-100">
           <button
@@ -6867,6 +6863,7 @@ function JobDetailContent() {
           clientId={job?.client_id}
           clientName={jobClientName(job) ?? undefined}
           hireStart={job?.job_date || job?.out_date}
+          isInternal={!!job?.is_internal}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
         />
@@ -8131,6 +8128,7 @@ function StatusTransitionModal({
   clientId,
   clientName,
   hireStart,
+  isInternal,
 }: {
   targetStatus: PipelineStatus | 'completed';
   saving: boolean;
@@ -8140,6 +8138,7 @@ function StatusTransitionModal({
   clientId?: string | null;
   clientName?: string | null;
   hireStart?: string | null;
+  isInternal?: boolean;
 }) {
   const [holdReason, setHoldReason] = useState<HoldReason>('fully_booked');
   const [holdDetail, setHoldDetail] = useState('');
@@ -8159,6 +8158,22 @@ function StatusTransitionModal({
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
   // "Watch this band for their next tour" (lost / completed) — the org, or null.
   const [watchOrgId, setWatchOrgId] = useState<string | null>(null);
+  // Jon's review email (docs/BUSINESS-FIGURES-SPEC.md §8c): ticked = send it the day after
+  // completion; unticked = "don't send". Hidden on an internal job, or once one was sent.
+  const [sendReview, setSendReview] = useState(true);
+  const [reviewAlreadySent, setReviewAlreadySent] = useState(false);
+  useEffect(() => {
+    if (targetStatus !== 'completed' || !jobId || isInternal) return;
+    let live = true;
+    api.get<{ data: { status: string } }>(`/review-requests/job/${jobId}`)
+      .then((r) => {
+        if (!live) return;
+        if (r.data.status === 'skipped') setSendReview(false);
+        if (r.data.status === 'sent') setReviewAlreadySent(true);
+      })
+      .catch(() => { /* default: send */ });
+    return () => { live = false; };
+  }, [targetStatus, jobId, isInternal]);
   const offerWatch = targetStatus === 'completed'
     || (targetStatus === 'lost' && lostReason !== ALTERNATIVE_QUOTE_LOST_REASON);
 
@@ -8282,6 +8297,7 @@ function StatusTransitionModal({
       if (keepRequirementIds.size > 0) data.keep_requirement_ids = Array.from(keepRequirementIds);
     } else if (targetStatus === 'completed') {
       data.retro_rating = retroRating;
+      if (!isInternal && !reviewAlreadySent) data.send_review_email = sendReview;
       const retroText = [
         retroNotes.trim(),
         retroNextTime.trim() ? `Next time: ${retroNextTime.trim()}` : '',
@@ -8641,6 +8657,22 @@ function StatusTransitionModal({
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* Jon's review email — the "don't send" tick lives here, at completion (jon, Nov 2026) */}
+        {targetStatus === 'completed' && !isInternal && !reviewAlreadySent && (
+          <div className="mb-4">
+            <label className="flex items-start gap-2 text-sm text-gray-700 cursor-pointer">
+              <input type="checkbox" className="mt-0.5" checked={sendReview} onChange={(e) => setSendReview(e.target.checked)} />
+              <span>
+                Send Jon's review email tomorrow
+                <span className="block text-xs text-gray-500">
+                  Untick for anything awkward. It isn't sent anyway if this is more than 10 days after the return,
+                  or the client was asked in the last year.
+                </span>
+              </span>
+            </label>
           </div>
         )}
 

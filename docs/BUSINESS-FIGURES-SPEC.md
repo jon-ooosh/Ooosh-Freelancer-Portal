@@ -234,9 +234,12 @@ completed job's client would see it; writes no row) and the last 50 jobs: sent, 
   date; internal job; no client email (the resolver fell back to info@); the address used "Don't ask me
   again"; the client **organisation or the address** was sent one in the last **365 days** (two jobs for
   one client in one run send once).
-- **"Don't send":** the line under Contacts on the job page (`components/ReviewRequestLine.tsx`), from
-  Confirmed onwards, any staff role. Unticked = a `skipped` row; re-ticked removes it. A sent email is
-  never undone. After the day it shows what happened.
+- **"Don't send":** the **Completion modal**'s "Send Jon's review email tomorrow" tick (moved there from the
+  job header, jon 16 Nov 2026 — the header was busy). Saved with the status change (`send_review_email`
+  on `PATCH /pipeline/:id/status` → `setJobReviewSkip()`); unticked = a `skipped` row, ticked removes one.
+  Hidden on an internal job or once one was sent; a sent email is never undone. A job completed in
+  HireHop has no modal, so it sends. What happened lands on the job's Activity Timeline — "sent to …" or
+  "not sent: <reason>" — and on Marketing › Review emails.
 - **Who:** `resolveClientEmailTarget(jobId, 'review_request')` — the PRIMARY only, never the CCs. Greeting
   = the resolver's name for the primary; none (an org mailbox) → "Hi there," and the subject "How did it
   go?" — never a placeholder. From **"Jon at Ooosh Tours"** on the usual sending address,
@@ -245,7 +248,9 @@ completed job's client would see it; writes no row) and the last 50 jobs: sent, 
 - **One row per job** (`review_requests`, UNIQUE job), written BEFORE the send; a failed send becomes
   `not_sent` "Email failed: …" and is never retried. The job timeline gets "Jon's review request email
   sent to …".
-- **Links:** the review box (`GOOGLE_REVIEW_URL`); the Mailchimp form with their email, first and last
+- **Links:** the review box through the tracked link **go.oooshtours.co.uk/google-review** (migration 346
+  makes it, `REVIEW_LINK_CODE`), so its clicks show on Tracked links — read them as "up to", mail scanners
+  that open links count unless they say they're a bot. Pausing that link sends the button to the home page; the Mailchimp form with their email, first and last
   name filled in (`mailingListUrl()` — the classic form, `legacy_form=1`, which fills MERGE0/1/2 from the
   link; checked 13 Nov 2026 — it's still one press of Subscribe, so Mailchimp keeps their consent); and
   **"Don't ask me again"** → `/api/review-requests/stop?t=…` (token audience `review_optout`, 2 years),

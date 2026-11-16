@@ -2990,7 +2990,7 @@ const templates: Record<string, EmailTemplate> = {
 
   // Jon's review request (docs/BUSINESS-FIGURES-SPEC.md §8c) — the day after a hire
   // is Completed, from "Jon at Ooosh Tours" with replies to jon@. Wording agreed with
-  // jon, 13 Nov 2026. The subject is set by services/review-requests.ts ("How did it
+  // jon, 13 Nov 2026 (two lines joined up 16 Nov). The subject is set by services/review-requests.ts ("How did it
   // go, Sam?", or "How did it go?" with no name), so no placeholder ever shows. The
   // job number is in the small print rather than the subject: it's a personal note.
   // Two flat blocks for the greeting (no {{else}}): hasName / noName.
@@ -3002,7 +3002,7 @@ const templates: Record<string, EmailTemplate> = {
       {{#if hasName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi {{name}},</p>{{/if}}
       {{#if noName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi there,</p>{{/if}}
       <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">
-        This is Jon, owner of Ooosh Tours. Thanks very much for hiring with us. I really hope it all went well.
+        This is Jon, owner of Ooosh Tours. Thanks very much for hiring with us, I really hope it all went well for you.
       </p>
       <p style="margin:0 0 18px;font-size:15px;color:#334155;line-height:1.6;">
         If you've got two minutes, a Google review would mean a lot. We're a small team and a lot of our work comes
@@ -3013,7 +3013,7 @@ const templates: Record<string, EmailTemplate> = {
       </p>
       <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">
         And if anything didn't go to plan, I'd like to know. Just reply to this email and it comes straight to me.
-        I'd much rather put it right.
+        I'd really like to try and put things right for you.
       </p>
       <p style="margin:0 0 22px;font-size:15px;color:#334155;line-height:1.6;">
         Thanks,<br>Jon<br>Director, Ooosh! Tours Ltd
