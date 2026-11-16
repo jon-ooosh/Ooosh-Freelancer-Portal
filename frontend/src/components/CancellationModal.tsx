@@ -5,6 +5,7 @@ import { api } from '../services/api';
 import { cancellationFeeGross, cancellationBalance } from '../lib/money';
 import CancelOpenRequirementsSection from './CancelOpenRequirementsSection';
 import WatchBandTick from './leads/WatchBandTick';
+import GoodwillTick, { type GoodwillTickValue } from './goodwill/GoodwillTick';
 
 // Postgres NUMERIC columns come back as strings via the pg driver.
 // Coerce defensively before any .toFixed / arithmetic.
@@ -76,6 +77,8 @@ interface Props {
     keep_requirement_ids?: string[];
     /** "Watch this band for their next tour" — TOUR-FINDER-SPEC §21. */
     watch_band_org_id?: string;
+    /** "Offer goodwill credit" — docs/GOODWILL-CREDIT-SPEC.md §4.1. */
+    goodwill?: GoodwillTickValue;
   }) => void;
   onCancel: () => void;
   saving: boolean;
@@ -107,6 +110,8 @@ export default function CancellationModal({
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
   // "Watch this band for their next tour" — the org, or null (TOUR-FINDER-SPEC §21).
   const [watchOrgId, setWatchOrgId] = useState<string | null>(null);
+  // "Offer goodwill credit" — null until ticked with an amount (docs/GOODWILL-CREDIT-SPEC.md §4.1).
+  const [goodwill, setGoodwill] = useState<GoodwillTickValue | null>(null);
   const [cancelledOn, setCancelledOn] = useState<string>(isoDate(new Date()));
   const [confirmText, setConfirmText] = useState('');
   // Default: send the email. The opt-out is here for the cases where
@@ -229,6 +234,7 @@ export default function CancellationModal({
       send_client_email: sendClientEmail,
       keep_requirement_ids: keepRequirementIds.size > 0 ? Array.from(keepRequirementIds) : undefined,
       watch_band_org_id: watchOrgId ?? undefined,
+      goodwill: goodwill ?? undefined,
     });
   };
 
@@ -490,6 +496,9 @@ export default function CancellationModal({
 
               {/* A cancelled tour often comes back — watch the band for it (TOUR-FINDER-SPEC §21) */}
               <WatchBandTick jobId={jobId} value={watchOrgId} onChange={setWatchOrgId} />
+
+              {/* Say sorry with money off their next hire — managers only (docs/GOODWILL-CREDIT-SPEC.md §4.1) */}
+              {hasManagerRole(userRole) && <GoodwillTick jobId={jobId} onChange={setGoodwill} />}
 
               {/* Client email opt-out + recipient preview. Crew emails fire
                   regardless — they're operational, not customer-comms. */}

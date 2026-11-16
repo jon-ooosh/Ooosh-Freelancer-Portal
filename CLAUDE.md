@@ -313,10 +313,13 @@ open; read it before touching anything freelancer-facing.**
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
 Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisions only. The groundwork AI quoting will read.
 
-**DRAFT, Nov 2026:** `docs/GOODWILL-CREDIT-SPEC.md` — goodwill credit: "£X + VAT off your next hire (or
-what you owe), use by …", held by an org. **A promise, not money** — nothing moves in HireHop or Xero until
-it's used; OP never writes it to HireHop, it READS the `GW-0012` code back from the discount line / credit
-note. Nothing built; §1 is settled, §11 open.
+**PHASE 1 BUILT, 16 Nov 2026:** `docs/GOODWILL-CREDIT-SPEC.md` — goodwill credit: "£X + VAT off your next hire
+(or what you owe), use by …", held by an org OR a person. **A promise, not money** — nothing moves in HireHop or
+Xero until it's used; staff apply it by hand (a discount with `Goodwill credit GW-0012` in the line's note, or a
+credit note) and OP never writes it to HireHop. Managers offer (⋯ on the close-out panel, a Problem's Money card,
+org / person pages; a tick on Cancel Job); any staff reserves it from the Client History note and marks it
+applied. Expired and "freed by a lost / cancelled job" are DERIVED on read (`EFFECTIVE_STATUS_SQL`), never swept.
+§13 is what shipped; phase 2 (reading the code back from HireHop) waits on the §13.3 probe.
 
 **PHASES 1–3 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
 (Money › Cash forecast, `/money/cashflow`): the committed line by week and the next 14 days by day,
@@ -467,6 +470,7 @@ existing definition:
 | Picking or creating a venue | `frontend/src/components/VenuePicker.tsx` |
 | Is this new person / org probably already in the address book? | `services/address-book-similar.ts` (fuzzy, warn-only; `GET /duplicates/similar`, frontend `SimilarRecordsWarning.tsx`). The Duplicates page is the exact after-the-fact clean-up |
 | Does this search look like a phone number? | `services/address-book-search.ts` `phoneDigitsForSearch()` — shared by the People and Organisations list searches |
+| Goodwill credit (offer, reserve on a job, applied, withdraw; is it still to use?) | `services/goodwill-credits.ts` — `EFFECTIVE_STATUS_SQL` is THE status (expired / freed are derived, never stored); copy and sums `frontend/src/lib/goodwillCopy.ts`; never written to HireHop (`GOODWILL-CREDIT-SPEC.md`) |
 | Artist endorsements (who, which brand, the deal, last confirmed) | `services/endorsements.ts` — on a person OR a band (artist not in OP), never both; deal is free text; over 12 months since the last check is flagged. `forClientContext()` feeds New Enquiry / Job view. Page: Operations › Backline – Endorsements |
 | Recently viewed (per user) | `services/address-book-views.ts` — written ONLY when a detail page passes `?track_view=1`; pickers reading the same GET must not count |
 | Which address-book tabs have content (main row vs "More")? | `frontend/src/hooks/useTabPresence.ts` + `components/EntityTabs.tsx` — asks each tab's own endpoint; an empty tab moves under More, never hidden; one opened during a visit stays in the row until you leave the page. Both pages keep the tab in `?tab=` |

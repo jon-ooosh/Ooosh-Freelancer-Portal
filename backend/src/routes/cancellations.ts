@@ -12,6 +12,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { cascadeJobClose } from '../services/job-close-cascade';
+import { offerGoodwill } from '../services/goodwill-credits';
 import { closeJobRequirements } from '../services/requirement-close-sweep';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
@@ -179,6 +180,15 @@ const processSchema = z.object({
   // The modal's "Watch this band" tick: the band to watch for its next tour
   // (TOUR-FINDER-SPEC §21; band-watch.ts).
   watch_band_org_id: z.string().guid().optional().nullable(),
+  // The modal's "Offer goodwill credit" tick (docs/GOODWILL-CREDIT-SPEC.md §4.1):
+  // money off their next hire, held by the band / client / a contact.
+  goodwill: z.object({
+    amount_ex_vat: z.number().positive().max(100000),
+    reason: z.string().trim().max(2000).optional().nullable(),
+    organisation_id: z.string().guid().optional().nullable(),
+    person_id: z.string().guid().optional().nullable(),
+  }).refine((g) => (!!g.organisation_id) !== (!!g.person_id), { message: 'Goodwill is for an organisation OR a person' })
+    .optional().nullable(),
 });
 
 router.post(
@@ -195,7 +205,7 @@ router.post(
         cancellation_tier, cancellation_notice_days,
         breakdown, keep_requirement_ids, cancelled_at,
         cancellation_outstanding_balance,
-        send_client_email, watch_band_org_id,
+        send_client_email, watch_band_org_id, goodwill,
       } = req.body;
 
       // Verify job exists and is in a cancellable state (confirmed+)
@@ -527,6 +537,22 @@ router.post(
       // 13. Band watch — never fails the cancellation.
       if (watch_band_org_id) {
         await startWatchFromCloseOut({ jobId, organisationId: watch_band_org_id, userId });
+      }
+
+      // 14. Goodwill credit — never fails the cancellation (it's done by now).
+      if (goodwill) {
+        try {
+          await offerGoodwill({
+            organisation_id: goodwill.organisation_id ?? null,
+            person_id: goodwill.person_id ?? null,
+            amount_ex_vat: goodwill.amount_ex_vat,
+            reason: goodwill.reason?.trim() || `Cancelled: ${cancellation_reason}`,
+            source_kind: 'cancellation',
+            source_job_id: jobId,
+          }, userId);
+        } catch (err) {
+          console.warn('[Cancellation] Goodwill credit failed:', err);
+        }
       }
 
       res.json({ success: true, message: 'Job cancelled successfully' });

@@ -25,6 +25,8 @@ import RecordActionsMenu from '../components/RecordActionsMenu';
 import WorkingTermsSummary from '../components/WorkingTermsSummary';
 import EndorsementsPanel from '../components/EndorsementsPanel';
 import WatchBandButton from '../components/leads/WatchBandButton';
+import GoodwillTab from '../components/goodwill/GoodwillTab';
+import OfferGoodwillModal from '../components/goodwill/OfferGoodwillModal';
 
 interface OrgDetail {
   id: string;
@@ -125,7 +127,7 @@ const INFERRED_ORG_TYPE: Record<string, string> = {
 
 const VALID_ORG_TABS = [
   'people', 'relationships', 'hire_history', 'timeline', 'files', 'details', 'excess',
-  'issues', 'held', 'storage', 'rehearsal', 'pcns', 'ooh',
+  'issues', 'held', 'storage', 'rehearsal', 'pcns', 'ooh', 'goodwill',
 ] as const;
 type OrgTab = (typeof VALID_ORG_TABS)[number];
 
@@ -161,6 +163,9 @@ function OrganisationDetailContent() {
 
   // Which secondary tabs have content — decides main row vs "More"
   const tabPresence = useTabPresence('organisation', id);
+  // Goodwill credit (docs/GOODWILL-CREDIT-SPEC.md) — offered from the ⋯ menu; the bump re-reads the tab.
+  const [showGoodwill, setShowGoodwill] = useState(false);
+  const [goodwillBump, setGoodwillBump] = useState(0);
   // Are any of these addresses bouncing / blocked by Resend? (services/email-delivery.ts)
   const emailProblems = useEmailProblems([org?.email, ...(org?.people || []).map((p) => p.person_email)]);
 
@@ -597,6 +602,7 @@ function OrganisationDetailContent() {
             {/* Do Not Hire is set in Edit → Working Terms; Merge and Delete are rare, so they live in ⋯ */}
             <RecordActionsMenu
               actions={[
+                ...(isAdmin ? [{ label: 'Offer goodwill credit…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setShowGoodwill(true) }] : []),
                 ...(isAdmin ? [{ label: 'Merge into another…', title: 'Merge this organisation into another', onClick: () => setShowMergeModal(true) }] : []),
                 { label: 'Delete', danger: true, onClick: () => { if (confirm(`Delete ${org.name}?`)) handleDelete(); } },
               ]}
@@ -747,6 +753,7 @@ function OrganisationDetailContent() {
               { key: 'rehearsal', label: 'Rehearsals', secondary: true, hasContent: tabPresence.rehearsal },
               { key: 'pcns', label: pcnCount ? `PCNs (${pcnCount})` : 'PCNs', secondary: true, hasContent: tabPresence.pcns },
               { key: 'ooh', label: 'OOH', secondary: true, hasContent: tabPresence.ooh },
+              { key: 'goodwill', label: 'Goodwill', secondary: true, hasContent: tabPresence.goodwill },
             ]}
           />
         );
@@ -1616,6 +1623,15 @@ function OrganisationDetailContent() {
       {/* OOH Tab — read-only out-of-hours return incident rollup for this client's drivers */}
       {activeTab === 'ooh' && id && (
         <OohOrgIncidents orgId={id} />
+      )}
+
+      {/* Goodwill Tab — credits offered to this org (docs/GOODWILL-CREDIT-SPEC.md §4.4) */}
+      {activeTab === 'goodwill' && id && (
+        <GoodwillTab key={goodwillBump} owner={{ kind: 'organisation', id, name: org.name }} />
+      )}
+      {showGoodwill && id && (
+        <OfferGoodwillModal owner={{ kind: 'organisation', id, name: org.name }} sourceKind="organisation"
+          onClose={() => setShowGoodwill(false)} onDone={() => setGoodwillBump((n) => n + 1)} />
       )}
 
       {/* Edit Panel */}

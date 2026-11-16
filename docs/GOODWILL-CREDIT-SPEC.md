@@ -1,6 +1,7 @@
-# Goodwill credit — spec (DRAFT, not built)
+# Goodwill credit — spec
 
-Status: **decisions captured, nothing built** (jon, 16 Nov 2026). Mockups: the "Goodwill credit
+Status: **phase 1 BUILT (16 Nov 2026) — §13 is what shipped and where it differs; phase 2 (the
+HireHop read-back) waits on the probe in §13.3.** Decisions: jon, 16 Nov 2026. Mockups: the "Goodwill credit
 mockups" canvas (claude.ai artifact, private to jon) — screens 1a–1d, 2–6 below refer to it.
 
 Born from job 16815: a support band lost a tour when the headliner cancelled. We kept the
@@ -51,7 +52,8 @@ OP had no way to record a promise like that, so it would have lived in someone's
 Moves:
 - offered → reserved: "Use on this job" (§4.3).
 - reserved → offered: the job goes lost / cancelled, or a manager takes it off. The use-by date
-  does not move.
+  does not move. (Built as a DERIVED read, not a write — §13.1. A reservation against an
+  INVOICE is not freed by a cancellation: a cancelled job still owes its fee invoice.)
 - reserved → used: the check finds the code (§6), or staff mark it applied (§6.4).
 - offered / reserved → withdrawn: manager, reason required.
 - **A hire counts if it was reserved before the use-by date** — a booking made in October for a
@@ -149,7 +151,7 @@ points (§5) are re-copyable from a row.
 ## 5. The points for your own email (`goodwillCopy.ts`)
 
 - £X + VAT (£Y) off a future hire with Ooosh, or towards anything you still owe us, for [org]
-- The hire must start by [use by] *(for money owed: used by [use by])*
+- Use it by [use by] (for a hire, the booking must be made by then)
 - Used once, up to £X + VAT — anything unused lapses
 - Not exchangeable for cash
 - Quote GW-0012 when you book
@@ -260,4 +262,56 @@ and the shapes can be copied:
 - **The person page** gets the same Goodwill tab and an Actions menu item as the org page.
 
 What it doesn't change: the GW code, states, read-back and RBAC are identical.
+
+## 13. Phase 1 — what shipped (16 Nov 2026)
+
+### 13.1 Built
+- **Migration 345** `goodwill_credits` + `goodwill_credit_ref_seq` (refs `GW-0001`…, from the
+  column default). One owner: org OR person (CHECK). `reserved_amount_ex_vat` added beside §3's
+  columns (what staff entered at Reserve; "Mark as applied" defaults to it).
+- **`services/goodwill-credits.ts`** — every read and write. `EFFECTIVE_STATUS_SQL` derives
+  *expired* and *a hire reservation on a lost / cancelled job reads as offered*, so there is **no
+  sweep and no hook on the four job-closing paths**; reserving it again just overwrites. The
+  reserve UPDATE repeats the "still free" test in its WHERE, so two people can't both win (409).
+  Timeline notes on the job(s), the org / person, and the Problem (event `money`); never fail the
+  action.
+- **`routes/goodwill-credits.ts`** at `/api/goodwill`: `GET /` (owner), `GET /context` (the note —
+  a saved job adds its own contacts), `GET /owner-choices/:jobId` (band, client, contacts),
+  `POST /` · `PATCH /:id` · `POST /:id/unreserve` · `POST /:id/withdraw` (managers),
+  `POST /:id/reserve` · `POST /:id/applied` (any staff).
+- **Cancellation**: `POST /cancellations/:jobId/process` takes `goodwill` and offers it AFTER the
+  job is cancelled — a failure is logged, never fails the cancellation.
+- **Frontend** (`components/goodwill/`, copy in `lib/goodwillCopy.ts`):
+  - **The offer form** `OfferGoodwillModal`, opened from four places: the close-out panel's ⋯
+    menu, the Problem Money card's ⋯ menu (Problems only, not the claim page), and the org and
+    person pages' ⋯ menu. All four reuse `RecordActionsMenu`.
+  - **The Cancel Job modal** has a tick, `GoodwillTick`.
+  - **The Client History note** `GoodwillNote`, with "Use on this job", sits on New Enquiry and Job
+    Detail.
+  - **The Goodwill tab** `GoodwillTab` is on org and person pages, under More until there's one
+    (`useTabPresence`).
+
+### 13.2 Where it differs from the plan above
+- **No release hook**: §2's "back to offered" is a read (13.1).
+- **Expiry wording**: "Use it by X (for a hire, the booking must be made by then)". This matches
+  the rule that a reservation made before the use-by date still counts.
+- **New Enquiry can SHOW a credit but not reserve it**: there's no job yet. The note says "Save the
+  enquiry to use it".
+- **Where the note can appear:** it lives inside the Client History panel, so it shows only where
+  that panel does. On New Enquiry that means a client or band with history; on Job Detail, any
+  job with a client.
+- **Not built in phase 1:** the reserved chip on the job header and the close-out ledger line.
+  Both come with the phase 2 check. The note in the sidebar carries the reserved state for now.
+
+### 13.3 The read-back probe — run BEFORE phase 2
+`backend/src/scripts/goodwill-readback-probe.ts`, read-only. On a test enquiry in HireHop, put a
+discount on a line and type `Goodwill credit GW-TEST` in that line's note; then on the server:
+
+    cd /var/www/ooosh-portal/backend
+    npx tsx src/scripts/goodwill-readback-probe.ts <job number>
+
+It lists every supply-list line and billing row, marks the field that holds the code (★), and
+prints every field name HireHop sent. The answer decides phase 2:
+- **Found:** the hire check reads the line note.
+- **Not found:** hires stay on "Mark as applied", and only credit notes are checked automatically.
 
