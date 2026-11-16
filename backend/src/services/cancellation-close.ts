@@ -147,8 +147,8 @@ export function feeLineDescription(f: CancellationFacts): string {
   // Short on purpose: HireHop keeps only the first 80 characters of a line (CUSTOM_LINE_MAX).
   // The cancellation date, not the hire dates — the invoice already prints Job Start / Job
   // Finish (jon, 14 Oct 2026). Hire dates only when no cancellation date is recorded.
-  if (f.cancelledAt) return `Cancellation fee (T&Cs clause 7) - cancelled ${day(f.cancelledAt)}`;
-  const parts = ['Cancellation fee (T&Cs clause 7)'];
+  if (f.cancelledAt) return `Cancellation fee (T&Cs clause 8) - cancelled ${day(f.cancelledAt)}`;
+  const parts = ['Cancellation fee (T&Cs clause 8)'];
   if (hire.length) parts.push(`hire ${hire.length === 2 && hire[0] !== hire[1] ? `${hire[0]} to ${hire[1]}` : hire[0]}`);
   return parts.join(' - ');
 }
