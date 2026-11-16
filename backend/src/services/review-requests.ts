@@ -20,11 +20,20 @@ import { emailService } from './email-service';
 import { resolveClientEmailTarget } from './money-emails';
 import { signFor, verifyFor } from './tokens';
 import { ukToday } from './uk-date';
+import { SHORT_LINK_BASE } from './marketing-links';
 
 export const REVIEW_SETTING_KEY = 'review_requests_enabled';
 export const REVIEW_TEMPLATE = 'review_request';
 /** Ooosh's Google review box (jon, Nov 2026). */
 export const GOOGLE_REVIEW_URL = 'https://g.page/r/CSCv1HhULJ6nEAI/review';
+/**
+ * The email's button goes through the tracked link go.oooshtours.co.uk/google-review
+ * (a Marketing › Tracked links row, made by migration 346, pointing at the box above),
+ * so the Marketing page counts the clicks (jon, 16 Nov 2026). Mail scanners that open
+ * links are counted too unless they say they're a bot — read the number as "up to".
+ */
+export const REVIEW_LINK_CODE = 'google-review';
+export const REVIEW_BUTTON_URL = `${SHORT_LINK_BASE}${REVIEW_LINK_CODE}`;
 /**
  * The Mailchimp sign-up form. `legacy_form=1` asks for Mailchimp's classic form, which
  * fills in MERGE0/1/2 (email, first, last name) from the link — checked 13 Nov 2026.
@@ -160,7 +169,7 @@ async function sendReviewEmail(to: string, r: Recipient, jobNumber: string, test
       name: r.name,
       hasName: r.name ? 'yes' : '',
       noName: r.name ? '' : 'yes',
-      reviewUrl: GOOGLE_REVIEW_URL,
+      reviewUrl: REVIEW_BUTTON_URL,
       signupUrl: mailingListUrl(r.email, r.firstName, r.lastName),
       stopUrl: stopUrl(r.email),
       jobNumber,
@@ -217,10 +226,18 @@ export async function runReviewRequests(): Promise<ReviewRunSummary> {
       }
       const d = reviewDecision(facts);
       if (!d.send) {
-        await query(
-          `INSERT INTO review_requests (job_id, status, reason) VALUES ($1, 'not_sent', $2) ON CONFLICT (job_id) DO NOTHING`,
+        const wrote = await query(
+          `INSERT INTO review_requests (job_id, status, reason) VALUES ($1, 'not_sent', $2) ON CONFLICT (job_id) DO NOTHING RETURNING id`,
           [j.id, d.reason],
         );
+        // The job's own record of it (the job page no longer shows it — the tick moved to the
+        // completion modal, jon 16 Nov 2026). Internal jobs stay quiet.
+        if (wrote.rows.length && !j.is_internal) {
+          await query(
+            `INSERT INTO interactions (type, content, job_id, source) VALUES ('note', $1, $2, 'system')`,
+            [`Jon's review request email not sent: ${d.reason}.`, j.id],
+          ).catch((err) => console.error('[review-requests] timeline note not written (non-fatal):', err));
+        }
         summary.notSent++;
         continue;
       }

@@ -349,7 +349,7 @@ page** (Jobs › Marketing, admin-only, mig 342): adverts with a "next thing due
 never changes once made (it's printed); a bad or paused code goes to the home page, never a dead end.** **§8c is Jon's review email**
 (mig 344, `services/review-requests.ts`, Marketing › Review emails — OFF until jon turns it on): 10:15 the day after
 Completed, not when completed >10 days after the return, once a year per client org or address, a "don't send" tick on
-the job, a "Don't ask me again" page with a button (never acts on the click — mail scanners open links), Reply-To jon@.
+the Completion modal, the button via `go.oooshtours.co.uk/google-review` (mig 346), a "Don't ask me again" page with a button (never acts on the click — mail scanners open links), Reply-To jon@.
 §8b is the rest of the roadmap (referrals).
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
