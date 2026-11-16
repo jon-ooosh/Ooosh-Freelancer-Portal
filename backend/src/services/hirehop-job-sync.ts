@@ -652,6 +652,10 @@ export interface HHLineItem {
   LFT: number;          // Nested set left boundary (parent-child tree)
   RGT: number;          // Nested set right boundary
   TYPE_CUSTOM_FIELDS: Record<string, any> | null;  // Includes preptimemins etc.
+  /** HireHop "Item Note" (prints on the quote/invoice) and "Item Memo" (internal) — kept so the
+   *  goodwill check can spot a GW code on any job (docs/GOODWILL-CREDIT-SPEC.md §6). */
+  ADDITIONAL?: string;
+  TECHNICAL?: string;
 }
 
 /**
@@ -702,6 +706,8 @@ async function fetchLineItemsForJob(jobNumber: number): Promise<HHLineItem[]> {
         LFT: Number(item.LFT ?? 0),
         RGT: Number(item.RGT ?? 0),
         TYPE_CUSTOM_FIELDS: customFields,
+        ADDITIONAL: String(item.ADDITIONAL ?? ''),
+        TECHNICAL: String(item.TECHNICAL ?? ''),
       };
     });
 }
@@ -830,6 +836,8 @@ export async function fetchLineItemsOnDemand(jobNumber: number): Promise<HHLineI
         LFT: Number(item.LFT ?? 0),
         RGT: Number(item.RGT ?? 0),
         TYPE_CUSTOM_FIELDS: customFields,
+        ADDITIONAL: String(item.ADDITIONAL ?? ''),
+        TECHNICAL: String(item.TECHNICAL ?? ''),
       };
     });
 }

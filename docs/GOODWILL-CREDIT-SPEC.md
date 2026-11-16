@@ -1,7 +1,7 @@
 # Goodwill credit — spec
 
-Status: **phase 1 BUILT (16 Nov 2026) — §13 is what shipped and where it differs; phase 2 (the
-HireHop read-back) waits on the probe in §13.3.** Decisions: jon, 16 Nov 2026. Mockups: the "Goodwill credit
+Status: **phases 1 and 2 BUILT (16 Nov 2026) — §13 is phase 1 and where it differs from the plan,
+§14 is phase 2 (the HireHop read-back).** Decisions: jon, 16 Nov 2026. Mockups: the "Goodwill credit
 mockups" canvas (claude.ai artifact, private to jon) — screens 1a–1d, 2–6 below refer to it.
 
 Born from job 16815: a support band lost a tour when the headliner cancelled. We kept the
@@ -328,4 +328,49 @@ prints every field name HireHop sent. The answer decides phase 2:
 - **Credit notes are NOT tested yet.** The test job had no invoice. `billing_list.php` already
   gives a credit note's `DESCRIPTION` to the Money summary, so it is low risk, but check it the
   first time one is used.
+
+## 14. Phase 2 — the read-back, what shipped (16 Nov 2026)
+
+**Credit notes were checked too.** On job 9000 a draft credit note read status 0 / £0; once
+approved it read OT-CRE-1223 / status 2 / £11.40, with the code in `DESCRIPTION`. The billing half
+of the probe found it both times; only the approved one counts.
+
+### 14.1 The check — `services/goodwill-check.ts`, scheduled at :15 and :45 (between the job syncs)
+The decision `decideGoodwill()` is pure and tested on the probe's real rows.
+
+- **A. Every reserved credit.** OP reads its job's supply list and billing from HireHop (broker,
+  low priority, read-only). A rate-limited read is skipped, never taken as "nothing there".
+  - **The code on a line** (in any text field: title, Item Note, Item Memo) → used,
+    `used_how = 'line'`, the line id(s). If no line carrying the code is discounted
+    (`PRICE` ≥ `UNIT_PRICE`), it is still used, with a warning.
+  - **The code on an APPROVED credit note** → used, `used_how = 'credit_note'`, its number. If its
+    gross is more than the credit + 20%, it is flagged.
+  - **Only a draft credit note** → flagged "still a draft".
+  - **Nothing after 24 hours** → flagged "No line or credit note with GW-… in HireHop yet".
+
+  The amount recorded is always what staff entered at Reserve.
+- **B. GW codes on the stored lines of every live job.** The hourly line sync now keeps `ADDITIONAL`
+  and `TECHNICAL` on `jobs.line_items`, in both of `hirehop-job-sync.ts`'s mappers.
+  - **A code that is free to use** is linked to that job and checked straight away. The offerer
+    gets an FYI bell.
+  - **A code reserved or used on another job** (or withdrawn / expired) is flagged on the credit,
+    with one FYI bell. It isn't repeated while the flag text is unchanged.
+  - **An unknown code** is only logged.
+- **"Check HireHop now"** runs A for one credit straight away (`POST /goodwill/:id/check`). It sits
+  on the job chip and on the Client History note.
+
+### 14.2 On screen
+- **Job header chips** (`GoodwillJobChips`): amber "Goodwill GW-… reserved" while it waits (click
+  to check now); green "−£X + VAT" once used; ⚠ when the check found a problem. The detail is in
+  the tooltip.
+- **The close-out panel's ledger** has a goodwill line for the record. It is "already in the
+  figures" and never subtracted again.
+- **`check_problem`** also shows on the Client History note and the Goodwill tab.
+
+### 14.3 Differences from §6
+- **The duplicate-code bell is an FYI bell to the offerer, not a `resolve_key` bell to managers.**
+  The flag stays on the credit (chip, tab) until the code is sorted out.
+- **"Unknown code" only goes to the log.** No job flag.
+- **Codes on credit notes are only found for RESERVED credits.** OP doesn't sweep every job's
+  billing.
 

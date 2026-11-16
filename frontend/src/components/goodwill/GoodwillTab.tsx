@@ -113,6 +113,7 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
                           {g.reserved_for === 'invoice' && g.reserved_invoice_number ? ` (${g.reserved_invoice_number})` : ''}
                         </div>
                       )}
+                      {g.check_problem && <div className="text-xs mt-1 text-amber-800">⚠ {g.check_problem}</div>}
                     </td>
                     <td className="px-3 py-2 text-right whitespace-nowrap space-x-2 text-xs">
                       {live && (

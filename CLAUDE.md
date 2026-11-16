@@ -313,13 +313,13 @@ open; read it before touching anything freelancer-facing.**
 hire length × job value, quiet periods, 50% cap with manager override, per-ARTIST brand endorsements).
 Phase 1 (artist endorsements) BUILT 16 Oct 2026 — spec §4; the rest is decisions only. The groundwork AI quoting will read.
 
-**PHASE 1 BUILT, 16 Nov 2026:** `docs/GOODWILL-CREDIT-SPEC.md` — goodwill credit: "£X + VAT off your next hire
+**PHASES 1–2 BUILT, 16 Nov 2026:** `docs/GOODWILL-CREDIT-SPEC.md` — goodwill credit: "£X + VAT off your next hire
 (or what you owe), use by …", held by an org OR a person. **A promise, not money** — nothing moves in HireHop or
 Xero until it's used; staff apply it by hand (a discount with `Goodwill credit GW-0012` in the line's note, or a
 credit note) and OP never writes it to HireHop. Managers offer (⋯ on the close-out panel, a Problem's Money card,
 org / person pages; a tick on Cancel Job); any staff reserves it from the Client History note and marks it
 applied. Expired and "freed by a lost / cancelled job" are DERIVED on read (`EFFECTIVE_STATUS_SQL`), never swept.
-§13 is what shipped; phase 2 (reading the code back from HireHop) waits on the §13.3 probe.
+§13 is phase 1; **§14 phase 2**: `services/goodwill-check.ts` (:15/:45) reads a reserved credit's job from HireHop — the code in a line's Item Note / Item Memo (`ADDITIONAL` / `TECHNICAL`, now kept on `jobs.line_items`) or an APPROVED credit note marks it used; job header chips + a close-out ledger line.
 
 **PHASES 1–3 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
 (Money › Cash forecast, `/money/cashflow`): the committed line by week and the next 14 days by day,
@@ -666,7 +666,7 @@ auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referra
 09:20 · claim client chase 09:21 · claim check dates + GPS capture 09:22 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
 pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, list items to watchers, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 (hirers) · Jon's review emails 10:15 (off until switched on, `review_requests_enabled`) · freelancer out-of-hours emails every 30 min 10:00–20:30 UK · sitter task summary 16:00 ·
-HireHop sync every 30 min · sanity scanners every 15 min · notification escalation
+HireHop sync every 30 min · sanity scanners every 15 min · goodwill read-back :15 and :45 (`goodwill-check.ts`, read-only on HireHop) · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh daily 07:30 ·
 Gmail ingestion every 10 min · card-reader receipt sweep every 5 min (a reader payment unanswered for 15 min gets its email) · bell sweep every 5 min (retires bells whose thing is done, `bell-rules.ts`; also runs before each escalation).

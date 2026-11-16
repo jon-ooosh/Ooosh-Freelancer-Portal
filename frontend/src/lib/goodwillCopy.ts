@@ -33,6 +33,10 @@ export interface GoodwillCredit {
   used_how: string | null;
   withdrawn_at: string | null;
   withdrawn_reason: string | null;
+  /** What the HireHop read-back last found wrong (spec §6.2); null = nothing. */
+  check_problem: string | null;
+  last_checked_at: string | null;
+  used_hh_ref: string | null;
 }
 
 export interface GoodwillOwner { kind: 'organisation' | 'person'; id: string; name: string; role?: string }
