@@ -46,6 +46,7 @@ import { retireDoneBells } from '../services/notification-resolve';
 import { startWatchFromCloseOut } from '../services/leads/band-watch';
 import { HEARD_ABOUT_VALUES, getMarketingSource, saveMarketingSource, setHeardAbout } from '../services/marketing-source';
 import { isReturningClient } from '../services/returning-client';
+import { setJobReviewSkip } from '../services/review-requests';
 
 const router = Router();
 router.use(authenticate);
@@ -528,6 +529,9 @@ const updateStatusSchema = z.object({
   // The close-out modal's "Watch this band" tick (lost / completed): the band
   // to watch for its next tour. TOUR-FINDER-SPEC §21; band-watch.ts.
   watch_band_org_id: z.string().guid().optional().nullable(),
+  // The completion modal's "Send Jon's review email tomorrow" tick (docs/BUSINESS-FIGURES-SPEC.md §8c):
+  // false = "don't send". Absent = leave it as it is (HireHop completions never send it).
+  send_review_email: z.boolean().optional().nullable(),
 });
 
 router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthRequest, res: Response) => {
@@ -537,7 +541,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       pipeline_status, hold_reason, hold_reason_detail, revisit_date,
       confirmed_method, lost_reason, lost_detail, transition_note,
       retro_rating, retro_notes, retro_follow_up, retro_follow_up_date,
-      retro_reminders, keep_requirement_ids, watch_band_org_id,
+      retro_reminders, keep_requirement_ids, watch_band_org_id, send_review_email,
     } = req.body;
 
     // Get current state
@@ -772,6 +776,12 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
        VALUES ('status_transition', $1, $2, $3, $4, 'system')`,
       [transitionContent, jobId, req.user!.id, fromStatus]
     );
+
+    // Jon's review email: the completion modal's tick. Never fails the status change.
+    if (pipeline_status === 'completed' && typeof send_review_email === 'boolean') {
+      await setJobReviewSkip(jobId, !send_review_email, req.user!.id)
+        .catch((err) => console.error('[pipeline] review email tick not saved (non-fatal):', err));
+    }
 
     // Log completion retro as a separate interaction (so it's visible on timeline)
     if (pipeline_status === 'completed' && (retro_rating || retro_notes || retro_follow_up)) {

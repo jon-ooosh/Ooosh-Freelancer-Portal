@@ -400,7 +400,8 @@ function ReviewEmailsPanel() {
         <ul className="text-xs text-gray-600 space-y-1 list-disc pl-5">
           <li>From "Jon at Ooosh Tours", replies to jon@oooshtours.co.uk, at 10:15 the day after a hire is Completed.</li>
           <li>Not sent when the job was completed more than 10 days after the return, the client (organisation or address) was asked in the last year, they used "Don't ask me again", the job is internal, or there's no client email.</li>
-          <li>Each job page has a "Send Jon's review email" tick — untick it for "don't send".</li>
+          <li>The Completion window has a "Send Jon's review email tomorrow" tick — untick it for "don't send". The job's Activity Timeline says whether it went, or why not.</li>
+          <li>The button goes through the tracked link go.oooshtours.co.uk/google-review, so its clicks show on Tracked links (mail scanners can add a few).</li>
         </ul>
         {testNote && <p className="text-xs text-green-700">{testNote}</p>}
         {error && <p className="text-xs text-red-600">{error}</p>}
