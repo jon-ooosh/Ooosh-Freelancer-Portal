@@ -19,6 +19,7 @@ import { createVehicleEvent } from '../lib/events-api'
 import { fetchLastEventForVehicle } from '../lib/events-query'
 import { checkMileagePlausibility, resolveMileageFloor } from '../lib/mileage-sanity'
 import { fetchLastPrepSession, extractTyreValues } from '../lib/prep-history'
+import { isDue, isValidSchedule, scheduleLabel, scheduleStatus } from '../lib/prep-schedule'
 import { updateFleetHireStatus } from '../lib/fleet-status'
 import { uploadAllPhotos } from '../lib/photo-upload'
 import { withRetry } from '../lib/retry'
@@ -61,6 +62,19 @@ interface FlaggedItem {
 interface PrepSection {
   name: string
   items: ChecklistItem[]
+}
+
+/**
+ * Tyre corners are the van's OWN left and right — left is the passenger side
+ * (jon, Nov 2026; same rule as the book-out photos). Wording only: the item
+ * names are the history's keys (tread trends, the tyre grid, the server's
+ * forecast) and never change.
+ */
+function withTyreSide(item: ChecklistItem): ChecklistItem {
+  const m = /^(front|rear) (left|right) tyre/i.exec(item.name)
+  if (!m) return item
+  const side = m[2]!.toLowerCase() === 'left' ? 'Passenger side' : 'Driver side'
+  return { ...item, notes: item.notes ? `${side} — ${item.notes}` : side }
 }
 
 // Overall prep status options
@@ -154,8 +168,14 @@ export function PrepPage({ freelancerPrep }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [freelancerPrep, allVehicles, phase])
 
+  // Periodic checks: when each was last done on this van (item name → date).
+  // null while loading; a failed load counts every check as due.
+  const [periodicDone, setPeriodicDone] = useState<Record<string, string> | null>(null)
+  const [periodicLoadFailed, setPeriodicLoadFailed] = useState(false)
+  const [showNotDue, setShowNotDue] = useState(false)
+
   // Get prep checklist sections from R2 settings (fallback to defaults)
-  const sections: PrepSection[] = useMemo(() => {
+  const allSections: PrepSection[] = useMemo(() => {
     if (!selectedVehicle) return []
     const rawMap = settings?.prepItems && Object.keys(settings.prepItems).length > 0
       ? settings.prepItems
@@ -165,6 +185,33 @@ export function PrepPage({ freelancerPrep }: {
     const prepMap = ensureTyreChecklistContent(rawMap)
     return getPrepSectionsFromSettings(prepMap, selectedVehicle.simpleType)
   }, [selectedVehicle, settings])
+
+  // What this prep asks: every item, less the periodic ones not due on this
+  // van yet — those go in the folded "Not due yet" list (optional; answering
+  // one early restarts its clock). The counts, the "unanswered" check and the
+  // scroll-to all run on `sections`, so a not-due check never blocks a prep.
+  const { sections, notDueItems } = useMemo(() => {
+    const today = ukToday()
+    const notDue: ChecklistItem[] = []
+    const due = allSections.map(sec => ({
+      ...sec,
+      items: sec.items.flatMap(raw => {
+        const item = withTyreSide(raw)
+        if (!isValidSchedule(raw.schedule)) return [item]
+        const last = periodicDone?.[raw.name] ?? null
+        const status = periodicDone === null
+          ? scheduleLabel(raw.schedule)
+          : periodicLoadFailed
+            ? `${scheduleLabel(raw.schedule)} · couldn't load when it was last done`
+            : scheduleStatus(raw.schedule, last, today)
+        const shown = { ...item, notes: [status, item.notes].filter(Boolean).join(' — ') }
+        if (periodicDone === null || periodicLoadFailed || isDue(raw.schedule, last, today)) return [shown]
+        notDue.push(shown)
+        return []
+      }),
+    })).filter(sec => sec.items.length > 0)
+    return { sections: due, notDueItems: notDue }
+  }, [allSections, periodicDone, periodicLoadFailed])
 
   // Flat list of all items
   const prepItems: ChecklistItem[] = useMemo(
@@ -312,6 +359,28 @@ export function PrepPage({ freelancerPrep }: {
 
     // Fetch previous data for pre-fill (non-blocking)
     loadPreviousData(vehicle.reg)
+    loadPeriodicChecks(vehicle.reg)
+  }
+
+  async function loadPeriodicChecks(vehicleReg: string) {
+    setPeriodicDone(null)
+    setPeriodicLoadFailed(false)
+    setShowNotDue(false)
+    try {
+      const resp = await apiFetch(`/get-periodic-checks?vehicleReg=${encodeURIComponent(vehicleReg)}`)
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+      const data = await resp.json() as { checks?: Record<string, { lastDoneOn?: string }> }
+      const done: Record<string, string> = {}
+      for (const [name, rec] of Object.entries(data.checks || {})) {
+        if (typeof rec?.lastDoneOn === 'string') done[name] = rec.lastDoneOn
+      }
+      setPeriodicDone(done)
+    } catch (err) {
+      // Safer to ask a periodic check than to skip it.
+      console.warn('[prep] Failed to load periodic checks:', err)
+      setPeriodicLoadFailed(true)
+      setPeriodicDone({})
+    }
   }
 
   function initFreshPrep(vehicle: Vehicle) {
@@ -531,6 +600,21 @@ export function PrepPage({ freelancerPrep }: {
       })
     }
 
+    // What gets saved: everything this prep asked, plus any not-due periodic
+    // check answered early. A not-due check left blank isn't recorded.
+    const askedNames = new Set(prepItems.map(i => i.name))
+    const savedSections = allSections
+      .map(sec => ({
+        ...sec,
+        items: sec.items.filter(i => askedNames.has(i.name) || (responses[i.name] ?? '') !== ''),
+      }))
+      .filter(sec => sec.items.length > 0)
+    // Every periodic check answered on this prep, any answer — restarts its clock
+    const periodicDoneNow = allSections
+      .flatMap(sec => sec.items)
+      .filter(i => isValidSchedule(i.schedule) && (responses[i.name] ?? '') !== '')
+      .map(i => ({ name: i.name, value: responses[i.name]! }))
+
     // Step 4: Save prep session JSON to R2
     setUploadProgress('Saving prep data...')
     try {
@@ -547,7 +631,8 @@ export function PrepPage({ freelancerPrep }: {
         durationMinutes,
         eventId,
         overallStatus,
-        sections: sections.map(sec => ({
+        periodicDone: periodicDoneNow,
+        sections: savedSections.map(sec => ({
           name: sec.name,
           items: sec.items.map(item => ({
             name: item.name,
@@ -603,7 +688,7 @@ export function PrepPage({ freelancerPrep }: {
       setUploadProgress('Recording stock usage...')
       const stockData = await getStock()
       if (stockData.items.length > 0) {
-        const prepResponses = prepItems.map(item => ({
+        const prepResponses = savedSections.flatMap(s => s.items).map(item => ({
           name: item.name,
           value: responses[item.name] || '',
           detail: responseDetails[item.name] || undefined,
@@ -955,6 +1040,31 @@ export function PrepPage({ freelancerPrep }: {
             />
           ))}
 
+          {/* Periodic checks not due on this van yet — optional, folded away */}
+          {notDueItems.length > 0 && (
+            <PrepSectionComponent
+              key="__not_due"
+              section={{ name: `Not due yet (${notDueItems.length}) — optional`, items: notDueItems }}
+              responses={responses}
+              responseDetails={responseDetails}
+              flaggedItems={flaggedItems}
+              previousTyreValues={previousTyreValues}
+              recommendedTyrePsiFront={selectedVehicle.recommendedTyrePsiFront}
+              recommendedTyrePsiRear={selectedVehicle.recommendedTyrePsiRear}
+              sectionNotes=""
+              hideNotes
+              collapsed={!showNotDue}
+              showValidation={false}
+              onResponse={setResponse}
+              onResponseDetail={setResponseDetail}
+              onFlag={handleFlagItem}
+              onUpdateFlag={updateFlaggedItem}
+              onRemoveFlag={removeFlaggedItem}
+              onSectionNote={() => {}}
+              onToggleCollapse={() => setShowNotDue(v => !v)}
+            />
+          )}
+
           {prepItems.length === 0 && (
             <div className="rounded-lg bg-amber-50 p-4 text-center">
               <p className="text-sm font-medium text-amber-800">No prep checklist items configured</p>
@@ -1131,6 +1241,7 @@ function PrepSectionComponent({
   onRemoveFlag,
   onSectionNote,
   onToggleCollapse,
+  hideNotes = false,
 }: {
   section: PrepSection
   responses: Record<string, string>
@@ -1149,6 +1260,8 @@ function PrepSectionComponent({
   onRemoveFlag: (itemName: string) => void
   onSectionNote: (note: string) => void
   onToggleCollapse: () => void
+  /** The "Not due yet" list has no notes box of its own */
+  hideNotes?: boolean
 }) {
   const completedInSection = section.items.filter(
     item => responses[item.name] !== undefined && responses[item.name] !== '',
@@ -1230,7 +1343,7 @@ function PrepSectionComponent({
           ))}
 
           {/* Section notes */}
-          <div className="px-4 py-3">
+          {!hideNotes && <div className="px-4 py-3">
             <label className="block text-xs font-medium text-gray-500 mb-1">
               Notes for {section.name}
             </label>
@@ -1241,7 +1354,7 @@ function PrepSectionComponent({
               rows={2}
               className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 placeholder:text-gray-400 focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
             />
-          </div>
+          </div>}
         </div>
       )}
     </div>

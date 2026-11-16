@@ -4,6 +4,9 @@ import { useSettings } from '../../hooks/useSettings'
 import { saveSettings } from '../../lib/settings-api'
 import type { ChecklistItem, DetailPrompt, SettingsData } from '../../lib/settings-api'
 import { DEFAULT_CHECKLIST_SETTINGS } from '../../config/default-checklist-settings'
+import { isValidSchedule, scheduleLabel } from '../../lib/prep-schedule'
+import type { PrepSchedule } from '../../lib/prep-schedule'
+import { ukToday } from '../../../../lib/ukDate'
 
 // ── Vehicle types ──
 const VEHICLE_TYPES = ['All', 'Premium', 'Standard', 'Basic', 'Panel', 'Vito'] as const
@@ -15,6 +18,28 @@ const INPUT_TYPES = [
 ] as const
 
 type Category = 'briefing' | 'prep'
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+const FOLLOW_UP_TYPES = [
+  { value: 'options', label: 'Pick one' },
+  { value: 'multi', label: 'Pick several' },
+  { value: 'text', label: 'Type an answer' },
+] as const
+
+/**
+ * One option's follow-up question, as the editor holds it. Replaces the old
+ * JSON box (jon, Nov 2026: "next to useless for us non-coders"). Choices are
+ * one per line, not comma-separated, so a choice may contain a comma.
+ */
+interface FollowUpDraft {
+  on: boolean
+  label: string
+  type: DetailPrompt['type']
+  choicesText: string
+}
+
+type HowOften = 'every' | 'weeks' | 'months' | 'yearly'
 
 // ── Item Editor Modal ──
 
@@ -36,30 +61,74 @@ function ItemEditor({
   const [notes, setNotes] = useState(item?.notes || '')
   const [unit, setUnit] = useState(item?.unit || '')
   const [section, setSection] = useState(item?.section || '')
-  const [detailPromptsJson, setDetailPromptsJson] = useState(() => {
-    if (!item?.detailPrompts || Object.keys(item.detailPrompts).length === 0) return ''
-    return JSON.stringify(item.detailPrompts, null, 2)
+  // Follow-up questions, keyed by option. Kept for an option even while it's
+  // switched off or briefly removed from the list, so nothing typed is lost
+  // mid-edit; only the ones switched on for a current option are saved.
+  const [followUps, setFollowUps] = useState<Record<string, FollowUpDraft>>(() => {
+    const out: Record<string, FollowUpDraft> = {}
+    for (const [opt, p] of Object.entries(item?.detailPrompts || {})) {
+      out[opt] = { on: true, label: p.label || '', type: p.type || 'text', choicesText: (p.choices || []).join('\n') }
+    }
+    return out
   })
-  const [detailError, setDetailError] = useState('')
+
+  // How often a prep item is asked (lib/prep-schedule.ts)
+  const existing = isValidSchedule(item?.schedule) ? item!.schedule! : null
+  const [howOften, setHowOften] = useState<HowOften>(
+    !existing ? 'every' : existing.kind === 'yearly' ? 'yearly' : existing.unit,
+  )
+  const [everyN, setEveryN] = useState(existing?.kind === 'interval' ? String(existing.every) : '3')
+  const [yearlyMonth, setYearlyMonth] = useState(existing?.kind === 'yearly' ? existing.month : 1)
+  const [yearlyDay, setYearlyDay] = useState(existing?.kind === 'yearly' ? String(existing.day) : '1')
 
   const isPrepCategory = category === 'prep'
+  const parsed = optionsText.split(',').map(s => s.trim()).filter(Boolean)
+
+  const everyNum = parseInt(everyN, 10)
+  const dayNum = parseInt(yearlyDay, 10)
+  const scheduleInvalid = isPrepCategory && (
+    ((howOften === 'weeks' || howOften === 'months') && !(everyNum >= 1 && everyNum <= 104))
+    || (howOften === 'yearly' && !(dayNum >= 1 && dayNum <= 31))
+  )
+
+  function updateFollowUp(option: string, patch: Partial<FollowUpDraft>) {
+    setFollowUps(f => ({
+      ...f,
+      [option]: { ...(f[option] || { on: false, label: '', type: 'options', choicesText: '' }), ...patch },
+    }))
+  }
+
+  function buildSchedule(): PrepSchedule | undefined {
+    if (howOften === 'weeks' || howOften === 'months') {
+      return { kind: 'interval', every: everyNum, unit: howOften }
+    }
+    if (howOften === 'yearly') {
+      // Keep the date it was first set up when only the wording changed, so
+      // re-saving the item doesn't push the first due date back a year.
+      const same = existing?.kind === 'yearly' && existing.month === yearlyMonth && existing.day === dayNum
+      return { kind: 'yearly', month: yearlyMonth, day: dayNum, addedOn: same ? existing.addedOn ?? ukToday() : ukToday() }
+    }
+    return undefined
+  }
 
   function handleSave() {
-    if (!name.trim()) return
+    if (!name.trim() || scheduleInvalid) return
 
-    let detailPrompts: Record<string, DetailPrompt> = {}
-    if (detailPromptsJson.trim()) {
-      try {
-        detailPrompts = JSON.parse(detailPromptsJson)
-        setDetailError('')
-      } catch {
-        setDetailError('Invalid JSON')
-        return
+    const detailPrompts: Record<string, DetailPrompt> = {}
+    if (inputType === 'options') {
+      for (const opt of parsed) {
+        const f = followUps[opt]
+        if (!f?.on || !f.label.trim()) continue
+        const choices = f.choicesText.split('\n').map(c => c.trim()).filter(Boolean)
+        if (f.type !== 'text' && choices.length === 0) continue
+        detailPrompts[opt] = f.type === 'text'
+          ? { label: f.label.trim(), type: 'text' }
+          : { label: f.label.trim(), type: f.type, choices }
       }
     }
 
-    const parsed = optionsText.split(',').map(s => s.trim()).filter(Boolean)
     const flags = flagText.split(',').map(s => s.trim()).filter(Boolean)
+    const schedule = isPrepCategory ? buildSchedule() : undefined
 
     onSave({
       name: name.trim(),
@@ -70,6 +139,7 @@ function ItemEditor({
       unit: inputType === 'number' ? unit.trim() : '',
       section: isPrepCategory ? section : '',
       detailPrompts,
+      ...(schedule ? { schedule } : {}),
     })
   }
 
@@ -170,18 +240,135 @@ function ItemEditor({
                 />
               </div>
 
+              {inputType === 'options' && parsed.length > 0 && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Follow-up questions <span className="text-gray-400">(optional)</span>
+                  </label>
+                  <p className="text-xs text-gray-400 mb-2">
+                    Ask something extra when a particular answer is picked — e.g. "Topped up" → "How much?"
+                  </p>
+                  <div className="space-y-2">
+                    {parsed.map(opt => {
+                      const f = followUps[opt]
+                      const on = !!f?.on
+                      return (
+                        <div key={opt} className="rounded-lg border border-gray-200 p-2.5">
+                          <label className="flex items-center gap-2 text-sm text-gray-700">
+                            <input
+                              type="checkbox"
+                              checked={on}
+                              onChange={e => updateFollowUp(opt, { on: e.target.checked })}
+                            />
+                            <span>When <strong>{opt}</strong> is picked, ask a follow-up</span>
+                          </label>
+                          {on && (
+                            <div className="mt-2 space-y-2 pl-6">
+                              <input
+                                value={f?.label || ''}
+                                onChange={e => updateFollowUp(opt, { label: e.target.value })}
+                                placeholder="The question, e.g. How much was added?"
+                                className="w-full rounded-lg border border-gray-200 px-3 py-1.5 text-sm focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
+                              />
+                              <div className="flex flex-wrap gap-1.5">
+                                {FOLLOW_UP_TYPES.map(t => (
+                                  <button
+                                    key={t.value}
+                                    type="button"
+                                    onClick={() => updateFollowUp(opt, { type: t.value })}
+                                    className={`rounded-full border px-2.5 py-1 text-xs ${
+                                      f?.type === t.value
+                                        ? 'border-blue-300 bg-blue-50 text-blue-700'
+                                        : 'border-gray-200 text-gray-600'
+                                    }`}
+                                  >
+                                    {t.label}
+                                  </button>
+                                ))}
+                              </div>
+                              {f?.type !== 'text' && (
+                                <textarea
+                                  value={f?.choicesText || ''}
+                                  onChange={e => updateFollowUp(opt, { choicesText: e.target.value })}
+                                  placeholder={'One choice per line, e.g.\nTopped up < 500ml\nTopped up ~1L'}
+                                  rows={3}
+                                  className="w-full rounded-lg border border-gray-200 px-3 py-1.5 text-sm focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
+                                />
+                              )}
+                              {(!f?.label.trim() || (f?.type !== 'text' && !f?.choicesText.trim())) && (
+                                <p className="text-xs text-amber-600">
+                                  Needs a question{f?.type !== 'text' ? ' and at least one choice' : ''}, or it won't be saved.
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Detail Prompts <span className="text-gray-400">(JSON, optional)</span>
-                </label>
-                <textarea
-                  value={detailPromptsJson}
-                  onChange={e => { setDetailPromptsJson(e.target.value); setDetailError('') }}
-                  placeholder={'{\n  "Topped up": {\n    "label": "Amount added?",\n    "type": "options",\n    "choices": ["< 500ml", "~1L"]\n  }\n}'}
-                  rows={4}
-                  className="w-full rounded-lg border border-gray-200 px-3 py-2 font-mono text-xs focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
-                />
-                {detailError && <p className="text-xs text-red-500 mt-1">{detailError}</p>}
+                <label className="block text-xs font-medium text-gray-600 mb-1">How often?</label>
+                <select
+                  value={howOften}
+                  onChange={e => setHowOften(e.target.value as HowOften)}
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
+                >
+                  <option value="every">Every prep</option>
+                  <option value="weeks">Every few weeks</option>
+                  <option value="months">Every few months</option>
+                  <option value="yearly">Once a year, from a date</option>
+                </select>
+                {(howOften === 'weeks' || howOften === 'months') && (
+                  <div className="mt-2 flex items-center gap-2 text-sm text-gray-700">
+                    <span>Every</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={104}
+                      value={everyN}
+                      onChange={e => setEveryN(e.target.value)}
+                      className="w-20 rounded-lg border border-gray-200 px-3 py-1.5 text-sm focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
+                    />
+                    <span>{howOften}</span>
+                  </div>
+                )}
+                {howOften === 'yearly' && (
+                  <div className="mt-2 flex items-center gap-2 text-sm text-gray-700">
+                    <span>From</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={31}
+                      value={yearlyDay}
+                      onChange={e => setYearlyDay(e.target.value)}
+                      className="w-16 rounded-lg border border-gray-200 px-3 py-1.5 text-sm focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
+                    />
+                    <select
+                      value={yearlyMonth}
+                      onChange={e => setYearlyMonth(parseInt(e.target.value, 10))}
+                      className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
+                    >
+                      {MONTH_NAMES.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+                    </select>
+                    <span>each year</span>
+                  </div>
+                )}
+                {howOften !== 'every' && (
+                  <p className="text-xs text-gray-400 mt-1">
+                    {howOften === 'yearly'
+                      ? 'Asked on the first prep of each van after this date. Added part-way through the year, it first comes up on the next one.'
+                      : 'Asked when due on each van, counted from the last prep that answered it — any answer counts. Every van is asked at its next prep the first time.'}
+                    {' '}When not due it sits in a folded "Not due yet" list and can be done early.
+                  </p>
+                )}
+                {scheduleInvalid && (
+                  <p className="text-xs text-red-500 mt-1">
+                    {howOften === 'yearly' ? 'Pick a day from 1 to 31.' : 'Pick a number from 1 to 104.'}
+                  </p>
+                )}
               </div>
             </>
           )}
@@ -196,7 +383,7 @@ function ItemEditor({
           </button>
           <button
             onClick={handleSave}
-            disabled={!name.trim() || (isPrepCategory && !section)}
+            disabled={!name.trim() || (isPrepCategory && !section) || scheduleInvalid}
             className="flex-1 rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-medium text-white disabled:opacity-40 active:bg-opacity-90"
           >
             {item ? 'Save Changes' : 'Add Item'}
@@ -268,7 +455,10 @@ function ItemRow({
               <span className="text-[10px] text-red-400">flags: {item.flagValues.join(', ')}</span>
             )}
             {hasDetailPrompts && (
-              <span className="text-[10px] text-blue-400">has detail prompts</span>
+              <span className="text-[10px] text-blue-400">has follow-up questions</span>
+            )}
+            {isValidSchedule(item.schedule) && (
+              <span className="text-[10px] text-purple-500">{scheduleLabel(item.schedule).toLowerCase()}</span>
             )}
             {item.notes && (
               <span className="text-[10px] text-gray-400 italic">{item.notes}</span>
