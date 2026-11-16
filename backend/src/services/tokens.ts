@@ -31,7 +31,8 @@ export type TokenAudience =
   | 'trusted_device'          // the op_device cookie: this browser passed the second factor — services/staff-login-security.ts (90 days)
   | 'portal_login_pending'    // freelancer portal: password accepted, the emailed code still owed — services/portal-login-security.ts (10 min)
   | 'portal_device'           // freelancer portal: this phone passed the second step (the portal's portal_device cookie) — same file (90 days)
-  | 'kiosk_device';           // the op_kiosk_device cookie: this tablet was set up as the warehouse kiosk — services/kiosk-devices.ts (365 days, renewed at each PIN)
+  | 'kiosk_device'            // the op_kiosk_device cookie: this tablet was set up as the warehouse kiosk — services/kiosk-devices.ts (365 days, renewed at each PIN)
+  | 'review_optout';          // { email }: the "Don't ask me again" link in Jon's review email — services/review-requests.ts (2 years)
 
 if (!process.env.JWT_SECRET) {
   throw new Error('FATAL: JWT_SECRET environment variable is required');

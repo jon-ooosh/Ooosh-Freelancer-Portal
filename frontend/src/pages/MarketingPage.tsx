@@ -318,11 +318,138 @@ function QrModal({ link, onClose }: { link: TrackedLink; onClose: () => void }) 
   );
 }
 
+// ── Review emails (docs/BUSINESS-FIGURES-SPEC.md §8c) ────────────────────────
+
+interface ReviewOverview {
+  enabled: boolean;
+  sent30: number;
+  optOuts: number;
+  recent: Array<{ jobId: string; jobNumber: number | null; jobName: string | null; status: string; reason: string | null; sentTo: string | null; at: string }>;
+}
+
+const REVIEW_STATUS: Record<string, { label: string; cls: string }> = {
+  sent: { label: 'Sent', cls: 'bg-green-100 text-green-800' },
+  skipped: { label: "Don't send", cls: 'bg-gray-100 text-gray-700' },
+  not_sent: { label: 'Not sent', cls: 'bg-amber-100 text-amber-800' },
+};
+
+function ReviewEmailsPanel() {
+  const [data, setData] = useState<ReviewOverview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [testNote, setTestNote] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try { setData((await api.get<{ data: ReviewOverview }>('/review-requests/overview')).data); }
+    catch (e) { setError((e as Error).message || 'Could not load.'); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const toggle = async () => {
+    if (!data) return;
+    const turningOn = !data.enabled;
+    if (turningOn && !window.confirm(
+      "Turn on Jon's review email?\n\nIt emails clients for real, at 10:15 each morning, about hires completed the day before. "
+      + 'Hires completed in the last 3 days are included on the first morning.',
+    )) return;
+    setBusy(true);
+    setError(null);
+    try { setData((await api.put<{ data: ReviewOverview }>('/review-requests/settings', { enabled: turningOn })).data); }
+    catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const sendTest = async () => {
+    setBusy(true);
+    setError(null);
+    setTestNote(null);
+    try {
+      const r = await api.post<{ data: { sentTo: string; jobNumber: string | null } }>('/review-requests/test', {});
+      setTestNote(`Sent to ${r.data.sentTo}${r.data.jobNumber ? ` — greeting as job ${r.data.jobNumber}'s client would see it` : ''}. The links in it are yours, so "Don't ask me again" would only stop your own address.`);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  if (error && !data) return <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>;
+  if (!data) return <p className="text-sm text-gray-500">Loading…</p>;
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">
+              Jon's review email{' '}
+              <span className={`ml-1 align-middle text-[11px] font-semibold rounded-full px-2 py-0.5 ${data.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>
+                {data.enabled ? 'On' : 'Off'}
+              </span>
+            </h2>
+            <p className="text-sm text-gray-600 mt-0.5">
+              {data.sent30} sent in the last 30 days · {data.optOuts} asked not to be asked again
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={sendTest} disabled={busy}
+              className="px-3 py-2 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50">Send me a test</button>
+            <button type="button" onClick={toggle} disabled={busy}
+              className={`px-3 py-2 text-sm rounded-lg disabled:opacity-50 ${data.enabled ? 'border border-gray-300 hover:bg-gray-50' : 'bg-ooosh-600 text-white hover:bg-ooosh-700'}`}>
+              {data.enabled ? 'Turn off' : 'Turn on'}
+            </button>
+          </div>
+        </div>
+        <ul className="text-xs text-gray-600 space-y-1 list-disc pl-5">
+          <li>From "Jon at Ooosh Tours", replies to jon@oooshtours.co.uk, at 10:15 the day after a hire is Completed.</li>
+          <li>Not sent when the job was completed more than 10 days after the return, the client (organisation or address) was asked in the last year, they used "Don't ask me again", the job is internal, or there's no client email.</li>
+          <li>Each job page has a "Send Jon's review email" tick — untick it for "don't send".</li>
+        </ul>
+        {testNote && <p className="text-xs text-green-700">{testNote}</p>}
+        {error && <p className="text-xs text-red-600">{error}</p>}
+      </div>
+
+      {data.recent.length === 0
+        ? <p className="text-sm text-gray-500 rounded-xl border border-dashed border-gray-300 bg-white p-6 text-center">Nothing yet. Once it's on, each completed hire shows here — sent, or why not.</p>
+        : (
+          <div className="rounded-xl border border-gray-200 bg-white overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="text-xs text-gray-500 whitespace-nowrap">
+                <tr>
+                  <th className="text-left font-semibold px-3 py-2">When</th>
+                  <th className="text-left font-semibold px-3 py-2">Job</th>
+                  <th className="text-left font-semibold px-3 py-2">What happened</th>
+                  <th className="text-left font-semibold px-3 py-2">To / why not</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {data.recent.map((r) => {
+                  const st = REVIEW_STATUS[r.status] || { label: r.status, cls: 'bg-gray-100 text-gray-700' };
+                  const d = new Date(r.at);
+                  return (
+                    <tr key={r.jobId}>
+                      <td className="px-3 py-2 whitespace-nowrap text-gray-600">
+                        {Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'Europe/London' })}
+                      </td>
+                      <td className="px-3 py-2">
+                        <Link to={`/jobs/${r.jobId}`} className="text-ooosh-700 hover:underline">{r.jobNumber ? `J-${r.jobNumber}` : 'Job'}</Link>
+                        {r.jobName && <span className="text-gray-500"> · {r.jobName}</span>}
+                      </td>
+                      <td className="px-3 py-2"><span className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${st.cls}`}>{st.label}</span></td>
+                      <td className="px-3 py-2 text-gray-700">{r.status === 'sent' ? r.sentTo : r.reason}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+    </div>
+  );
+}
+
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export default function MarketingPage() {
   const role = useAuthStore((s) => s.user?.role);
-  const [tab, setTab] = useState<'adverts' | 'links'>('adverts');
+  const [tab, setTab] = useState<'adverts' | 'links' | 'reviews'>('adverts');
   const [adverts, setAdverts] = useState<Placement[] | null>(null);
   const [links, setLinks] = useState<TrackedLink[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -368,23 +495,29 @@ export default function MarketingPage() {
             Where we advertise and what it brings in · <Link to="/money/business" className="text-ooosh-700 hover:underline">Business figures</Link>
           </p>
         </div>
-        <button type="button" onClick={() => (tab === 'adverts' ? setAdvertModal('new') : setLinkModal('new'))}
-          className="px-3 py-2 text-sm rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700">
-          {tab === 'adverts' ? '+ Add an advert' : '+ New tracked link'}
-        </button>
+        {tab !== 'reviews' && (
+          <button type="button" onClick={() => (tab === 'adverts' ? setAdvertModal('new') : setLinkModal('new'))}
+            className="px-3 py-2 text-sm rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700">
+            {tab === 'adverts' ? '+ Add an advert' : '+ New tracked link'}
+          </button>
+        )}
       </div>
 
       <div className="inline-flex rounded-lg border border-gray-300 p-0.5 text-sm">
-        {(['adverts', 'links'] as const).map((t) => (
+        {(['adverts', 'links', 'reviews'] as const).map((t) => (
           <button key={t} type="button" onClick={() => setTab(t)}
             className={`px-3 py-1.5 rounded-md ${tab === t ? 'bg-ooosh-600 text-white' : 'text-gray-700 hover:bg-gray-50'}`}>
-            {t === 'adverts' ? `Adverts${adverts ? ` (${adverts.length})` : ''}` : `Tracked links${links ? ` (${links.length})` : ''}`}
+            {t === 'adverts' ? `Adverts${adverts ? ` (${adverts.length})` : ''}`
+              : t === 'links' ? `Tracked links${links ? ` (${links.length})` : ''}`
+              : 'Review emails'}
           </button>
         ))}
       </div>
 
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
-      {(!adverts || !links) && !error && <p className="text-sm text-gray-500">Loading…</p>}
+      {(!adverts || !links) && !error && tab !== 'reviews' && <p className="text-sm text-gray-500">Loading…</p>}
+
+      {tab === 'reviews' && <ReviewEmailsPanel />}
 
       {tab === 'adverts' && adverts && (
         adverts.length === 0

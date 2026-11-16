@@ -53,6 +53,10 @@ export interface SendEmailOptions {
    *  HTML from structured data. Template registration still controls
    *  variant + preheader + EMAIL_LIVE_TEMPLATES allowlist + audit log. */
   bodyHtmlOverride?: string;
+  /** Where replies go. Default info@oooshtours.co.uk. Jon's review email sets jon@. */
+  replyTo?: string;
+  /** The sender's display name, on the usual sending address. Default "Ooosh Tours". */
+  fromName?: string;
 }
 
 export interface SendEmailResult {
@@ -102,6 +106,14 @@ function getEmailConfig() {
       from: process.env.SMTP_FROM || 'Ooosh Tours <notifications@oooshtours.co.uk>',
     },
   };
+}
+
+/** 'Ooosh Tours <notifications@…>' → 'Jon at Ooosh Tours <notifications@…>': same address, another name. */
+export function withFromName(from: string, name: string): string {
+  const m = /<([^>]+)>/.exec(from);
+  const address = (m ? m[1] : from).trim();
+  const safe = name.replace(/["<>\r\n]/g, '').trim();
+  return safe ? `"${safe}" <${address}>` : from;
 }
 
 /** True when the Resend provider is selected AND an API key is present. */
@@ -291,8 +303,8 @@ async function sendViaResend(
     to: toList.map(String),
     subject: mailOptions.subject,
     html: mailOptions.html,
-    // Replies land in the info@ inbox (the From address).
-    reply_to: 'info@oooshtours.co.uk',
+    // Replies land in the info@ inbox (the From address) unless the sender says otherwise.
+    reply_to: typeof mailOptions.replyTo === 'string' && mailOptions.replyTo ? mailOptions.replyTo : 'info@oooshtours.co.uk',
   };
   if (ccList.length > 0) payload.cc = ccList.map(String);
   if (attachments && attachments.length > 0) payload.attachments = attachments;
@@ -506,12 +518,13 @@ class EmailService {
       }));
 
       const mailOptions: SendMailOptions = {
-        from: config.smtp.from,
+        from: options.fromName ? withFromName(config.smtp.from, options.fromName) : config.smtp.from,
         to: actualRecipient,
         cc: isRedirected ? undefined : options.cc,
         subject: isRedirected ? `[TEST] ${subject}` : subject,
         html,
         attachments: mailAttachments,
+        ...(options.replyTo ? { replyTo: options.replyTo } : {}),
       };
       const result = await sendMailWithRetry(() => this.deliver(mailOptions), `"${templateId}" to ${actualRecipient}`);
 
