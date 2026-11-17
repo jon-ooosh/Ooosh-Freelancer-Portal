@@ -14,7 +14,7 @@ export interface GoodwillCredit {
   owner_name: string;
   amount_ex_vat: number;
   reason: string;
-  source_kind: 'close_out' | 'problem' | 'cancellation' | 'organisation' | 'person';
+  source_kind: 'close_out' | 'problem' | 'cancellation' | 'organisation' | 'person' | 'referral';
   source_job_id: string | null;
   source_job_number: number | null;
   source_issue_id: string | null;

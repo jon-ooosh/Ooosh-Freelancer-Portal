@@ -582,6 +582,21 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: review request emails scheduled daily at 10:15 Europe/London');
 
+  // ── Referral thank-yous due ─────────────────────────────────────────
+  // Daily 10:20 UK: a referral whose friend's hire is now Completed becomes "thank-you
+  // due", with a To Do for each admin. Nothing is sent or given automatically
+  // (services/referrals.ts, docs/BUSINESS-FIGURES-SPEC.md §8d).
+  cron.schedule('20 10 * * *', async () => {
+    try {
+      const { runReferralRewardsDue } = await import('../services/referrals');
+      const n = await runReferralRewardsDue();
+      if (n) console.log(`Scheduler: ${n} referral thank-you(s) now due`);
+    } catch (err) {
+      console.error('Scheduler: referral run failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: referral thank-yous checked daily at 10:20 Europe/London');
+
   // ── Freelancer out-of-hours emails ──────────────────────────────────
   // Every half hour 10:00–20:30 UK: everyone bringing an Ooosh van back after
   // we've closed today, ticked by hand or due back late by the automatic rule

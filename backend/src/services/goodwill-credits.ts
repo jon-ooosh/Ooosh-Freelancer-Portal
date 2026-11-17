@@ -19,7 +19,7 @@ import { ukDatePlus } from './uk-date';
 import { logIssueEvent } from './job-issues';
 
 export type GoodwillStatus = 'offered' | 'reserved' | 'used' | 'withdrawn' | 'expired';
-export type GoodwillSourceKind = 'close_out' | 'problem' | 'cancellation' | 'organisation' | 'person';
+export type GoodwillSourceKind = 'close_out' | 'problem' | 'cancellation' | 'organisation' | 'person' | 'referral';
 
 export interface GoodwillCredit {
   id: string;

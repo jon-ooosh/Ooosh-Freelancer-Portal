@@ -32,6 +32,7 @@ import { getFrontendUrl } from '../config/app-urls';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { createPipelineEnquiry, EnquiryValidationError } from '../services/pipeline-enquiry';
 import { saveMarketingSource } from '../services/marketing-source';
+import { referralFromMarketingSource } from '../services/referrals';
 import {
   splitName, findOrCreatePersonByEmail, resolveOrCreateOrganisation, linkPersonToOrganisation,
 } from '../services/address-book-resolve';
@@ -411,6 +412,9 @@ router.post('/', intakeLimiter, authenticateEnquiryIntake, async (req: Request, 
       heardAbout: raw.heard_about, heardAboutDetail: raw.heard_about_detail,
       first: raw.attribution, last: raw.attribution_last,
     });
+    // Came through a client's personal referral link? Then it's their referral (§8d).
+    // Never throws; one that doesn't count (a returning client, say) is just not recorded.
+    await referralFromMarketingSource(id);
 
     // Attach any client-uploaded files (already pushed to OP's R2 by the Worker)
     // to the new job's Files tab. Fresh-create path only — the dedup return above

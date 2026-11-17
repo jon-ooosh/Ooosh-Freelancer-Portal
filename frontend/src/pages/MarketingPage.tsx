@@ -7,7 +7,7 @@
  * counted and forwarded to the chosen page; an enquiry from it carries the code.
  */
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import ModalShell from '../components/ModalShell';
@@ -446,11 +446,211 @@ function ReviewEmailsPanel() {
   );
 }
 
+// ── Referrals (docs/BUSINESS-FIGURES-SPEC.md §8d) ────────────────────────────
+
+interface ReferralOverview {
+  offer: { referrerReward: string | null; friendOffer: string | null; friendCreditExVat: number | null; since: string | null };
+  emailsEnabled: boolean;
+  totals: { links: number; scans: number; referrals: number; booked: number; due: number };
+  referrals: Array<{
+    id: string; referrerPersonId: string; referrerName: string; referrerHasEmail: boolean;
+    jobId: string; jobNumber: number | null; jobName: string | null; how: string; status: string; stage: string;
+    createdAt: string; offer: { referrerReward: string | null }; rewardDetail: string | null; declinedReason: string | null;
+    welcomeCreditRef: string | null; thanksEmailSentAt: string | null;
+  }>;
+}
+
+const STAGE_CLS: Record<string, string> = {
+  'Thank-you due': 'bg-amber-100 text-amber-800',
+  Thanked: 'bg-green-100 text-green-800',
+  Declined: 'bg-gray-100 text-gray-600',
+  "Didn't book": 'bg-gray-100 text-gray-600',
+};
+const HOW_LABEL: Record<string, string> = { link: 'Their link', named: 'Named', card: 'Card' };
+
+function ReferralsPanel() {
+  const [data, setData] = useState<ReferralOverview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [offer, setOffer] = useState({ referrerReward: '', friendOffer: '', credit: '' });
+  const [editingOffer, setEditingOffer] = useState(false);
+  const [thanking, setThanking] = useState<ReferralOverview['referrals'][number] | null>(null);
+  const [detail, setDetail] = useState('');
+  const [sendEmail, setSendEmail] = useState(true);
+
+  const load = useCallback(async () => {
+    try {
+      const d = (await api.get<{ data: ReferralOverview }>('/referrals/overview')).data;
+      setData(d);
+      setOffer({ referrerReward: d.offer.referrerReward || '', friendOffer: d.offer.friendOffer || '', credit: d.offer.friendCreditExVat ? String(d.offer.friendCreditExVat) : '' });
+    } catch (e) { setError((e as Error).message || 'Could not load.'); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const run = async (fn: () => Promise<unknown>, done?: string) => {
+    setBusy(true);
+    setError(null);
+    setNote(null);
+    try { await fn(); await load(); if (done) setNote(done); } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  if (error && !data) return <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>;
+  if (!data) return <p className="text-sm text-gray-500">Loading…</p>;
+  const t = data.totals;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold text-gray-900">This month's offer</h2>
+            {!editingOffer && <button type="button" onClick={() => setEditingOffer(true)} className="text-sm text-ooosh-700 hover:underline">Change</button>}
+          </div>
+          {!editingOffer ? (
+            <dl className="text-sm space-y-1">
+              <div><dt className="inline text-gray-500">The referrer gets: </dt><dd className="inline text-gray-900">{data.offer.referrerReward || <em className="text-gray-400">a thank-you (not set)</em>}</dd></div>
+              <div><dt className="inline text-gray-500">Their friend gets: </dt><dd className="inline text-gray-900">{data.offer.friendOffer || <em className="text-gray-400">nothing set</em>}</dd></div>
+              <div><dt className="inline text-gray-500">Welcome credit: </dt><dd className="inline text-gray-900">{data.offer.friendCreditExVat ? `£${data.offer.friendCreditExVat} + VAT (a goodwill credit, given by a manager)` : <em className="text-gray-400">none</em>}</dd></div>
+            </dl>
+          ) : (
+            <div className="space-y-2 text-sm">
+              <label className="block"><span className="text-gray-600">The referrer gets (finishes "we'll send you …")</span>
+                <input className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1.5" value={offer.referrerReward} placeholder="a Tour Store voucher" onChange={(e) => setOffer({ ...offer, referrerReward: e.target.value })} /></label>
+              <label className="block"><span className="text-gray-600">Their friend gets (finishes "they'll get …")</span>
+                <input className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1.5" value={offer.friendOffer} placeholder="£20 off their first hire" onChange={(e) => setOffer({ ...offer, friendOffer: e.target.value })} /></label>
+              <label className="block"><span className="text-gray-600">Welcome credit, £ ex VAT (blank = none)</span>
+                <input className="mt-0.5 w-32 border border-gray-300 rounded px-2 py-1.5" inputMode="decimal" value={offer.credit} placeholder="20" onChange={(e) => setOffer({ ...offer, credit: e.target.value })} /></label>
+              <p className="text-xs text-gray-500">Each referral keeps the offer that was live when it came in, so you can compare offers later.</p>
+              <div className="flex gap-2">
+                <button type="button" disabled={busy} className="px-3 py-1.5 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50"
+                  onClick={() => run(async () => {
+                    const credit = offer.credit.trim() ? Number(offer.credit) : null;
+                    if (credit !== null && !(credit > 0)) throw new Error('The welcome credit must be a number of pounds');
+                    await api.put('/referrals/offer', { referrerReward: offer.referrerReward.trim() || null, friendOffer: offer.friendOffer.trim() || null, friendCreditExVat: credit });
+                    setEditingOffer(false);
+                  }, 'Offer saved.')}>Save</button>
+                <button type="button" onClick={() => setEditingOffer(false)} className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50">Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-base font-semibold text-gray-900">
+              Referral emails{' '}
+              <span className={`ml-1 align-middle text-[11px] font-semibold rounded-full px-2 py-0.5 ${data.emailsEnabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>{data.emailsEnabled ? 'On' : 'Off'}</span>
+            </h2>
+            <div className="flex gap-2">
+              <button type="button" disabled={busy} onClick={() => run(async () => { await api.post('/referrals/test', {}); }, 'Both test emails sent to you.')}
+                className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50">Send me a test</button>
+              <button type="button" disabled={busy}
+                onClick={() => {
+                  if (!data.emailsEnabled && !window.confirm('Turn on the "someone you recommended has been in touch" email? It goes to the referrer for real, from you.')) return;
+                  run(() => api.put('/referrals/settings', { emailsEnabled: !data.emailsEnabled }));
+                }}
+                className={`px-3 py-1.5 text-sm rounded-lg disabled:opacity-50 ${data.emailsEnabled ? 'border border-gray-300 hover:bg-gray-50' : 'bg-ooosh-600 text-white hover:bg-ooosh-700'}`}>
+                {data.emailsEnabled ? 'Turn off' : 'Turn on'}
+              </button>
+            </div>
+          </div>
+          <p className="text-sm text-gray-600">{t.links} personal links · {t.scans} visits · {t.referrals} referrals · {t.booked} booked · {t.due} thank-you{t.due === 1 ? '' : 's'} due</p>
+          <ul className="text-xs text-gray-600 space-y-1 list-disc pl-5">
+            <li>Every client in Jon's review email gets their own link (go.oooshtours.co.uk/r/…); anyone else from "Make a referral link" on their page.</li>
+            <li>A friend who enquires through a link is linked automatically. A name they mention, or a card, is linked with "Referred by" on the job.</li>
+            <li>Only a new client counts, once. When their hire is Completed a To Do asks for the thank-you — nothing is sent or given by itself.</li>
+          </ul>
+          {note && <p className="text-xs text-green-700">{note}</p>}
+          {error && <p className="text-xs text-red-600">{error}</p>}
+        </div>
+      </div>
+
+      {data.referrals.length === 0
+        ? <p className="text-sm text-gray-500 rounded-xl border border-dashed border-gray-300 bg-white p-6 text-center">No referrals yet.</p>
+        : (
+          <div className="rounded-xl border border-gray-200 bg-white overflow-x-auto">
+            <table className="min-w-full text-sm">
+              <thead className="text-xs text-gray-500 whitespace-nowrap">
+                <tr>
+                  <th className="text-left font-semibold px-3 py-2">When</th>
+                  <th className="text-left font-semibold px-3 py-2">Recommended by</th>
+                  <th className="text-left font-semibold px-3 py-2">Friend's job</th>
+                  <th className="text-left font-semibold px-3 py-2">How</th>
+                  <th className="text-left font-semibold px-3 py-2">Where it's got to</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {data.referrals.map((r) => {
+                  const d = new Date(r.createdAt);
+                  return (
+                    <tr key={r.id}>
+                      <td className="px-3 py-2 whitespace-nowrap text-gray-600">{Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'Europe/London' })}</td>
+                      <td className="px-3 py-2"><Link to={`/people/${r.referrerPersonId}`} className="text-ooosh-700 hover:underline">{r.referrerName}</Link></td>
+                      <td className="px-3 py-2">
+                        <Link to={`/jobs/${r.jobId}`} className="text-ooosh-700 hover:underline">{r.jobNumber ? `J-${r.jobNumber}` : 'Job'}</Link>
+                        {r.jobName && <span className="text-gray-500"> · {r.jobName}</span>}
+                        {r.welcomeCreditRef && <span className="text-gray-400"> · {r.welcomeCreditRef}</span>}
+                      </td>
+                      <td className="px-3 py-2 text-gray-600">{HOW_LABEL[r.how] || r.how}</td>
+                      <td className="px-3 py-2">
+                        <span className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${STAGE_CLS[r.stage] || 'bg-blue-50 text-blue-700'}`}>{r.stage}</span>
+                        {r.rewardDetail && <span className="text-xs text-gray-500"> {r.rewardDetail}</span>}
+                        {r.declinedReason && <span className="text-xs text-gray-500"> {r.declinedReason}</span>}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap text-right text-xs">
+                        {(r.status === 'open' || r.status === 'reward_due') && (
+                          <>
+                            <button type="button" className="text-ooosh-700 hover:underline mr-3"
+                              onClick={() => { setThanking(r); setDetail(r.offer.referrerReward || ''); setSendEmail(r.referrerHasEmail); }}>Thank-you given…</button>
+                            <button type="button" className="text-gray-500 hover:underline"
+                              onClick={() => { const why = window.prompt('Why is this referral declined?'); if (why && why.trim()) run(() => api.post(`/referrals/${r.id}/decline`, { reason: why.trim() })); }}>Decline</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+      {thanking && (
+        <ModalShell title={`Thank ${thanking.referrerName}`} subtitle="Mark the thank-you as given" onClose={() => setThanking(null)} width="max-w-md">
+          <div className="space-y-3 text-sm">
+            <label className="block"><span className="text-gray-600">What did they get?</span>
+              <input autoFocus className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1.5" value={detail} placeholder="your Tour Store code is THANKS20" onChange={(e) => setDetail(e.target.value)} /></label>
+            <label className={`flex items-start gap-2 ${thanking.referrerHasEmail ? '' : 'opacity-50'}`}>
+              <input type="checkbox" className="mt-0.5" disabled={!thanking.referrerHasEmail} checked={sendEmail && thanking.referrerHasEmail} onChange={(e) => setSendEmail(e.target.checked)} />
+              <span>Email them Jon's thank-you with this in it, and their link to share again{thanking.referrerHasEmail ? '' : ' (no email address on file)'}</span>
+            </label>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setThanking(null)} className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50">Cancel</button>
+              <button type="button" disabled={busy} className="px-3 py-1.5 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50"
+                onClick={() => run(async () => {
+                  await api.post(`/referrals/${thanking.id}/thanked`, { detail, sendEmail: sendEmail && thanking.referrerHasEmail });
+                  setThanking(null);
+                }, 'Thank-you recorded.')}>Save</button>
+            </div>
+          </div>
+        </ModalShell>
+      )}
+    </div>
+  );
+}
+
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export default function MarketingPage() {
   const role = useAuthStore((s) => s.user?.role);
-  const [tab, setTab] = useState<'adverts' | 'links' | 'reviews'>('adverts');
+  // ?tab=referrals opens a tab directly (a referral To Do links here).
+  const [params] = useSearchParams();
+  const startTab = params.get('tab');
+  const [tab, setTab] = useState<'adverts' | 'links' | 'reviews' | 'referrals'>(
+    startTab === 'links' || startTab === 'reviews' || startTab === 'referrals' ? startTab : 'adverts',
+  );
   const [adverts, setAdverts] = useState<Placement[] | null>(null);
   const [links, setLinks] = useState<TrackedLink[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -496,7 +696,7 @@ export default function MarketingPage() {
             Where we advertise and what it brings in · <Link to="/money/business" className="text-ooosh-700 hover:underline">Business figures</Link>
           </p>
         </div>
-        {tab !== 'reviews' && (
+        {(tab === 'adverts' || tab === 'links') && (
           <button type="button" onClick={() => (tab === 'adverts' ? setAdvertModal('new') : setLinkModal('new'))}
             className="px-3 py-2 text-sm rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700">
             {tab === 'adverts' ? '+ Add an advert' : '+ New tracked link'}
@@ -505,20 +705,21 @@ export default function MarketingPage() {
       </div>
 
       <div className="inline-flex rounded-lg border border-gray-300 p-0.5 text-sm">
-        {(['adverts', 'links', 'reviews'] as const).map((t) => (
+        {(['adverts', 'links', 'reviews', 'referrals'] as const).map((t) => (
           <button key={t} type="button" onClick={() => setTab(t)}
             className={`px-3 py-1.5 rounded-md ${tab === t ? 'bg-ooosh-600 text-white' : 'text-gray-700 hover:bg-gray-50'}`}>
             {t === 'adverts' ? `Adverts${adverts ? ` (${adverts.length})` : ''}`
               : t === 'links' ? `Tracked links${links ? ` (${links.length})` : ''}`
-              : 'Review emails'}
+              : t === 'reviews' ? 'Review emails' : 'Referrals'}
           </button>
         ))}
       </div>
 
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
-      {(!adverts || !links) && !error && tab !== 'reviews' && <p className="text-sm text-gray-500">Loading…</p>}
+      {(!adverts || !links) && !error && (tab === 'adverts' || tab === 'links') && <p className="text-sm text-gray-500">Loading…</p>}
 
       {tab === 'reviews' && <ReviewEmailsPanel />}
+      {tab === 'referrals' && <ReferralsPanel />}
 
       {tab === 'adverts' && adverts && (
         adverts.length === 0

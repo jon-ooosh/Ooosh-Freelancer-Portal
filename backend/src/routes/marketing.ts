@@ -143,6 +143,11 @@ router.post('/links', validate(linkSchema), async (req: AuthRequest, res: Respon
     const b = req.body as z.infer<typeof linkSchema>;
     const destination = checkDestination(b.destination);
     const code = normaliseCode(b.code || b.label || '');
+    // 'ref-…' is how a personal referral link travels through the website (§8d).
+    if (code.startsWith('ref-')) {
+      res.status(400).json({ error: 'Codes starting "ref-" are kept for personal referral links — pick another' });
+      return;
+    }
     if (!isValidCode(code)) {
       res.status(400).json({ error: 'Give the link a short code (letters, numbers and dashes), e.g. brighton-source-dec' });
       return;

@@ -43,6 +43,12 @@ import WatchBandTick from '../components/leads/WatchBandTick';
 import { validateDateTimeOrdering, addDays } from '../lib/jobDates';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
+import ReferredBy from '../components/referrals/ReferredBy';
+
+/** Past the enquiry stages, where the pipeline row (and its "Referred by") isn't shown. */
+function isConfirmedOrLater(status: string | null | undefined): boolean {
+  return !!status && !['new_enquiry', 'quoting', 'paused', 'provisional', 'lost', 'cancelled'].includes(status);
+}
 import { displayFullName } from '../lib/displayName';
 import MoneyTab from '../components/MoneyTab';
 import RackPlanModal from '../components/rackplan/RackPlanModal';
@@ -4289,6 +4295,8 @@ function JobDetailContent() {
                     Website: {marketing.tracked}{marketing.campaign ? ` · ${marketing.campaign}` : ''}
                   </span>
                 )}
+                {/* Who recommended them (docs/BUSINESS-FIGURES-SPEC.md §8d) */}
+                {!job.is_internal && <ReferredBy jobId={job.id} heardAbout={marketing?.heardAbout ?? null} role={user?.role} />}
 
                 {/* Next Chase Date — opens full chase modal (hidden for lost/operational statuses) */}
                 {!isOperational && job.pipeline_status !== 'lost' && (
@@ -4728,6 +4736,12 @@ function JobDetailContent() {
               {job.notes && (
                 <p className="text-xs text-gray-400 truncate"><span className="font-medium text-gray-500">Notes:</span> {job.notes}</p>
               )}
+            </div>
+          )}
+          {/* Once it's booked the enquiry row is gone — "Referred by" lives here (§8d) */}
+          {showDetailsNotes && !job.is_internal && isConfirmedOrLater(job.pipeline_status) && (
+            <div className="mt-2 ml-5">
+              <ReferredBy jobId={job.id} heardAbout={marketing?.heardAbout ?? null} role={user?.role} />
             </div>
           )}
           {showDetailsNotes && (
