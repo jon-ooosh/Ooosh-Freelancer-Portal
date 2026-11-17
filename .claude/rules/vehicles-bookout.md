@@ -53,6 +53,12 @@ invariants and multi-van scramble write-up in `docs/reference/SHARED-UTILITIES.m
 - **Candidates are deduped per VEHICLE, not per assignment row.** One van routinely has several live rows on a job (HH 15307 carried three for RX24SZG). The freelancer is reading a number plate, so offering the same reg three times is worse than offering it once.
 - **On a multi-van job the customer hire-form rows are NOT interchangeable.** Pair the allocation row to its customer row by `van_requirement_index` before falling back to lowest-index-first, or van #2 gets van #1's hirer, excess and hire agreement stapled to it.
 
+## Prep checklist
+
+- **A prep item's NAME is its key in history** — prep sessions, the tyre grid, tread trends and the server's forecast all match items by name. Rename one and its history goes quiet. Wording a person reads belongs in `notes` or at render time (the tyre corners' "Passenger side" / "Driver side" is added by `withTyreSide()` in `PrepPage.tsx`; left = the van's own left = passenger side, jon Nov 2026).
+- **Periodic prep checks** (Nov 2026): an item with a `schedule` is asked only when due on that van — `lib/prep-schedule.ts` is THE rule (every N weeks / months since last done; or once a year from a date, first due on the NEXT date when added mid-year via `addedOn`). Last done per van lives in R2 `prep-sessions/{REG}/_periodic.json`, written by `save-prep` from `periodicDone` (any answer counts, a save never winds a date back), read by `GET /get-periodic-checks` (on `FREELANCER_PREP_ALLOW`). Not-due checks sit in an optional folded "Not due yet" list; a failed load asks every check.
+- **Settings › Checklists has no JSON box** — follow-up questions are built per option (choices one per line). Item saves must carry `schedule` through.
+
 ## Condition report PDFs
 
 - **Thread `eventId` through every generation path so the PDF is FROZEN to R2** at `condition-reports/{REG}/{eventId}.pdf`. That frozen copy is the real record.

@@ -1017,6 +1017,7 @@ const FREELANCER_PREP_ALLOW: Array<{ method: string; pattern: RegExp }> = [
   { method: 'GET',   pattern: /^\/get-checklist-settings$/ },
   { method: 'GET',   pattern: /^\/get-events$/ },
   { method: 'GET',   pattern: /^\/get-prep-history$/ },
+  { method: 'GET',   pattern: /^\/get-periodic-checks$/ },
   { method: 'POST',  pattern: /^\/save-event$/ },
   { method: 'POST',  pattern: /^\/save-prep$/ },
   { method: 'POST',  pattern: /^\/upload-photo$/ },
@@ -1038,7 +1039,7 @@ router.use((req: FlexibleVehicleRequest, res: Response, next) => {
   const isMine = (reg: unknown) => typeof reg === 'string' && normaliseReg(reg) === mine;
   const deny = (msg: string) => { res.status(403).json({ error: msg }); };
 
-  if (req.method === 'GET' && (req.path === '/get-events' || req.path === '/get-prep-history')) {
+  if (req.method === 'GET' && (req.path === '/get-events' || req.path === '/get-prep-history' || req.path === '/get-periodic-checks')) {
     if (!isMine(req.query.vehicleReg)) return deny('That is not the van you are prepping');
   }
   if (req.method === 'GET' && /^\/fleet\/[^/]+$/.test(req.path)) {
@@ -3804,6 +3805,16 @@ router.post('/save-prep', async (req: AuthRequest, res: Response) => {
       console.warn('[vehicles/prep] Failed to update needs_external_wash:', err);
     }
 
+    // Periodic checks (deadlock lube, Premium wifi, toll stickers) are asked
+    // only when due, judged per van from the last prep that answered them —
+    // kept here. Any answer counts as done. A save older than what's stored
+    // never winds a check back. Non-blocking: never fails the prep.
+    try {
+      await recordPeriodicChecks(reg, data, eventId, indexEntry.date);
+    } catch (err) {
+      console.warn('[vehicles/prep] Failed to record periodic checks:', err);
+    }
+
     // Low tyre tread alert. The prep checklist is where the change decision is
     // made, so the vehicle manager is bell+emailed at prep (NOT book-out — too
     // late to plan a swap by then) whenever any tyre is at/below the amber
@@ -3833,6 +3844,60 @@ router.post('/save-prep', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('[vehicles/prep] save-prep error:', error);
     res.status(500).json({ error: 'Failed to save prep session' });
+  }
+});
+
+/**
+ * Periodic prep checks — when each was last done on a van. One small JSON per
+ * van beside its prep sessions: { checks: { [itemName]: { lastDoneOn, value,
+ * by, eventId } } }. The due rule itself is the frontend's
+ * `modules/vehicles/lib/prep-schedule.ts`.
+ */
+interface PeriodicCheckRecord {
+  lastDoneOn: string;
+  value: string;
+  by: string | null;
+  eventId: string;
+}
+
+function periodicChecksKey(reg: string): string {
+  return `prep-sessions/${reg}/_periodic.json`;
+}
+
+async function recordPeriodicChecks(reg: string, data: any, eventId: string, date: string): Promise<void> {
+  const done: any[] = Array.isArray(data?.periodicDone) ? data.periodicDone : [];
+  const answered = done.filter(d => typeof d?.name === 'string' && d.name.trim() && typeof d?.value === 'string' && d.value.trim());
+  if (answered.length === 0 || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+
+  const key = periodicChecksKey(reg);
+  const current = await readR2Json<{ checks: Record<string, PeriodicCheckRecord> }>(key);
+  const checks: Record<string, PeriodicCheckRecord> = current?.checks && typeof current.checks === 'object' ? current.checks : {};
+  for (const d of answered) {
+    const name = d.name.trim();
+    const existing = checks[name];
+    if (existing && typeof existing.lastDoneOn === 'string' && existing.lastDoneOn > date) continue;
+    checks[name] = { lastDoneOn: date, value: d.value.trim(), by: data?.preparedBy || null, eventId };
+  }
+  await writeR2Json(key, { checks });
+}
+
+/**
+ * GET /api/vehicles/get-periodic-checks?vehicleReg=
+ * When each periodic prep check was last done on this van. Empty when none
+ * has been (every check is then due — "not done on this van yet").
+ */
+router.get('/get-periodic-checks', async (req: AuthRequest, res: Response) => {
+  try {
+    const vehicleReg = req.query.vehicleReg as string | undefined;
+    if (!vehicleReg) {
+      res.status(400).json({ error: 'vehicleReg is required' });
+      return;
+    }
+    const data = await readR2Json<{ checks: Record<string, PeriodicCheckRecord> }>(periodicChecksKey(vehicleReg.toUpperCase()));
+    res.json({ checks: data?.checks && typeof data.checks === 'object' ? data.checks : {} });
+  } catch (error) {
+    console.error('[vehicles/prep] get-periodic-checks error:', error);
+    res.status(500).json({ error: 'Failed to load periodic checks' });
   }
 });
 

@@ -14,6 +14,7 @@
  */
 
 import { apiFetch } from '../config/api-config'
+import type { PrepSchedule } from './prep-schedule'
 
 // ── Public types ──
 
@@ -39,6 +40,8 @@ export interface ChecklistItem {
   unit: string                              // For 'number' type: "PSI", "mm", etc.
   section: string                           // Section grouping: "Engine", "Exterior", etc.
   detailPrompts: Record<string, DetailPrompt>  // Maps option value → follow-up detail prompt
+  /** Prep only: asked only when due on that van (lib/prep-schedule.ts). Absent = every prep. */
+  schedule?: PrepSchedule
 }
 
 export interface SettingsData {
