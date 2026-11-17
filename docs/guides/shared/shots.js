@@ -25,12 +25,17 @@ function ukToday(offsetDays = 0) {
  * A phone-sized browser. With `secret` (the portal's SESSION_SECRET), it also
  * carries a fake login cookie so the signed-in pages open.
  */
-async function phone({ base, secret, user = { id: 'u1', email: 'alex@example.com', name: 'Alex Morgan' } }) {
+async function phone({ base, secret, user = { id: 'u1', email: 'alex@example.com', name: 'Alex Morgan' }, cameraVideo }) {
   const { chromium } = loadPlaywright()
-  const browser = await chromium.launch()
+  // `cameraVideo`: a .mjpeg / .y4m the phone's camera "films" (the shop till's
+  // barcode scanner), with camera permission already granted.
+  const browser = await chromium.launch(cameraVideo ? {
+    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${cameraVideo}`],
+  } : {})
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true,
     timezoneId: 'Europe/London', locale: 'en-GB',
+    ...(cameraVideo ? { permissions: ['camera'] } : {}),
   })
   // `next dev` floats its "N" badge over the bottom-left of every page: never in a guide.
   await context.addInitScript(() => {

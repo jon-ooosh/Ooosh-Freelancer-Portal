@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/copy-zxing-wasm.cjs",
     "dev": "next dev",
+    "prebuild": "node scripts/copy-zxing-wasm.cjs",
     "build": "next build",
     "start": "next start"
   },
@@ -16,6 +18,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.6.2",
+    "barcode-detector": "3.2.3",
     "bcryptjs": "^3.0.3",
     "form-data": "^4.0.6",
     "jose": "^6.2.17",

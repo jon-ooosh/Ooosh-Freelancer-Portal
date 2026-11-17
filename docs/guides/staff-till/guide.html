@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<title>The shop till iPad and scanner</title>
+<!--
+  Source of the STAFF guide to the warehouse shop till on the iPad
+  (/warehouse/till) with the Bluetooth barcode scanner (a ScanAvenger
+  Wireless Portable 1D, Nov 2026). A PDF, uploaded to OP as a Staff Document
+  for staff only: NOT shared with freelancers (studio sitters use their
+  phones; their guide is shop-till/).
+
+  Text only: the screens it describes are the iPad's own, not OP's.
+  What the till does with a scan: frontend/src/hooks/useBarcodeScanner.ts and
+  frontend/src/pages/ShopTillPage.tsx. Keep the messages quoted here in step
+  with that page.
+
+  PDF: node docs/guides/shared/build-pdf.js staff-till
+  House rules for this copy: British English, no em or en dashes.
+-->
+<link rel="stylesheet" href="../shared/guide.css">
+<style>
+  :root { --footer: "Shop till iPad guide"; }
+</style>
+</head>
+<body>
+
+<!-- ── Cover ──────────────────────────────────────────────────────────── -->
+<section class="page cover">
+  <img class="logo" src="../../../public/ooosh-tours-logo-small.png" alt="Ooosh! Tours">
+  <h1>The shop till iPad and scanner</h1>
+  <p class="sub">For Ooosh staff at the shop counter</p>
+  <p>The iPad on the counter runs the shop till. The barcode scanner beside it is connected to the iPad by Bluetooth.</p>
+  <p>Scanning is the safest way to ring something up. Some strings and tapes look almost the same but cost very different amounts, and the scanner never mixes them up.</p>
+
+  <div class="rules">
+    <h3>Five things to remember</h3>
+    <ol>
+      <li><b>Scan, don't search</b>, whenever the item has a barcode.</li>
+      <li>Scan the same item again for a <b>second one</b>.</li>
+      <li>Need to type? Tap the <b>keyboard icon</b> at the bottom left, then <b>Show Keyboard</b>.</li>
+      <li>Check the <b>basket</b> before you take the money.</li>
+      <li>Item won't scan? <b>Search by name</b>, and tell the office so the barcode gets added.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ── 1. Scanning ────────────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">1</span><h2>Scanning an item</h2></div>
+  <p>Open the till, point the scanner at the barcode and press the trigger. It beeps, and the item goes straight into the basket.</p>
+  <ul>
+    <li><b>Two of the same?</b> Scan it twice, or change the number in the basket.</li>
+    <li><b>Doesn't matter where you've tapped.</b> A scan always goes to the basket, even if you last tapped a quantity box or a button.</li>
+    <li><b>Mid payment?</b> A scan while the card reader is waiting adds nothing. The till says so. Finish the payment, then scan again.</li>
+  </ul>
+  <div class="tip"><p>One line can hold up to <b>999</b> of an item. The till won't take more, so a barcode typed into a quantity box by accident can't ring up thousands.</p></div>
+</section>
+
+<!-- ── 2. Typing ──────────────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">2</span><h2>Typing with the scanner connected</h2></div>
+  <p>The iPad treats the scanner as a keyboard. While it's connected, the iPad hides its own on-screen keyboard. That's normal, and nothing is broken.</p>
+  <p>To type something (a search, an email for a receipt, a note):</p>
+  <ol>
+    <li>Tap the box you want to type in.</li>
+    <li>Tap the <b>keyboard icon</b> at the bottom left of the screen.</li>
+    <li>Tap <b>Show Keyboard</b>.</li>
+  </ol>
+  <p>The on-screen keyboard also comes back by itself whenever the scanner is switched off or out of range.</p>
+  <div class="tip"><p>The scanner is set never to go to sleep, so it stays connected all day. If scans stop arriving, check it's switched on and charged, then try again.</p></div>
+</section>
+
+<!-- ── 3. When a scan doesn't work ────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">3</span><h2>When a scan doesn't add the item</h2></div>
+  <p>The till says what happened under the search box.</p>
+  <ul>
+    <li><b>No item has barcode</b>: the barcode isn't on any item in HireHop yet. Search for the item by name and sell it as normal. Then tell the office, or add the barcode to the item in HireHop yourself. The till picks it up within 15 minutes.</li>
+    <li><b>Items share barcode</b>: two items in HireHop have the same barcode. Tap the right one in the list, and tell the office so one gets fixed.</li>
+    <li><b>Scanned, but nothing was added</b>: a payment was under way. Finish it, then scan again.</li>
+  </ul>
+  <h3>The scanner beeps but nothing happens</h3>
+  <ul>
+    <li>Check the till page is open on the iPad, not another app.</li>
+    <li>Check the iPad's Bluetooth is on (Settings, then Bluetooth) and the scanner shows as connected.</li>
+    <li>Still nothing? Search by name. It works just as well.</li>
+  </ul>
+</section>
+
+</body>
+</html>

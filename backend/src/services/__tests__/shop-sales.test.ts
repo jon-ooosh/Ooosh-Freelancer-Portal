@@ -95,6 +95,13 @@ describe('priceLines', () => {
     expect(line.lineGross).toBe(1.6);
   });
 
+  it('refuses a quantity over 999 — a barcode scanned into the quantity box', async () => {
+    const m = await freshModule({ stock: [TAPE] });
+    await expect(m.priceLines([{ hhStockId: 25, qty: 749699128328 }]))
+      .rejects.toThrow(/more than the till allows \(999\)/);
+    await expect(m.priceLines([{ hhStockId: 25, qty: 999 }])).resolves.toHaveLength(1);
+  });
+
   it('rejects a price ABOVE list — that is a typo or an unagreed markup', async () => {
     const m = await freshModule({ stock: [TAPE] });
     await expect(m.priceLines([{ hhStockId: 25, qty: 1, unitPriceCharged: 9 }]))

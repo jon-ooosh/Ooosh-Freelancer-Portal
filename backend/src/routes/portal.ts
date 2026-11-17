@@ -1680,17 +1680,36 @@ router.get('/studio-sitter/shifts/:date/till/search', async (req: PortalRequest,
     if (!gate) return;
     const { searchShopStock } = await import('../services/shop-stock');
     const items = await searchShopStock(String(req.query.q || ''), { limit: 25 });
-    // Only what a phone till needs — no cost prices leave the building.
-    res.json({
-      success: true,
-      items: items.map((i: any) => ({
-        hhStockId: i.hhStockId, title: i.title, categoryPath: i.categoryPath,
-        priceIncVat: i.priceIncVat, priceExVat: i.priceExVat, vatRatePct: i.vatRatePct, quantity: i.quantity,
-      })),
-    });
+    res.json({ success: true, items: items.map(sitterTillItem) });
   } catch (error) {
     console.error('Portal till search error:', error);
     res.status(500).json({ error: 'Search failed' });
+  }
+});
+
+/** Only what a phone till needs — no cost prices leave the building. */
+function sitterTillItem(i: any) {
+  return {
+    hhStockId: i.hhStockId, title: i.title, categoryPath: i.categoryPath,
+    priceIncVat: i.priceIncVat, priceExVat: i.priceExVat, vatRatePct: i.vatRatePct, quantity: i.quantity,
+  };
+}
+
+/**
+ * The phone camera's barcode read (`?q=<code>` — the portal proxy forwards only `q`).
+ * Every sellable item carrying it, like the staff till's lookup: one goes in the
+ * basket, several are listed to pick from, none is said.
+ */
+router.get('/studio-sitter/shifts/:date/till/barcode', async (req: PortalRequest, res: Response) => {
+  try {
+    const gate = await tillGate(req, res);
+    if (!gate) return;
+    const { findShopStockByBarcode } = await import('../services/shop-stock');
+    const items = await findShopStockByBarcode(String(req.query.q || ''));
+    res.json({ success: true, items: items.map(sitterTillItem) });
+  } catch (error) {
+    console.error('Portal till barcode error:', error);
+    res.status(500).json({ error: 'Barcode lookup failed' });
   }
 });
 

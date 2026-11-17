@@ -18,7 +18,7 @@
 
 const path = require('path')
 const fs = require('fs')
-const { phone, ukToday, ring, clearRings, snap, hideFixed } = require('../shared/shots')
+const { phone, ukToday, ring, clearRings, snap, screen, hideFixed } = require('../shared/shots')
 
 const BASE = process.env.PORTAL_URL || 'http://localhost:3100'
 const OUT = path.join(__dirname, 'img')
@@ -33,6 +33,10 @@ const at = (hhmm) => `${TODAY}T${hhmm}:00+00:00`   // shown as typed in winter (
 const COKE = { hhStockId: 101, title: 'Can of Coke', categoryPath: null, priceIncVat: 1.5, priceExVat: 1.25, vatRatePct: 20, quantity: 24 }
 const GAFFA = { hhStockId: 102, title: '2" (50mm x 50m) ProGaff matt white gaffa tape', categoryPath: null, priceIncVat: 15, priceExVat: 12.5, vatRatePct: 20, quantity: 6 }
 const ITEMS = [COKE, GAFFA]
+// The camera shots: the phone's camera "films" sample-barcode.mjpeg, this item's barcode.
+const STRINGS = { hhStockId: 384, title: 'Ernie Ball 2832 Regular Slinky Bass (50-105)', categoryPath: null, priceIncVat: 27, priceExVat: 22.5, vatRatePct: 20, quantity: 3 }
+const STRINGS_BARCODE = '749699128328'
+const CAMERA_VIDEO = path.join(__dirname, 'sample-barcode.mjpeg')
 
 const BAND_1 = { job_id: 'job-1', hh_job_number: 16801, label: 'The Lantern Thieves', rooms: ['Room 1 · Evening'], files: [] }
 const BAND_2 = { job_id: 'job-2', hh_job_number: 16802, label: 'Paper Satellites', rooms: ['Room 2 · Lockout'], files: [] }
@@ -115,6 +119,11 @@ async function answer(route) {
     const q = (new URL(req.url()).searchParams.get('q') || '').toLowerCase()
     return json({ success: true, items: ITEMS.filter((i) => i.title.toLowerCase().includes(q)) })
   }
+  if (p === `${base}/till/barcode`) {
+    // What the camera read, kept so the run can check it read the right thing.
+    S.scanned = new URL(req.url()).searchParams.get('q') || ''
+    return json({ success: true, items: S.scanned.replace(/^0+/, '') === STRINGS_BARCODE ? [STRINGS] : [] })
+  }
   if (p === `${base}/till/sales` && req.method() === 'GET') return json({ success: true, sales: S.sales, summary: S.summary })
   if (p === `${base}/till/sales` && req.method() === 'POST') return json({ success: true, id: 'sale-1' }, 201)
   if (/\/till\/sales\/[^/]+\/receipt$/.test(p)) return json({ success: true, sent: true })
@@ -162,7 +171,7 @@ const tender = (page, label) => page.locator('button[aria-pressed]', { hasText: 
 
 async function main() {
   fs.mkdirSync(OUT, { recursive: true })
-  const { browser, context } = await phone({ base: BASE, secret: SECRET })
+  const { browser, context } = await phone({ base: BASE, secret: SECRET, cameraVideo: CAMERA_VIDEO })
   const page = await context.newPage()
   await page.route('**/api/**', answer)
   page.on('dialog', (d) => d.accept())
@@ -285,6 +294,33 @@ async function main() {
   await ring(tonight.locator('button', { hasText: 'Cancel' }))
   await snap(page, OUT, '15-tonight', [tonight])
   await clearRings(page)
+
+  // 18-20: scanning a barcode with the phone's camera. The reader's engine
+  // (/zxing/) is held back until the camera shot is taken, so the sheet stays
+  // open for it; letting it through makes the REAL reader decode the sample
+  // barcode, so this is also the camera scanner's end-to-end check.
+  await openTill(page)
+  const scanBtn = page.getByRole('button', { name: 'Scan a barcode with the camera' })
+  await ring(scanBtn)
+  await snap(page, OUT, '18-scan-button', [header(page), scanBtn])
+  await clearRings(page)
+  let releaseEngine
+  const engineHeld = new Promise((r) => { releaseEngine = r })
+  await page.route('**/zxing/**', async (route) => { await engineHeld; await route.continue() })
+  await scanBtn.click()
+  const sheet = page.getByRole('dialog', { name: 'Scan a barcode' })
+  const hint = sheet.getByText('Hold the barcode inside the box')
+  await hint.waitFor()
+  await page.waitForTimeout(1000)   // the video on screen
+  // Just the box: the whole phone screen is too tall for the guide's page.
+  await snap(page, OUT, '19-camera', [sheet.locator('div.border-white\\/90')], { padTop: 60, padBottom: 60 })
+  releaseEngine()
+  await basketSection(page).getByText(STRINGS.title).waitFor({ timeout: 20000 })
+  if ((S.scanned || '').replace(/^0+/, '') !== STRINGS_BARCODE) {
+    throw new Error(`The camera read "${S.scanned}", not ${STRINGS_BARCODE}`)
+  }
+  await snap(page, OUT, '20-scanned', [header(page), basketSection(page)])
+  await page.unroute('**/zxing/**')
 
   // 16: after lock-up: the till is closed
   await openTill(page, { ctx: tillContext({ open: false, locked_up: true }) })

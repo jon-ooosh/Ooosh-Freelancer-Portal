@@ -3,6 +3,7 @@
  *
  * GET  /api/studio-sitter/shifts/[date]/till/context          → tonight's bands, payment methods, open?
  * GET  /api/studio-sitter/shifts/[date]/till/search?q=…       → price lookup
+ * GET  /api/studio-sitter/shifts/[date]/till/barcode?q=…      → the camera's barcode read
  * GET  /api/studio-sitter/shifts/[date]/till/sales            → tonight's sales + totals
  * GET  /api/studio-sitter/shifts/[date]/till/jobs/[id]/receipt-contacts → a band's contacts for a receipt
  * POST /api/studio-sitter/shifts/[date]/till/sales            → take a sale
@@ -31,7 +32,7 @@ type Params = { params: Promise<{ date: string; path: string[] }> }
 function allowed(method: 'GET' | 'POST', path: string[]): boolean {
   const p = path.join('/')
   if (method === 'GET') {
-    return p === 'context' || p === 'search' || p === 'sales'
+    return p === 'context' || p === 'search' || p === 'barcode' || p === 'sales'
       || (path.length === 3 && path[0] === 'jobs' && UUID_RE.test(path[1]) && path[2] === 'receipt-contacts')
       // The card reader (STRIPE-TERMINAL-SPEC §14).
       || p === 'reader/readers'
