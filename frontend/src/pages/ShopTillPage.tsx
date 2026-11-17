@@ -31,7 +31,6 @@ import { jobDisplayOrgName } from '../lib/jobOrgName';
 import ShopWeekPanel from '../components/shop/ShopWeekPanel';
 import { TENDERS } from '../lib/shopTenders';
 import { useBarcodeScanner } from '../hooks/useBarcodeScanner';
-import { gwDay } from '../lib/goodwillCopy';
 import CardReaderPayment, { type CardReaderAccess, type Session as ReaderSession } from '../components/CardReaderPayment';
 
 /** Most of one item a till line may carry — OP's `shop-sales.ts` MAX_LINE_QTY refuses more. */
@@ -1338,7 +1337,6 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
                         </span>
                         <button type="button" onClick={removeVoucher} className="shrink-0 text-green-800 underline">Remove</button>
                       </div>
-                      <span className="block text-green-800/80">{voucher.ownerName} · use by {gwDay(voucher.expiresOn)}. Used up when the sale is saved. Changed the basket? Remove it and apply it again.</span>
                     </div>
                   ) : voucherOpen ? (
                     <div>

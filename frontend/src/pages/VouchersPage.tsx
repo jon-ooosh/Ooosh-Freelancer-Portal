@@ -14,11 +14,13 @@ import ModalShell from '../components/ModalShell';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { ukDatePlus, ukToday } from '../lib/ukDate';
-import { type GoodwillCredit, STATUS_LABEL, STATUS_PILL, gwDay, voucherMoney, copyText, emailPoints } from '../lib/goodwillCopy';
+import { type GoodwillCredit, STATUS_LABEL, STATUS_PILL, gwDay, voucherMoney, copyText } from '../lib/goodwillCopy';
+import EmailPointsModal from '../components/goodwill/EmailPointsModal';
 
 type Filter = 'live' | 'used' | 'all';
 
-const SOURCE_LABEL: Record<string, string> = { voucher: 'Made by hand', referral: 'Referral' };
+// Only a referral's voucher says where it came from; one made on this page needs no label.
+const SOURCE_LABEL: Record<string, string> = { referral: 'Referral' };
 
 export default function VouchersPage() {
   const role = useAuthStore((s) => s.user?.role);
@@ -30,6 +32,7 @@ export default function VouchersPage() {
   const [made, setMade] = useState<GoodwillCredit[] | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pointsFor, setPointsFor] = useState<GoodwillCredit | null>(null);
 
   const load = useCallback(async () => {
     try { setRows((await api.get<{ data: GoodwillCredit[] }>('/vouchers')).data); setError(null); }
@@ -108,7 +111,7 @@ export default function VouchersPage() {
                     <td className="px-3 py-2 max-w-xs">
                       {g.reason}
                       <div className="text-xs text-gray-400">
-                        {SOURCE_LABEL[g.source_kind] || g.source_kind} · {gwDay(g.offered_at)}{g.offered_by_name ? ` · ${g.offered_by_name}` : ''}
+                        {[SOURCE_LABEL[g.source_kind], gwDay(g.offered_at), g.offered_by_name].filter(Boolean).join(' · ')}
                         {g.withdrawn_reason && <span className="block text-gray-500">Withdrawn: {g.withdrawn_reason}</span>}
                       </div>
                     </td>
@@ -122,7 +125,7 @@ export default function VouchersPage() {
                     </td>
                     <td className="px-3 py-2 text-right whitespace-nowrap text-xs space-x-2">
                       {isLive && <button type="button" onClick={() => copy(`c${g.id}`, g.voucher_code || '')} className="text-ooosh-700 hover:underline">{copied === `c${g.id}` ? '✓ Copied' : 'Copy code'}</button>}
-                      {isLive && <button type="button" onClick={() => copy(`p${g.id}`, emailPoints(g))} className="text-ooosh-700 hover:underline">{copied === `p${g.id}` ? '✓ Copied' : 'Copy email points'}</button>}
+                      {isLive && <button type="button" onClick={() => setPointsFor(g)} className="text-ooosh-700 hover:underline">Email points</button>}
                       {isLive && <button type="button" disabled={busy === g.id} onClick={() => withdraw(g)} className="text-red-600 hover:underline disabled:opacity-50">Withdraw</button>}
                     </td>
                   </tr>
@@ -133,6 +136,7 @@ export default function VouchersPage() {
         </div>
       )}
 
+      {pointsFor && <EmailPointsModal credit={pointsFor} onClose={() => setPointsFor(null)} />}
       {making && (
         <MakeVouchersModal
           onClose={() => setMaking(false)}

@@ -5,9 +5,10 @@ import { useAuthStore } from '../../hooks/useAuthStore';
 import { hasManagerRole } from '../../lib/roles';
 import { ukToday } from '../../lib/ukDate';
 import {
-  type GoodwillCredit, type GoodwillOwner, STATUS_LABEL, STATUS_PILL, money, plusVat, gwDay, emailPoints, copyText, creditHeadline,
+  type GoodwillCredit, type GoodwillOwner, STATUS_LABEL, STATUS_PILL, money, plusVat, gwDay, creditHeadline,
 } from '../../lib/goodwillCopy';
 import OfferGoodwillModal from './OfferGoodwillModal';
+import EmailPointsModal from './EmailPointsModal';
 
 /**
  * An org's or person's Goodwill tab (docs/GOODWILL-CREDIT-SPEC.md §4.4): every
@@ -20,8 +21,8 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
   const [rows, setRows] = useState<GoodwillCredit[] | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
-  const [copied, setCopied] = useState<string | null>(null);
   const [offering, setOffering] = useState(false);
+  const [pointsFor, setPointsFor] = useState<GoodwillCredit | null>(null);
 
   const param = owner.kind === 'organisation' ? 'organisation_id' : 'person_id';
   const load = useCallback(() => {
@@ -124,11 +125,7 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
                       {g.check_problem && <div className="text-xs mt-1 text-amber-800">⚠ {g.check_problem}</div>}
                     </td>
                     <td className="px-3 py-2 text-right whitespace-nowrap space-x-2 text-xs">
-                      {live && (
-                        <button type="button" onClick={async () => { if (await copyText(emailPoints(g))) setCopied(g.id); }} className="text-ooosh-600 hover:underline">
-                          {copied === g.id ? '✓ Copied' : 'Copy email points'}
-                        </button>
-                      )}
+                      {live && <button type="button" onClick={() => setPointsFor(g)} className="text-ooosh-600 hover:underline">Email points</button>}
                       {isManager && live && <button type="button" disabled={busy === g.id} onClick={() => edit(g)} className="text-ooosh-600 hover:underline">Edit</button>}
                       {isManager && g.status === 'reserved' && <button type="button" disabled={busy === g.id} onClick={() => takeOff(g)} className="text-ooosh-600 hover:underline">Take off job</button>}
                       {isManager && live && <button type="button" disabled={busy === g.id} onClick={() => withdraw(g)} className="text-red-600 hover:underline">Withdraw</button>}
@@ -143,6 +140,7 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
       {rows && rows.some((g) => g.status === 'offered') && (
         <p className="text-xs text-gray-500">To use one, open the job it's for — it shows in the Client History panel with “Use on this job”. Total still to use: {plusVat(rows.filter((g) => g.status === 'offered').reduce((s, g) => s + g.amount_ex_vat, 0))}.</p>
       )}
+      {pointsFor && <EmailPointsModal credit={pointsFor} onClose={() => setPointsFor(null)} />}
       {offering && (
         <OfferGoodwillModal owner={owner} sourceKind={owner.kind === 'organisation' ? 'organisation' : 'person'}
           onClose={() => setOffering(false)} onDone={() => load()} />
