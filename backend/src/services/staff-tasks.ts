@@ -122,6 +122,7 @@ const SELECT_TASKS = `
          WHEN t.source_type = 'quote_option' THEN '/jobs/' || t.source_id || '?group_prompt=1'
          -- An advert's "next one due" → the Marketing page (services/marketing.ts).
          WHEN t.source_type = 'marketing_placement' THEN '/jobs/marketing'
+         WHEN t.source_type = 'referral' THEN '/jobs/marketing?tab=referrals'
          END AS source_link,
          t.created_at, t.completed_at,
          t.created_by, t.is_private,

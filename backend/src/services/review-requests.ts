@@ -21,6 +21,8 @@ import { resolveClientEmailTarget } from './money-emails';
 import { signFor, verifyFor } from './tokens';
 import { ukToday } from './uk-date';
 import { SHORT_LINK_BASE } from './marketing-links';
+import { currentOffer, getOrCreateReferralLink } from './referrals';
+import { referralUrl, referralUrlText, reviewReferralLine } from './referral-rules';
 
 export const REVIEW_SETTING_KEY = 'review_requests_enabled';
 export const REVIEW_TEMPLATE = 'review_request';
@@ -140,6 +142,8 @@ interface Recipient {
   name: string;          // greeting name ('' = none)
   firstName: string | null;
   lastName: string | null;
+  /** The person behind the address — gets a personal referral link (§8d). Null for an org mailbox. */
+  personId: string | null;
 }
 
 /** Who the review email goes to: the job's primary client address only (never the CCs). Null = info@ fallback. */
@@ -151,15 +155,39 @@ async function recipientFor(jobId: string): Promise<Recipient | null> {
   const name = (t.recipientNames[0] || '').trim();
   // First / last name only to fill in the mailing-list form; an org mailbox has none.
   const p = await query(
-    `SELECT first_name, last_name FROM people
+    `SELECT id, first_name, last_name FROM people
       WHERE lower(email) = $1 AND COALESCE(is_deleted, false) = false
       ORDER BY updated_at DESC NULLS LAST LIMIT 1`,
     [email],
   );
-  return { email, name, firstName: p.rows[0]?.first_name ?? null, lastName: p.rows[0]?.last_name ?? null };
+  return {
+    email, name, firstName: p.rows[0]?.first_name ?? null, lastName: p.rows[0]?.last_name ?? null,
+    personId: p.rows[0]?.id ?? null,
+  };
+}
+
+/**
+ * The referral line's variables (§8d): the person's own link and the current offer, or
+ * "mention your name" when there's nobody to give a link to. A test shows a sample link.
+ * Never fails the review email — on any error it falls back to "mention your name".
+ */
+async function referralLineVars(personId: string | null, test: boolean): Promise<Record<string, string>> {
+  const none = { refLink: '', refLinkText: '', refBefore: '', refAfter: '', noRefLink: 'yes' };
+  try {
+    if (!personId && !test) return none;
+    const link = personId
+      ? await getOrCreateReferralLink(personId, null)
+      : { url: referralUrl('sam-7k2p'), urlText: referralUrlText('sam-7k2p') };
+    const line = reviewReferralLine(await currentOffer());
+    return { refLink: link.url, refLinkText: link.urlText, refBefore: line.before, refAfter: line.after, noRefLink: '' };
+  } catch (err) {
+    console.error('[review-requests] referral link not added (non-fatal):', err);
+    return none;
+  }
 }
 
 async function sendReviewEmail(to: string, r: Recipient, jobNumber: string, test: boolean) {
+  const referral = await referralLineVars(r.personId, test);
   return emailService.send(REVIEW_TEMPLATE, {
     to,
     subjectOverride: (test ? '[Test] ' : '') + reviewSubject(r.name),
@@ -173,6 +201,7 @@ async function sendReviewEmail(to: string, r: Recipient, jobNumber: string, test
       signupUrl: mailingListUrl(r.email, r.firstName, r.lastName),
       stopUrl: stopUrl(r.email),
       jobNumber,
+      ...referral,
     },
   });
 }
@@ -346,7 +375,7 @@ export async function sendTestReviewEmail(toEmail: string): Promise<{ ok: boolea
   const job = j.rows[0];
   const real = job ? await recipientFor(job.id) : null;
   // Their name, so the greeting reads as it will; the address and links are the tester's own.
-  const r: Recipient = { email: toEmail.toLowerCase(), name: real?.name ?? '', firstName: null, lastName: null };
+  const r: Recipient = { email: toEmail.toLowerCase(), name: real?.name ?? '', firstName: null, lastName: null, personId: null };
   const result = await sendReviewEmail(toEmail, r, String(job?.hh_job_number || ''), true);
   return result.success ? { ok: true, jobNumber: String(job?.hh_job_number || '') } : { ok: false, error: result.error };
 }

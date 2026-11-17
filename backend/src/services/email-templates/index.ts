@@ -2993,7 +2993,9 @@ const templates: Record<string, EmailTemplate> = {
   // jon, 13 Nov 2026 (two lines joined up 16 Nov). The subject is set by services/review-requests.ts ("How did it
   // go, Sam?", or "How did it go?" with no name), so no placeholder ever shows. The
   // job number is in the small print rather than the subject: it's a personal note.
-  // Two flat blocks for the greeting (no {{else}}): hasName / noName.
+  // Two flat blocks for the greeting (no {{else}}): hasName / noName. The referral line
+  // (§8d) is two more: their personal link + the current offer (refLink), or, with no
+  // person to give a link to (an org mailbox), "mention your name" (noRefLink).
   review_request: {
     variant: 'client',
     preheader: 'Thanks for hiring with us — a quick favour?',
@@ -3018,15 +3020,51 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 22px;font-size:15px;color:#334155;line-height:1.6;">
         Thanks,<br>Jon<br>Director, Ooosh! Tours Ltd
       </p>
-      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+      {{#if refLink}}<p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        {{refBefore}}<a href="{{refLink}}" style="color:#7B5EA7;">{{refLinkText}}</a>{{refAfter}}
+      </p>{{/if}}
+      {{#if noRefLink}}<p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
         Know a band who needs vans, backline or rehearsal space? Send them our way and ask them to mention your name.
-      </p>
+      </p>{{/if}}
       <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
         Want our news and deals? <a href="{{signupUrl}}" style="color:#7B5EA7;">Join our mailing list</a>
       </p>
       <p style="margin:0 0 4px;font-size:12px;color:#94a3b8;line-height:1.5;">
         {{#if jobNumber}}Job {{jobNumber}} · {{/if}}<a href="{{stopUrl}}" style="color:#94a3b8;">Don't ask me again</a>
       </p>`,
+  },
+
+  // Referral scheme (docs/BUSINESS-FIGURES-SPEC.md §8d) — both from "Jon at Ooosh Tours",
+  // replies to jon@. Wording agreed with jon, 17 Nov 2026 (plain dashes). Neither ever
+  // names the friend. Greeting: two flat blocks (no {{else}}).
+
+  // Email 2: someone the referrer recommended has just enquired. Once per referral, off
+  // until Marketing › Referrals turns it on. {{rewardLine}} carries the current offer.
+  referral_enquiry_thanks: {
+    variant: 'client',
+    preheader: 'Someone you recommended has been in touch',
+    subject: 'Thank you for sending someone our way',
+    body: `
+      {{#if hasName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi {{name}},</p>{{/if}}
+      {{#if noName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi there,</p>{{/if}}
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Just a quick note to say thank you - someone you recommended has just been in touch with us.</p>
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">{{rewardLine}} These word of mouth referrals really make a difference to a small team like ours.</p>
+      <p style="margin:0 0 4px;font-size:15px;color:#334155;line-height:1.6;">Thanks,<br>Jon<br>Director, Ooosh! Tours Ltd</p>`,
+  },
+
+  // Email 3: the thank-you itself, sent by a person when marking it given. {{detail}} is
+  // what they typed ("your Tour Store code is …"); the referrer's own link closes it.
+  referral_reward_thanks: {
+    variant: 'client',
+    preheader: 'A little thank-you for recommending us',
+    subject: 'A thank-you from Ooosh',
+    body: `
+      {{#if hasName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi {{name}},</p>{{/if}}
+      {{#if noName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi there,</p>{{/if}}
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">The band you sent our way have just finished their hire with us, so as promised, here's a little thank-you: {{detail}}.</p>
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Thanks again for recommending us - and if you know anyone else who's heading out on the road, your link still works:
+        <a href="{{refLink}}" style="color:#7B5EA7;">{{refLinkText}}</a>. You can use the same link as many times as you like!</p>
+      <p style="margin:0 0 4px;font-size:15px;color:#334155;line-height:1.6;">Jon</p>`,
   },
 
 };

@@ -76,6 +76,7 @@ import enquiryIntakeRouter from './enquiry-intake';
 import goRouter from './go';
 import marketingRouter from './marketing';
 import reviewRequestsRouter from './review-requests';
+import referralsRouter from './referrals';
 import cspReportRouter from './csp-report';
 
 const router = Router();
@@ -157,6 +158,7 @@ router.use('/enquiry-intake', enquiryIntakeRouter);  // Website enquiry form →
 router.use('/go', goRouter);  // Tracked links — PUBLIC redirect, counts the scan (go.oooshtours.co.uk/<code>)
 router.use('/marketing', marketingRouter);
 router.use('/review-requests', reviewRequestsRouter);  // Jon's review email — public "don't ask me again" + staff/admin (docs/BUSINESS-FIGURES-SPEC.md §8c)  // Marketing page — admin only (docs/BUSINESS-FIGURES-SPEC.md §8)
+router.use('/referrals', referralsRouter);  // the referral scheme — staff / managers / admin (docs/BUSINESS-FIGURES-SPEC.md §8d)
 router.use('/csp-report', cspReportRouter);  // PUBLIC — browser CSP violation reports (no auth, rate-limited, log only)
 
 // Alias: /api/jobs/:jobNumber → /api/driver-verification/validate-job/:jobNumber

@@ -21,6 +21,7 @@ import RecordActionsMenu from '../components/RecordActionsMenu';
 import WorkingTermsSummary from '../components/WorkingTermsSummary';
 import EndorsementsPanel from '../components/EndorsementsPanel';
 import GoodwillTab from '../components/goodwill/GoodwillTab';
+import PersonReferralLink from '../components/referrals/PersonReferralLink';
 import OfferGoodwillModal from '../components/goodwill/OfferGoodwillModal';
 import EmailProblemFlag from '../components/EmailProblemFlag';
 import { useEmailProblems } from '../hooks/useEmailProblems';
@@ -455,6 +456,9 @@ function PersonDetailContent() {
             <span>{person.international_phone}</span>
           )}
         </div>
+
+        {/* Their personal referral link (docs/BUSINESS-FIGURES-SPEC.md §8d) */}
+        {id && <PersonReferralLink personId={id} />}
 
         {/* Tags */}
         {person.tags && person.tags.length > 0 && (

@@ -209,11 +209,7 @@ Jobs › Marketing (`/jobs/marketing`), **admin only** (page, nav item and every
 - **Review requests** — BUILT, §8c below. Still to do by hand: QR posters to the review box around
   the building (rehearsal rooms, the back of the loo door — a tracked link on the Marketing page whose
   destination is the review box counts the scans) and postcards.
-- **Referrals (step 3):** a personal code / link per client (`go.oooshtours.co.uk/r/…`), the friend
-  tagged with who sent them, a To Do "reward due" when the friend's hire books (never automatic);
-  rewards on-brand (a free hour in The Loft, strings / sticks, a hoodie at three). One email may carry
-  the review ask AND a referral line provided the reward is plainly about referring, never about
-  reviewing. In the van / kit-case cards and the booking confirmation too.
+- **Referrals** — BUILT, §8d below. Still to do: the van / kit-case postcards (§8d, "Cards").
 - **Content library (later, jon):** a register of the photos / videos used on Instagram etc. — the
   files stay in the shared Google Drive; OP holds the link, description, where and when each was used,
   and who to credit. On the Marketing page.
@@ -258,3 +254,46 @@ completed job's client would see it; writes no row) and the last 50 jobs: sent, 
   Opt-outs are by address (`review_request_optouts`) and stop only this email.
 - The referral line ("ask them to mention your name") feeds New Enquiry's "Recommendation → who?" until
   the referral scheme exists.
+
+### 8d. The referral scheme (BUILT 17 Nov 2026, migration 347)
+
+Decisions (jon, 16–17 Nov 2026): **a referral belongs to a PERSON, never a band**; the thank-you is due
+when the friend's hire is **Completed** (never on booking — no rewarding a booking that then cancels); a
+**person** sends it, nothing is automatic; **the friend gets something too** — the welcome credit — and only
+a genuinely new client counts, **once** (no stacking); a code shared widely is fine (jon: let it spread).
+Offers are plain text jon rotates; each referral keeps the offer that was live.
+
+- **Personal links** (`referral_links`, one per person, the code never changes): `go.oooshtours.co.uk/r/<code>`
+  (`routes/go.ts` → `services/referrals.ts` `resolveReferralScan()`), counted like a tracked link (previews and
+  crawlers not), forwarded to the website tagged `ol=ref-<code>`. Codes are the first name + four characters
+  without 0/o/1/l/i (`referral-rules.ts`). Made automatically for the client in Jon's review email; "Make a
+  referral link" on a person's page for anyone else. Marketing codes may not start `ref-`.
+- **How a referral is recorded** (`referrals`, one per job):
+  - the website enquiry came through a personal link — `routes/enquiry-intake.ts` →
+    `referralFromMarketingSource()` reads `ol` from the visit they enquired on, else the first visit;
+  - staff: **"Referred by"** on the job — in the enquiry row (amber when "Heard about us" is Recommendation),
+    and under Details & Notes once booked — pick the person, "They named them" or "Referral card".
+  `referralBlockReason()` is every rule: not internal; not the referrer's own booking (a contact on it, or a
+  member of its client org); a NEW client by `returning-client.ts` at the time the enquiry arrived; and not
+  already referred (same client org or a shared contact). The link path skips quietly; staff see the reason.
+- **The friend's welcome credit IS a goodwill credit** (`GOODWILL-CREDIT-SPEC.md`, source `'referral'`): a
+  manager presses "Give £20 welcome credit" on the job; it's offered to the job's band / client (the goodwill
+  owner rule) and reserved on this hire, so whoever quotes sees it — applied in HireHop with its GW code like
+  any goodwill credit. Once per referral.
+- **Thank-you due**: daily 10:20 UK (`runReferralRewardsDue()`) — a referral whose job is now Completed becomes
+  `reward_due` with a To Do for each admin (`source_type = 'referral'`, links to Marketing › Referrals). "Thank-you
+  given…" there (managers) records what they got and can send email 3; "Decline" needs a reason. Both close the
+  To Dos. Before then a referral reads its stage off the job (Enquired / Booked / Didn't book) — never stored.
+- **Emails**, from "Jon at Ooosh Tours", replies to jon@, never naming the friend:
+  - the review email's referral line becomes their own link + the offer: "Know a band who needs vans, backline
+    or rehearsal space? Send them your link - go.oooshtours.co.uk/r/sam-7k2p - and they'll get £20 off their
+    first hire. If they book, we'll send you a Tour Store voucher to say thanks." (no person → "mention your name");
+  - **email 2** `referral_enquiry_thanks` — "someone you recommended has just been in touch", once per referral,
+    **OFF until Marketing › Referrals turns it on** (`referral_emails_enabled`);
+  - **email 3** `referral_reward_thanks` — the thank-you itself, only when a person marks it given, ending with
+    their link and "You can use the same link as many times as you like!".
+  Wording agreed with jon, 17 Nov 2026 (plain dashes). "Send me a test" sends both to the person pressing it.
+- **Cards** (not built — jon, later): one QR per card design (a tracked link, e.g. `van-card`) plus a
+  "Recommended by: ______" line the client fills in; the friend's form "Who recommended us?" catches the name and
+  staff link it with "Referred by" → "Referral card". Unique per-card codes were rejected (somebody would have to
+  record which card went in which van).

@@ -70,7 +70,7 @@ Moves:
 | `organisation_id` uuid → organisations | who it's for |
 | `amount_ex_vat` numeric(10,2) | > 0 |
 | `reason` text | staff-only, required |
-| `source_kind` text | `close_out` · `problem` · `cancellation` · `organisation` |
+| `source_kind` text | `close_out` · `problem` · `cancellation` · `organisation` · `person` · `referral` (a referral's welcome credit, `BUSINESS-FIGURES-SPEC.md` §8d — mig 347) |
 | `source_job_id` uuid null → jobs | |
 | `source_issue_id` uuid null → job_issues | when offered from a Problem |
 | `offered_by` uuid → users, `offered_at` timestamptz | |
