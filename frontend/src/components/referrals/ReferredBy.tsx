@@ -2,7 +2,8 @@
  * "Referred by" on the job page (docs/BUSINESS-FIGURES-SPEC.md §8d). Shows who recommended
  * this client, or lets staff say so — picked from the address book, as a name they
  * mentioned or a referral card. Amber when "Heard about us" is Recommendation and nobody
- * is linked yet. Managers give the friend's welcome credit from here (a goodwill credit).
+ * is linked yet. Managers give the friend's welcome voucher from here (a goodwill credit with
+ * a code, held for this hire) and can email them the code in Jon's words.
  * Backend: routes/referrals.ts.
  */
 import { useCallback, useEffect, useState } from 'react';
@@ -18,13 +19,31 @@ interface Referral {
   status: string;
   stage: string;
   welcomeCreditRef: string | null;
-  offer: { friendCreditExVat: number | null };
+  welcomeEmailSentAt: string | null;
+  offer: { friendVoucherIncVat: number | null };
 }
 
 const HOW: Record<string, string> = { link: 'their link', named: 'named by the client', card: 'referral card' };
 
 function money(n: number): string {
   return `£${n.toFixed(n % 1 ? 2 : 0)}`;
+}
+
+/** "Give the £20 voucher": a tick for the welcome email, then Give. Managers only. */
+function GiveVoucher({ amount, busy, onGive }: { amount: number; busy: boolean; onGive: (sendEmail: boolean) => void }) {
+  const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState(true);
+  if (!open) {
+    return <button type="button" disabled={busy} onClick={() => setOpen(true)} className="text-ooosh-700 hover:underline disabled:opacity-50">Give the {money(amount)} voucher</button>;
+  }
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2 rounded border border-green-200 bg-green-50 px-2 py-1">
+      <span>A {money(amount)} voucher (inc VAT), held for this hire.</span>
+      <label className="inline-flex items-center gap-1"><input type="checkbox" checked={email} onChange={(e) => setEmail(e.target.checked)} /> Email them the code</label>
+      <button type="button" disabled={busy} onClick={() => onGive(email)} className="rounded bg-green-700 px-2 py-0.5 text-white hover:bg-green-800 disabled:opacity-50">Give it</button>
+      <button type="button" onClick={() => setOpen(false)} className="text-gray-400 hover:text-gray-600">Cancel</button>
+    </span>
+  );
 }
 
 export default function ReferredBy({ jobId, heardAbout, role }: { jobId: string; heardAbout: string | null; role: string | undefined }) {
@@ -37,13 +56,14 @@ export default function ReferredBy({ jobId, heardAbout, role }: { jobId: string;
   const [how, setHow] = useState<'named' | 'card'>('named');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const isManager = hasManagerRole(role);
 
   const load = useCallback(async () => {
     try {
-      const r = await api.get<{ data: { referral: Referral | null; offerCreditExVat: number | null } }>(`/referrals/job/${jobId}`);
+      const r = await api.get<{ data: { referral: Referral | null; offerVoucherIncVat: number | null } }>(`/referrals/job/${jobId}`);
       setReferral(r.data.referral);
-      setCreditAmount(r.data.referral?.offer.friendCreditExVat ?? r.data.offerCreditExVat);
+      setCreditAmount(r.data.referral?.offer.friendVoucherIncVat ?? r.data.offerVoucherIncVat);
     } catch { /* the line just doesn't show */ }
     setLoaded(true);
   }, [jobId]);
@@ -64,7 +84,8 @@ export default function ReferredBy({ jobId, heardAbout, role }: { jobId: string;
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
-    try { await fn(); await load(); } catch (e) { setError(e instanceof Error ? e.message : 'Could not save'); }
+    setNotice(null);
+    try { await fn(); await load(); } catch (e) { setError((e as { body?: { error?: string } })?.body?.error || (e instanceof Error ? e.message : 'Could not save')); }
     finally { setBusy(false); }
   };
 
@@ -73,12 +94,22 @@ export default function ReferredBy({ jobId, heardAbout, role }: { jobId: string;
       <span className="inline-flex flex-wrap items-center gap-1.5 text-xs text-gray-600">
         <span>🤝 Referred by <Link to={`/people/${referral.referrerPersonId}`} className="text-ooosh-700 hover:underline">{referral.referrerName}</Link></span>
         <span className="text-gray-400">({HOW[referral.how] || referral.how} · {referral.stage})</span>
-        {referral.welcomeCreditRef && <span className="text-gray-500">· voucher {referral.welcomeCreditRef}</span>}
-        {isManager && !referral.welcomeCreditRef && referral.status !== 'declined' && creditAmount && (
-          <button type="button" disabled={busy}
-            onClick={() => { if (window.confirm(`Give the friend their ${money(creditAmount)} + VAT voucher? OP holds it for this hire as a goodwill credit (GW code).`)) act(() => api.post(`/referrals/${referral.id}/welcome-credit`, {})); }}
-            className="text-ooosh-700 hover:underline disabled:opacity-50">Give the {money(creditAmount)} voucher</button>
+        {referral.welcomeCreditRef && (
+          <span className="text-gray-500">
+            · voucher {referral.welcomeCreditRef}{referral.welcomeEmailSentAt ? ' (emailed)' : ''}
+            {isManager && !referral.welcomeEmailSentAt && (
+              <> · <button type="button" disabled={busy} className="text-ooosh-700 hover:underline disabled:opacity-50"
+                onClick={() => act(async () => { await api.post(`/referrals/${referral.id}/welcome-email`, {}); setNotice('Emailed.'); })}>Email them the code</button></>
+            )}
+          </span>
         )}
+        {isManager && !referral.welcomeCreditRef && referral.status !== 'declined' && creditAmount && (
+          <GiveVoucher amount={creditAmount} busy={busy} onGive={(sendEmail) => act(async () => {
+            const r = await api.post<{ data: { emailed: boolean; emailProblem: string | null } }>(`/referrals/${referral.id}/welcome-credit`, { sendEmail });
+            if (sendEmail && !r.data.emailed) setNotice(`Voucher given, but the email didn't go: ${r.data.emailProblem || 'unknown error'}`);
+          })} />
+        )}
+        {notice && <span className="text-amber-700">{notice}</span>}
         {referral.status === 'open' && !referral.welcomeCreditRef && (
           <button type="button" disabled={busy} title="Linked by mistake? Take it off"
             onClick={() => { if (window.confirm(`Take ${referral.referrerName} off as the referrer?`)) act(() => api.delete(`/referrals/${referral.id}`)); }}

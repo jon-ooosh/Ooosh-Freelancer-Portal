@@ -209,7 +209,8 @@ Jobs › Marketing (`/jobs/marketing`), **admin only** (page, nav item and every
 - **Review requests** — BUILT, §8c below. Still to do by hand: QR posters to the review box around
   the building (rehearsal rooms, the back of the loo door — a tracked link on the Marketing page whose
   destination is the review box counts the scans) and postcards.
-- **Referrals** — BUILT, §8d below. Still to do: the van / kit-case postcards (§8d, "Cards").
+- **Referrals** — BUILT, §8d below, with real vouchers since 17 Nov (GOODWILL-CREDIT-SPEC §16). Still to do:
+  the van / kit-case postcards (§8d, "Cards") — parked, in `docs/reference/BACKLOG.md`.
 - **Content library (later, jon):** a register of the photos / videos used on Instagram etc. — the
   files stay in the shared Google Drive; OP holds the link, description, where and when each was used,
   and who to credit. On the Marketing page.
@@ -277,11 +278,22 @@ Offers are plain text jon rotates; each referral keeps the offer that was live.
   `referralBlockReason()` is every rule: not internal; not the referrer's own booking (a contact on it, or a
   member of its client org); a NEW client by `returning-client.ts` at the time the enquiry arrived; and not
   already referred (same client org or a shared contact). The link path skips quietly; staff see the reason.
-- **The friend's voucher IS a goodwill credit** (labelled "Friend's voucher amount" on the offer since 17 Nov —
-  "welcome credit" confused) (`GOODWILL-CREDIT-SPEC.md`, source `'referral'`): a
-  manager presses "Give the £20 voucher" on the job; it's offered to the job's band / client (the goodwill
-  owner rule) and reserved on this hire, so whoever quotes sees it — applied in HireHop with its GW code like
-  any goodwill credit. Once per referral.
+- **Both rewards are VOUCHERS** — a goodwill credit with a code (`GOODWILL-CREDIT-SPEC.md` §16, source
+  `'referral'`), amounts **inc VAT** on the offer (`referral_offers.friend_voucher_inc_vat` /
+  `referrer_voucher_inc_vat`, mig 349; the old `friend_credit_ex_vat` is no longer read — jon had typed it
+  meaning inc VAT, so it was copied across as typed, and the referrer's £ figure was lifted out of the reward text).
+  - **The friend's:** a manager presses "Give the £20 voucher" on the job, with "Email them the code" ticked by
+    default. It's made for the job's band / client (the goodwill owner rule) and held for this hire, so whoever
+    quotes sees it. The email is `referral_welcome_voucher` — Jon's wording, 17 Nov 2026: "Hi {name}, thanks for
+    getting in touch - {Sam} recommended us! As a welcome, there's a £20 voucher waiting for you, already set
+    against your hire (on bookings over £100). Your voucher code is K7QM-4XWP-C9TR, valid until {date}. Any
+    questions, just reply to this email. Jon" — to the job's client via `resolveClientEmailTarget()` (never
+    info@: a job with no client email gets nothing and the manager is told), once (`referrals.welcome_email_sent_at`,
+    un-stamped if the send fails); "Email them the code" on the job sends it later. Not behind the email switch —
+    a manager presses it. Once per referral.
+  - **The referrer's:** "Thank-you given…" makes it (ticked when the offer has a referrer voucher; the amount can
+    be changed) and its code goes in email 3. Made once (`referrals.reward_credit_id`) — pressing again after a
+    failed email reuses it.
 - **Thank-you due**: daily 10:20 UK (`runReferralRewardsDue()`) — a referral whose job is now Completed becomes
   `reward_due` with a To Do for each admin (`source_type = 'referral'`, links to Marketing › Referrals). "Thank-you
   given…" there (managers) records what they got and can send email 3; "Decline" needs a reason. Both close the
@@ -297,9 +309,11 @@ Offers are plain text jon rotates; each referral keeps the offer that was live.
     done, we'll send you {reward} as promised." Daily 10:20, once per referral (`booked_email_sent_at`, mig 348),
     while the job is booked and not finished; same switch as email 2;
   - **email 3** `referral_reward_thanks` — the thank-you itself, only when a person marks it given, ending with
-    their referral link and "You can use the same link as many times as you like!". It says whatever the manager typed
-    as "what they got" — a voucher with a code to redeem is the next step (§8b).
-  Wording agreed with jon, 17 Nov 2026 (plain dashes). "Send me a test" sends both to the person pressing it.
+    their referral link and "You can use the same link as many times as you like!". "Here's a little thank-you:
+    {what they got}", then, with a voucher: "Your voucher code is H3MU-ZXCB-86TU - £20 off a hire with us or in
+    our shop, valid until 17th Nov 2027. It's single use, so just quote the code when you book or pay."
+  Wording agreed with jon, 17 Nov 2026 (plain dashes). "Send me a test" sends all four (2, 2b, 3 and the friend's
+  welcome, with sample codes) to the person pressing it.
 - **Cards** (not built — jon, later): one QR per card design (a tracked link, e.g. `van-card`) plus a
   "Recommended by: ______" line the client fills in; the friend's form "Who recommended us?" catches the name and
   staff link it with "Referred by" → "Referral card". Unique per-card codes were rejected (somebody would have to

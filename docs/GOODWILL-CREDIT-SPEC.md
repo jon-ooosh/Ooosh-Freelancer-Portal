@@ -404,3 +404,62 @@ wait an hour. Jon asked for it to ride on calls OP makes anyway.
 - **Marking a credit used takes up to about an hour** (the line sync's 1-hour refresh, then :50),
   instead of 30 minutes.
 
+
+## 16. Vouchers — a goodwill credit with a code (BUILT 17 Nov 2026, migration 349)
+
+**Why (jon, 17 Nov 2026):** the referral scheme sends vouchers "out in the wild" — to people OP doesn't
+otherwise know, mostly by email, then typed back at the shop counter or on an enquiry. A GW ref is
+sequential (GW-0012, GW-0013 …): anyone could say "here's voucher GW-14". A band-held goodwill credit
+doesn't have that problem (staff see it's for that band); a voucher does.
+
+**Settled:**
+- **A voucher IS a goodwill credit** — same table, same statuses, same "derived, never swept" expiry, same
+  HireHop routine on a hire (the GW ref in the line's Item Note, read back hourly). It adds a **code**
+  (`goodwill_credits.voucher_code`) and a **face value inc VAT** (`voucher_value_inc_vat`).
+- **The code is the secret, the GW ref stays internal.** 12 characters in three groups (`K7QM-4XWP-C9TR`)
+  from an alphabet with no look-alikes (no 0/O, 1/I/L) — 31¹² ≈ 8×10¹⁷, about 60 bits
+  (`services/voucher-rules.ts`). **Only staff look a code up** (the till, "Have a voucher code?" on a job) —
+  there is no public lookup and never should be, so guessing is hopeless. Stored as-is: it's a gift-card
+  number, not a password — a hash would stop staff ever seeing the code again, and they need to hand it out.
+  Clients are only ever told the code, never the GW ref.
+- **Inc VAT** (jon: "£20 is inc VAT"). `amount_ex_vat` (what every goodwill sum and a HireHop discount
+  uses) is the face value ÷ 1.2 (£20 → £16.67). On a hire the discount is £16.67 ex VAT on a standard-rated
+  line; at the till the £20 is spread inc VAT, so a zero-rated item is covered pound for pound.
+- **Single use**; whatever it doesn't cover lapses (the goodwill rule). A voucher's VALUE can't be edited
+  (it's what the client was told) — withdraw it and make another; its use-by date can.
+- **First hire over £100** (the friend's welcome) is a manual check — the email says so, nothing enforces it.
+- **A voucher may be held by nobody** ("Anyone with the code" — a raffle prize, a giveaway). The owner
+  CHECK allows both owner columns empty only when there's a code.
+- **Not built, on purpose: a multi-use promo code** (one code printed in a magazine for anyone). A
+  different thing — no single holder, a count of uses, a cap. Ask if it's wanted.
+
+**Where they come from:**
+- **Money › Vouchers** (`/money/vouchers`, admin + managers — jon asked for managers too): "Make vouchers" —
+  worth £X inc VAT, how many (1–50, each its own code), what for, use by (12 months by default), and
+  optionally a person (one voucher only). The list shows every voucher with its code, status, where it was
+  used; Copy code, Copy email points, Withdraw.
+- **Referrals** (`BUSINESS-FIGURES-SPEC.md` §8d): the friend's welcome voucher (held for their hire, emailed
+  in Jon's words) and the referrer's thank-you voucher (its code in email 3). Source `referral`; hand-made
+  ones are source `voucher`.
+
+**Where they're used:**
+- **Shop till — staff till only** (never the warehouse kiosk or a sitter's phone; `shop-sales.ts`
+  `checkVoucher()` refuses them, and `POST /shop/voucher` isn't on the kiosk allow-list). "🎟️ Voucher code" in
+  checkout → the server checks it and **spreads it across the basket as lowered line prices**, dearest line
+  first (`spreadVoucher()`), the till's only kind of discount (SHOP-SALES-SPEC §2.8) — so it reaches HireHop
+  as the price charged, and the sale's notes carry `Voucher GW-0013` into HireHop's payment memo. The code goes
+  with the sale (`voucherCode`, and `voucher_code` on the card reader), which **uses the voucher up in the same
+  transaction** (`vouchers.ts` `useVoucherOnSale()`, guarded so two tills can't both use it; `used_how = 'shop'`,
+  `used_shop_sale_id`, `used_hh_ref` = the OT-SHOP number). **The voucher's own amount doesn't count against
+  the role's discount ceiling** — only discount on top of it does. A cancelled or refunded sale gives the
+  voucher back (`giveVoucherBack()`), to its own use-by date. A few pence can be left where a quantity doesn't
+  divide (they lapse; the till only mentions 5p or more).
+- **A hire**: "🎟️ Have a voucher code?" in the Client History panel on a saved job → the whole voucher is
+  held for this hire (`POST /vouchers/hold-on-job`, the usual reserve). Then exactly as any goodwill credit:
+  discount in HireHop with "Goodwill credit GW-0013" in the line's Item Note; the read-back marks it used.
+  A person- or org-held voucher also shows on its own wherever that holder is on the job, like any credit.
+
+**Code:** `services/voucher-rules.ts` (pure: codes, VAT, the spread — tested), `services/vouchers.ts` (find,
+make, hold on a job, use on a sale, give back), `routes/vouchers.ts` (`/api/vouchers`), `routes/shop.ts`
+`POST /shop/voucher`, frontend `pages/VouchersPage.tsx`, the till's voucher box (`ShopTillPage.tsx`),
+`GoodwillNote.tsx` `VoucherCodeEntry`, `lib/goodwillCopy.ts` `creditHeadline()`.

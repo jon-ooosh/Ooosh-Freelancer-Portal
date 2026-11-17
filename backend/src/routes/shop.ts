@@ -25,6 +25,8 @@ import {
   maxDiscountPctForRole, priceLines, totalsFor,
   getConsumptionSummary, getConsumptionLog,
 } from '../services/shop-sales';
+import { findVoucher, voucherProblem } from '../services/vouchers';
+import { spreadVoucher } from '../services/voucher-rules';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -234,6 +236,40 @@ router.post('/quote', async (req: AuthRequest, res: Response) => {
     res.json({ data: { lines: priced, totals: totalsFor(priced) } });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Could not price that basket.' });
+  }
+});
+
+/**
+ * A voucher at the till (GOODWILL-CREDIT-SPEC §16): check the code and spread its value
+ * across the basket as lowered line prices — the till's only kind of discount, so it
+ * reaches HireHop as the price charged. Staff only: not on KIOSK_TILL_ALLOW, so the kiosk
+ * never reaches it, and the sitter till is a different app. Nothing is written — the
+ * voucher is used up when the sale is saved (createShopSale, with `voucherCode`).
+ */
+router.post('/voucher', async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.kiosk || !req.user) { res.status(403).json({ error: 'Vouchers are taken on the staff till only.' }); return; }
+    const credit = await findVoucher(String(req.body?.code || ''));
+    const problem = voucherProblem(credit);
+    if (problem) { res.status(credit ? 409 : 404).json({ error: `${problem}.` }); return; }
+    const lines = Array.isArray(req.body?.lines) ? req.body.lines.slice(0, 100) : [];
+    const priced = await priceLines(lines);
+    const spread = spreadVoucher(
+      priced.map((l) => ({ hhStockId: l.hhStockId, qty: l.qty, unitPrice: l.unitPriceCharged, vatRatePct: l.vatRatePct })),
+      credit!.voucher_value_inc_vat || 0,
+    );
+    res.json({
+      data: {
+        voucher: {
+          code: credit!.voucher_code, ref: credit!.ref, valueIncVat: credit!.voucher_value_inc_vat,
+          ownerName: credit!.owner_name, expiresOn: credit!.expires_on,
+        },
+        lines: spread.lines.map((l) => ({ hhStockId: l.hhStockId, unitPriceCharged: l.unitPrice })),
+        takenOff: spread.takenOff,
+      },
+    });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not apply that voucher.' });
   }
 });
 

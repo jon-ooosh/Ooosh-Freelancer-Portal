@@ -25,6 +25,9 @@ import { DISPLAY_NAME_SQL } from './display-name';
 import { saleRef } from './shop-sale-ref';
 import { withShopDrainLock } from './shop-drain';
 import { assertSellableJob } from './shop-routing';
+import { findVoucher, voucherProblem, useVoucherOnSale, noteVoucherUsedOnSale, giveVoucherBack } from './vouchers';
+import { lineGross } from './voucher-rules';
+import type { GoodwillCredit } from './goodwill-credits';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -82,6 +85,13 @@ export interface CreateShopSaleInput {
    *  approved: tender 'card_reader' is refused without it, so a till can't record a
    *  card-reader sale that nobody took. Stored so a Refund goes back to the card. */
   stripePaymentIntent?: string | null;
+  /**
+   * A voucher code (GOODWILL-CREDIT-SPEC §16) — staff till only, never the kiosk or a
+   * sitter's phone. The lines already carry the voucher as lowered prices (the till asks
+   * `POST /shop/voucher` to spread it); the code lets that much discount past the role's
+   * ceiling and uses the voucher up with the sale.
+   */
+  voucherCode?: string | null;
 }
 
 /**
@@ -306,13 +316,26 @@ export interface CreateResult {
 export async function validateShopSale(
   input: CreateShopSaleInput,
   user: ShopActor,
-): Promise<{ priced: PricedLine[]; totals: ShopSaleTotals }> {
+): Promise<{ priced: PricedLine[]; totals: ShopSaleTotals; voucher: SaleVoucher | null }> {
   if (!user.id && !user.personId) throw new Error('Who is recording this sale?');
   const priced = await priceLines(input.lines);
   const totals = totalsFor(priced);
 
-  // Discount ceiling, checked against the TRANSACTION (§2.8).
-  if (totals.discount > 0) {
+  const voucher = input.voucherCode ? await checkVoucher(input, user, priced, totals) : null;
+
+  // Discount ceiling, checked against the TRANSACTION (§2.8). A voucher's own amount
+  // doesn't count against it — only whatever is discounted on top.
+  if (voucher) {
+    if (voucher.extraPct > 0.001) {
+      const cap = await maxDiscountPctForRole(user.role);
+      if (voucher.extraPct > cap + 0.001) {
+        throw new Error(
+          `On top of the voucher that is a ${voucher.extraPct.toFixed(1)}% discount; your limit is ${cap}%. ` +
+          `Ask a manager to apply it.`,
+        );
+      }
+    }
+  } else if (totals.discount > 0) {
     const cap = await maxDiscountPctForRole(user.role);
     if (totals.discountPct > cap + 0.001) {
       throw new Error(
@@ -333,7 +356,38 @@ export async function validateShopSale(
     // rather than let the drain find out after they've gone (step 7).
     if (input.soldToJobId) await assertSellableJob(input.soldToJobId);
   }
-  return { priced, totals };
+  return { priced, totals, voucher };
+}
+
+export interface SaleVoucher {
+  credit: GoodwillCredit;
+  /** What it takes off this basket, inc VAT — at most its value; the rest lapses. */
+  takenOff: number;
+  /** Any discount on top of the voucher, as a % of the basket at list price (inc VAT). */
+  extraPct: number;
+}
+
+/**
+ * A voucher on a sale: staff till only, a live voucher, and actually taking something
+ * off. The discount it covers is measured inc VAT (a voucher's value is what the
+ * customer sees), so a zero-rated line is covered pound for pound.
+ */
+async function checkVoucher(
+  input: CreateShopSaleInput, user: ShopActor, priced: PricedLine[], totals: ShopSaleTotals,
+): Promise<SaleVoucher> {
+  if (input.kind !== 'sale' || (input.recordedIn || 'staff_till') !== 'staff_till' || !user.id || user.via) {
+    throw new Error('Vouchers are taken on the staff till only.');
+  }
+  const credit = await findVoucher(String(input.voucherCode));
+  const problem = voucherProblem(credit);
+  if (problem) throw new Error(`${problem}.`);
+  const listGross = penny(priced.reduce((s, l) => s + lineGross(l.unitPriceList, l.qty, l.vatRatePct), 0));
+  const off = penny(listGross - totals.gross);
+  const value = credit!.voucher_value_inc_vat || 0;
+  const takenOff = penny(Math.min(value, Math.max(off, 0)));
+  if (takenOff < 0.01) throw new Error(`Voucher ${credit!.ref} isn't taking anything off — apply it again.`);
+  const extra = penny(off - takenOff);
+  return { credit: credit!, takenOff, extraPct: listGross > 0 ? (extra / listGross) * 100 : 0 };
 }
 
 export async function createShopSale(
@@ -345,7 +399,7 @@ export async function createShopSale(
   if (input.tender === 'card_reader' && !input.stripePaymentIntent) {
     throw new Error('A card reader sale is taken on the reader - choose Card reader and send it to the reader.');
   }
-  const { priced, totals } = await validateShopSale(input, user);
+  const { priced, totals, voucher } = await validateShopSale(input, user);
 
   const holdSeconds = await getPushHoldSeconds();
   // Only a sitter sale big enough to be worth a look waits for a staff tick.
@@ -367,7 +421,7 @@ export async function createShopSale(
        ) VALUES ($1,'queued',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW() + ($13 || ' seconds')::interval,
                  CASE WHEN $1::text = 'sale' THEN nextval('shop_sale_number_seq') END,
                  $14, $15, $16)
-       RETURNING id, push_after`,
+       RETURNING id, push_after, sale_number`,
       [
         input.kind,
         input.kind === 'consumption' ? null : input.tender,
@@ -380,7 +434,8 @@ export async function createShopSale(
         input.soldToPersonId || null,
         input.kind === 'sale' ? (input.soldToJobId || null) : null,
         needsReview,
-        input.notes || null,
+        // The voucher's GW ref rides on the sale's notes, so it reaches HireHop's payment memo.
+        [input.notes?.trim(), voucher ? `Voucher ${voucher.credit.ref}` : null].filter(Boolean).join(' · ') || null,
         String(holdSeconds),
         user.personId || null,
         input.shiftId || null,
@@ -402,7 +457,12 @@ export async function createShopSale(
       );
     }
 
+    // Used up with the sale — in the same transaction, so neither exists without the other.
+    const ref = saleRes.rows[0].sale_number != null ? saleRef(Number(saleRes.rows[0].sale_number)) : null;
+    if (voucher) await useVoucherOnSale(client, voucher.credit, { id: saleId, ref }, voucher.takenOff, user.id);
+
     await client.query('COMMIT');
+    if (voucher) await noteVoucherUsedOnSale(voucher.credit.id, ref, voucher.takenOff, user.id);
     const stored: ShopSaleTotals = input.kind === 'consumption'
       ? { net: 0, vat: 0, gross: 0, discount: 0, discountPct: 0 }
       : totals;
@@ -666,6 +726,8 @@ export async function cancelShopSale(
         WHERE id = $1`,
       [id, user.id || null, reason || null, user.personId || null],
     );
+    // A voucher used on it is usable again (never throws).
+    await giveVoucherBack(id, 'cancelled', user.id || null);
     return { cancelled: true };
   });
 }
@@ -783,6 +845,8 @@ export async function reverseShopSale(
 
     await client.query('COMMIT');
     const reversalId = ins.rows[0].id as string;
+    // A voucher used on the sale is usable again — the whole sale is refunded (never throws).
+    await giveVoucherBack(saleId, 'refunded', user.id);
 
     // A card-reader sale goes back to the card through Stripe, now — so the refund is
     // settled when Stripe accepts it, not when someone remembers to tick it. If Stripe

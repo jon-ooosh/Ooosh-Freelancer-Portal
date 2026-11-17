@@ -4,14 +4,15 @@
  *   GET    /job/:jobId               staff   — the job's referral, if any
  *   POST   /                         staff   — "Referred by" { jobId, referrerPersonId, how: named | card }
  *   DELETE /:id                      staff   — linked by mistake (only before a thank-you / credit)
- *   POST   /:id/welcome-credit       manager — the friend's welcome credit (a goodwill credit)
+ *   POST   /:id/welcome-credit       manager — the friend's welcome voucher { sendEmail } (a goodwill credit with a code)
+ *   POST   /:id/welcome-email        manager — email the friend their voucher code (if it didn't go first time)
  *   GET    /person/:personId         staff   — their personal link + counts
  *   POST   /person/:personId/link    staff   — make their personal link
  *   GET    /overview                 admin   — the offer, the email switch, totals, the list
  *   PUT    /offer                    admin   — a new offer (the old one stays on its referrals)
  *   PUT    /settings                 admin   — { emailsEnabled }
- *   POST   /test                     admin   — emails 2 + 3 to yourself
- *   POST   /:id/thanked              manager — the thank-you was given { detail, sendEmail }
+ *   POST   /test                     admin   — emails 2, 2b, 3 and the friend's welcome to yourself
+ *   POST   /:id/thanked              manager — the thank-you was given { detail, sendEmail, voucherIncVat? }
  *   POST   /:id/decline              manager — { reason }
  */
 import { Router, Response } from 'express';
@@ -20,7 +21,7 @@ import { authenticate, authorize, AuthRequest, MANAGER_ROLES, STAFF_ROLES } from
 import { validate } from '../middleware/validate';
 import {
   ReferralError, createReferral, currentOffer, declineReferral, getJobReferral, getOrCreateReferralLink,
-  giveWelcomeCredit, listReferrals, markThanked, personReferralSummary, referralEmailsEnabled, referralTotals,
+  giveWelcomeCredit, sendWelcomeVoucher, listReferrals, markThanked, personReferralSummary, referralEmailsEnabled, referralTotals,
   removeReferral, sendReferralTestEmails, setOffer, setReferralEmailsEnabled,
 } from '../services/referrals';
 import { personIdForUser } from '../services/staff-tasks';
@@ -46,7 +47,7 @@ function fail(res: Response, where: string, err: unknown) {
 router.get('/job/:jobId', authorize(...STAFF_ROLES), validate(jobParam, 'params'), async (req: AuthRequest, res: Response) => {
   try {
     const [referral, offer] = await Promise.all([getJobReferral(String(req.params.jobId)), currentOffer()]);
-    res.json({ data: { referral, offerCreditExVat: offer.friendCreditExVat } });
+    res.json({ data: { referral, offerVoucherIncVat: offer.friendVoucherIncVat } });
   } catch (err) { fail(res, 'job', err); }
 });
 
@@ -69,12 +70,23 @@ router.delete('/:id', authorize(...STAFF_ROLES), validate(id, 'params'), async (
 });
 
 router.post('/:id/welcome-credit', authorize(...MANAGER_ROLES), validate(id, 'params'),
-  validate(z.object({ amountExVat: z.number().positive().max(10000).nullable().optional() })), async (req: AuthRequest, res: Response) => {
+  validate(z.object({
+    amountIncVat: z.number().positive().max(10000).nullable().optional(),
+    sendEmail: z.boolean().optional(),
+  })), async (req: AuthRequest, res: Response) => {
     try {
-      const creditId = await giveWelcomeCredit(String(req.params.id), { amountExVat: req.body.amountExVat ?? null }, req.user!.id);
-      res.json({ data: { creditId } });
+      const r = await giveWelcomeCredit(String(req.params.id), { amountIncVat: req.body.amountIncVat ?? null, sendEmail: !!req.body.sendEmail }, req.user!.id);
+      res.json({ data: r });
     } catch (err) { fail(res, 'welcome credit', err); }
   });
+
+router.post('/:id/welcome-email', authorize(...MANAGER_ROLES), validate(id, 'params'), async (req: AuthRequest, res: Response) => {
+  try {
+    const r = await sendWelcomeVoucher(String(req.params.id));
+    if (!r.ok) { res.status(409).json({ error: `The email didn't send: ${r.error || 'unknown error'}` }); return; }
+    res.json({ data: { emailed: true } });
+  } catch (err) { fail(res, 'welcome email', err); }
+});
 
 router.get('/person/:personId', authorize(...STAFF_ROLES), validate(personParam, 'params'), async (req: AuthRequest, res: Response) => {
   try {
@@ -94,6 +106,8 @@ router.post('/person/:personId/link', authorize(...STAFF_ROLES), validate(person
 router.post('/:id/thanked', authorize(...MANAGER_ROLES), validate(id, 'params'), validate(z.object({
   detail: z.string().max(300),
   sendEmail: z.boolean(),
+  /** Make the referrer a voucher for this much (inc VAT); its code goes in the email. */
+  voucherIncVat: z.number().positive().max(10000).nullable().optional(),
 })), async (req: AuthRequest, res: Response) => {
   try {
     await markThanked(String(req.params.id), req.body, req.user!.id);
@@ -121,7 +135,8 @@ router.get('/overview', authorize('admin'), async (_req: AuthRequest, res: Respo
 router.put('/offer', authorize('admin'), validate(z.object({
   referrerReward: z.string().trim().max(200).nullable(),
   friendOffer: z.string().trim().max(200).nullable(),
-  friendCreditExVat: z.number().positive().max(10000).nullable(),
+  friendVoucherIncVat: z.number().positive().max(10000).nullable(),
+  referrerVoucherIncVat: z.number().positive().max(10000).nullable(),
 })), async (req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await setOffer(req.body, req.user!.id) });

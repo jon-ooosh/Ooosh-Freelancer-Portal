@@ -17,9 +17,10 @@
 import { query } from '../config/database';
 import { ukDatePlus } from './uk-date';
 import { logIssueEvent } from './job-issues';
+import { makeVoucherCode, exVatOf } from './voucher-rules';
 
 export type GoodwillStatus = 'offered' | 'reserved' | 'used' | 'withdrawn' | 'expired';
-export type GoodwillSourceKind = 'close_out' | 'problem' | 'cancellation' | 'organisation' | 'person' | 'referral';
+export type GoodwillSourceKind = 'close_out' | 'problem' | 'cancellation' | 'organisation' | 'person' | 'referral' | 'voucher';
 
 export interface GoodwillCredit {
   id: string;
@@ -52,6 +53,11 @@ export interface GoodwillCredit {
   check_problem: string | null;
   last_checked_at: string | null;
   used_hh_ref: string | null;
+  /** A voucher (spec §16): the code the client is given, and its face value INC VAT. Null on plain goodwill. */
+  voucher_code: string | null;
+  voucher_value_inc_vat: number | null;
+  /** Used at the shop till: that sale. */
+  used_shop_sale_id: string | null;
 }
 
 export class GoodwillError extends Error {
@@ -76,7 +82,8 @@ export const FREE_TO_RESERVE_SQL = `g.expires_on >= ${UK_TODAY_SQL}
 
 const SELECT = `
   SELECT g.id, g.ref, g.organisation_id, g.person_id,
-         COALESCE(o.name, NULLIF(TRIM(CONCAT_WS(' ', COALESCE(NULLIF(p.preferred_name, ''), p.first_name), p.last_name)), ''), '—') AS owner_name,
+         CASE WHEN g.organisation_id IS NULL AND g.person_id IS NULL THEN 'Anyone with the code'
+              ELSE COALESCE(o.name, NULLIF(TRIM(CONCAT_WS(' ', COALESCE(NULLIF(p.preferred_name, ''), p.first_name), p.last_name)), ''), '—') END AS owner_name,
          g.amount_ex_vat::float AS amount_ex_vat, g.reason, g.source_kind,
          g.source_job_id, sj.hh_job_number AS source_job_number, g.source_issue_id,
          NULLIF(TRIM(CONCAT_WS(' ', COALESCE(NULLIF(op.preferred_name, ''), op.first_name), op.last_name)), '') AS offered_by_name,
@@ -86,7 +93,8 @@ const SELECT = `
          g.reserved_for, g.reserved_invoice_number,
          g.reserved_amount_ex_vat::float AS reserved_amount_ex_vat, g.reserved_at,
          g.used_amount_ex_vat::float AS used_amount_ex_vat, g.used_at, g.used_how,
-         g.withdrawn_at, g.withdrawn_reason, g.check_problem, g.last_checked_at, g.used_hh_ref
+         g.withdrawn_at, g.withdrawn_reason, g.check_problem, g.last_checked_at, g.used_hh_ref,
+         g.voucher_code, g.voucher_value_inc_vat::float AS voucher_value_inc_vat, g.used_shop_sale_id
     FROM goodwill_credits g
     LEFT JOIN organisations o ON o.id = g.organisation_id
     LEFT JOIN people p ON p.id = g.person_id
@@ -97,6 +105,10 @@ const SELECT = `
 
 const money = (n: number) => `£${n.toFixed(2)}`;
 const plusVat = (n: number) => `${money(n)}+VAT (${money(Math.round(n * 120) / 100)})`;
+/** How a credit's value reads on a timeline: a voucher by its face value (inc VAT). */
+export function creditValueText(g: { amount_ex_vat: number; voucher_value_inc_vat: number | null }): string {
+  return g.voucher_value_inc_vat != null ? `${money(g.voucher_value_inc_vat)} voucher (inc VAT)` : plusVat(g.amount_ex_vat);
+}
 /** 1 → '1st', 2 → '2nd', 11 → '11th', 22 → '22nd'. */
 function ordinal(n: number): string {
   const teen = n % 100 >= 11 && n % 100 <= 13;
@@ -104,7 +116,7 @@ function ordinal(n: number): string {
   return `${n}${suffix}`;
 }
 /** '2027-11-16' → '16th Nov 2027' (a DATE string, read as a calendar day — never shifted by a time zone). */
-const day = (ymd: string) => {
+export const day = (ymd: string) => {
   const d = new Date(`${ymd}T12:00:00Z`);
   if (Number.isNaN(d.getTime())) return ymd;
   const month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
@@ -124,6 +136,17 @@ export async function getGoodwillCredit(id: string): Promise<GoodwillCredit | nu
 export async function getGoodwillByRef(ref: string): Promise<GoodwillCredit | null> {
   const r = await query(`${SELECT} WHERE g.ref = $1`, [ref.toUpperCase()]);
   return (r.rows[0] as GoodwillCredit) || null;
+}
+
+/** A voucher by its code (already normalised — voucher-rules.ts `normaliseVoucherCode()`). */
+export async function getGoodwillByVoucherCode(code: string): Promise<GoodwillCredit | null> {
+  const r = await query(`${SELECT} WHERE g.voucher_code = $1`, [code]);
+  return (r.rows[0] as GoodwillCredit) || null;
+}
+
+/** Every voucher, newest first (Money › Vouchers). */
+export async function listVoucherCredits(limit = 300): Promise<GoodwillCredit[]> {
+  return (await query(`${SELECT} WHERE g.voucher_code IS NOT NULL ORDER BY g.offered_at DESC LIMIT $1`, [limit])).rows;
 }
 
 /** Reserved or used on this job — the job's goodwill chip and the close-out ledger line. */
@@ -206,10 +229,13 @@ export async function noteGoodwill(g: GoodwillCredit, text: string, userId: stri
       await query(`INSERT INTO interactions (job_id, type, content, created_by, source) VALUES ($1, 'note', $2, $3, 'system')`,
         [jobId, text, userId]);
     }
-    await query(
-      `INSERT INTO interactions (organisation_id, person_id, type, content, created_by, source) VALUES ($1, $2, 'note', $3, $4, 'system')`,
-      [g.organisation_id, g.person_id, text, userId],
-    );
+    // A voucher held by nobody ("anyone with the code") has no owner timeline.
+    if (g.organisation_id || g.person_id) {
+      await query(
+        `INSERT INTO interactions (organisation_id, person_id, type, content, created_by, source) VALUES ($1, $2, 'note', $3, $4, 'system')`,
+        [g.organisation_id, g.person_id, text, userId],
+      );
+    }
     if (g.source_issue_id) await logIssueEvent(g.source_issue_id, userId, 'money', text);
   } catch (e) {
     console.warn('[goodwill] timeline note failed:', e);
@@ -225,22 +251,45 @@ export interface OfferInput {
   source_job_id?: string | null;
   source_issue_id?: string | null;
   expires_on?: string | null;
+  /**
+   * Make it a VOUCHER (spec §16): a random code, this face value INC VAT (amount_ex_vat is
+   * then worked out from it and ignored if sent). A voucher may be held by nobody.
+   */
+  voucher_value_inc_vat?: number | null;
 }
 
 export async function offerGoodwill(input: OfferInput, userId: string): Promise<GoodwillCredit> {
-  if ((!!input.organisation_id) === (!!input.person_id)) throw new GoodwillError('A credit is for an organisation OR a person — pick one');
-  const r = await query(
-    `INSERT INTO goodwill_credits
-       (organisation_id, person_id, amount_ex_vat, reason, source_kind, source_job_id, source_issue_id, offered_by, expires_on)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     RETURNING id`,
-    [input.organisation_id || null, input.person_id || null, input.amount_ex_vat, input.reason.trim(),
-      input.source_kind, input.source_job_id || null, input.source_issue_id || null, userId,
-      input.expires_on || ukDatePlus(365)],
-  );
-  const g = (await getRow(r.rows[0].id))!;
-  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} offered to ${g.owner_name}: ${plusVat(g.amount_ex_vat)} off a future hire or money owed, use by ${day(g.expires_on)}. Why: ${g.reason}`,
-    userId, [g.source_job_id]);
+  const voucher = input.voucher_value_inc_vat != null;
+  if (voucher && !(input.voucher_value_inc_vat! > 0)) throw new GoodwillError('A voucher needs a value');
+  if (input.organisation_id && input.person_id) throw new GoodwillError('A credit is for an organisation OR a person — pick one');
+  if (!voucher && !input.organisation_id && !input.person_id) throw new GoodwillError('A credit is for an organisation OR a person — pick one');
+  const amountExVat = voucher ? exVatOf(input.voucher_value_inc_vat!) : input.amount_ex_vat;
+  let id: string | null = null;
+  // A fresh code each try — two the same is vanishingly unlikely, but the column is UNIQUE.
+  for (let attempt = 0; attempt < 5 && !id; attempt++) {
+    try {
+      const r = await query(
+        `INSERT INTO goodwill_credits
+           (organisation_id, person_id, amount_ex_vat, reason, source_kind, source_job_id, source_issue_id, offered_by, expires_on,
+            voucher_code, voucher_value_inc_vat)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING id`,
+        [input.organisation_id || null, input.person_id || null, amountExVat, input.reason.trim(),
+          input.source_kind, input.source_job_id || null, input.source_issue_id || null, userId,
+          input.expires_on || ukDatePlus(365),
+          voucher ? makeVoucherCode() : null, voucher ? input.voucher_value_inc_vat : null],
+      );
+      id = r.rows[0].id;
+    } catch (err) {
+      if (!(voucher && (err as { code?: string })?.code === '23505' && String((err as { constraint?: string }).constraint || '').includes('voucher_code'))) throw err;
+    }
+  }
+  if (!id) throw new GoodwillError('Could not make a voucher code — please try again', 500);
+  const g = (await getRow(id))!;
+  await noteGoodwill(g, voucher
+    ? `🎟️ Voucher ${g.ref} made${g.organisation_id || g.person_id ? ` for ${g.owner_name}` : ''}: ${creditValueText(g)}, single use, use by ${day(g.expires_on)}. Why: ${g.reason}`
+    : `🎁 Goodwill credit ${g.ref} offered to ${g.owner_name}: ${plusVat(g.amount_ex_vat)} off a future hire or money owed, use by ${day(g.expires_on)}. Why: ${g.reason}`,
+  userId, [g.source_job_id]);
   return g;
 }
 
@@ -249,6 +298,9 @@ export async function editGoodwill(id: string, patch: { amount_ex_vat?: number; 
   const before = await getRow(id);
   if (!before) throw new GoodwillError('Goodwill credit not found', 404);
   if (before.status === 'used' || before.status === 'withdrawn') throw new GoodwillError(`This credit is ${before.status} — it can't be changed`);
+  if (before.voucher_code && patch.amount_ex_vat !== undefined && Math.abs(patch.amount_ex_vat - before.amount_ex_vat) > 0.004) {
+    throw new GoodwillError("A voucher's value is what the client was told — withdraw it and make a new one");
+  }
   const sets: string[] = [];
   const vals: unknown[] = [];
   if (patch.amount_ex_vat !== undefined) { vals.push(patch.amount_ex_vat); sets.push(`amount_ex_vat = $${vals.length}`); }
