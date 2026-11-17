@@ -510,9 +510,19 @@ function ReferralsPanel() {
           </div>
           {!editingOffer ? (
             <dl className="text-sm space-y-1">
+              <p className="text-xs text-gray-500">The two lines below are the words that go in the emails.</p>
               <div><dt className="inline text-gray-500">The referrer gets: </dt><dd className="inline text-gray-900">{data.offer.referrerReward || <em className="text-gray-400">a thank-you (not set)</em>}</dd></div>
               <div><dt className="inline text-gray-500">Their friend gets: </dt><dd className="inline text-gray-900">{data.offer.friendOffer || <em className="text-gray-400">nothing set</em>}</dd></div>
-              <div><dt className="inline text-gray-500">Welcome credit: </dt><dd className="inline text-gray-900">{data.offer.friendCreditExVat ? `£${data.offer.friendCreditExVat} + VAT (a goodwill credit, given by a manager)` : <em className="text-gray-400">none</em>}</dd></div>
+              <div className="pt-1 border-t border-gray-100">
+                <dt className="inline text-gray-500">Friend's voucher amount: </dt>
+                <dd className="inline text-gray-900">{data.offer.friendCreditExVat
+                  ? `£${data.offer.friendCreditExVat} + VAT`
+                  : <em className="text-gray-400">not set</em>}</dd>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  The money behind "their friend gets": when a manager presses "Give the voucher" on the friend's job, OP holds
+                  this amount for them on that hire (as a goodwill credit with a GW code). Not set = there's nothing to give.
+                </p>
+              </div>
             </dl>
           ) : (
             <div className="space-y-2 text-sm">
@@ -520,7 +530,7 @@ function ReferralsPanel() {
                 <input className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1.5" value={offer.referrerReward} placeholder="a Tour Store voucher" onChange={(e) => setOffer({ ...offer, referrerReward: e.target.value })} /></label>
               <label className="block"><span className="text-gray-600">Their friend gets (finishes "they'll get …")</span>
                 <input className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1.5" value={offer.friendOffer} placeholder="£20 off their first hire" onChange={(e) => setOffer({ ...offer, friendOffer: e.target.value })} /></label>
-              <label className="block"><span className="text-gray-600">Welcome credit, £ ex VAT (blank = none)</span>
+              <label className="block"><span className="text-gray-600">Friend's voucher amount, £ + VAT (what OP holds for them on their hire; blank = none)</span>
                 <input className="mt-0.5 w-32 border border-gray-300 rounded px-2 py-1.5" inputMode="decimal" value={offer.credit} placeholder="20" onChange={(e) => setOffer({ ...offer, credit: e.target.value })} /></label>
               <p className="text-xs text-gray-500">Each referral keeps the offer that was live when it came in, so you can compare offers later.</p>
               <div className="flex gap-2">

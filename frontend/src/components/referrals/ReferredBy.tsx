@@ -73,11 +73,11 @@ export default function ReferredBy({ jobId, heardAbout, role }: { jobId: string;
       <span className="inline-flex flex-wrap items-center gap-1.5 text-xs text-gray-600">
         <span>🤝 Referred by <Link to={`/people/${referral.referrerPersonId}`} className="text-ooosh-700 hover:underline">{referral.referrerName}</Link></span>
         <span className="text-gray-400">({HOW[referral.how] || referral.how} · {referral.stage})</span>
-        {referral.welcomeCreditRef && <span className="text-gray-500">· welcome credit {referral.welcomeCreditRef}</span>}
+        {referral.welcomeCreditRef && <span className="text-gray-500">· voucher {referral.welcomeCreditRef}</span>}
         {isManager && !referral.welcomeCreditRef && referral.status !== 'declined' && creditAmount && (
           <button type="button" disabled={busy}
-            onClick={() => { if (window.confirm(`Give the friend a ${money(creditAmount)} + VAT welcome credit? It's a goodwill credit, held for this hire.`)) act(() => api.post(`/referrals/${referral.id}/welcome-credit`, {})); }}
-            className="text-ooosh-700 hover:underline disabled:opacity-50">Give {money(creditAmount)} welcome credit</button>
+            onClick={() => { if (window.confirm(`Give the friend their ${money(creditAmount)} + VAT voucher? OP holds it for this hire as a goodwill credit (GW code).`)) act(() => api.post(`/referrals/${referral.id}/welcome-credit`, {})); }}
+            className="text-ooosh-700 hover:underline disabled:opacity-50">Give the {money(creditAmount)} voucher</button>
         )}
         {referral.status === 'open' && !referral.welcomeCreditRef && (
           <button type="button" disabled={busy} title="Linked by mistake? Take it off"

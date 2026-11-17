@@ -8,8 +8,12 @@ import { SHORT_LINK_BASE } from './marketing-links';
 
 /** A personal link travels through the website as `ol=ref-<code>` (job_marketing_source.link_code). */
 export const REFERRAL_LINK_PREFIX = 'ref-';
-/** Where a personal link lands — the website, tagged so the enquiry form hands the code back. */
-export const REFERRAL_LANDING = 'https://www.oooshtours.co.uk/';
+/**
+ * Where a personal link lands — the website's enquiry page (jon, 17 Nov 2026), tagged so the
+ * form hands the code back. Straight onto the form page, so the tag doesn't depend on the
+ * visitor accepting cookies before clicking through.
+ */
+export const REFERRAL_LANDING = 'https://www.oooshtours.co.uk/contact';
 
 // No 0/o, 1/l/i — the code may be read off a screen or typed.
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
@@ -70,9 +74,18 @@ export function reviewReferralLine(offer: OfferText): { before: string; after: s
 export function enquiryThanksRewardLine(offer: OfferText): string {
   const reward = offer.referrerReward?.trim();
   return reward
-    ? `If they end up booking, we'll send ${reward} your way as a thank-you.`
-    : "If they end up booking, we'll send a thank-you your way.";
+    ? `If they end up booking, we'll send you ${reward} as a thank-you.`
+    : "If they end up booking, we'll send you a thank-you.";
 }
+
+/** The "they've booked" email's promise — the thank-you comes once the hire is done. */
+export function bookedRewardLine(offer: OfferText): string {
+  const reward = offer.referrerReward?.trim();
+  return `Once their hire is done, we'll send you ${reward || 'a thank-you'} as promised.`;
+}
+
+/** Past the enquiry stages but not finished or dead — "they've booked". */
+export const BOOKED_STATUSES = ['confirmed', 'prepped', 'dispatched', 'returned_incomplete', 'returned'] as const;
 
 /**
  * Where a referral stands, for people. Stored status + the friend's job: an `open`
