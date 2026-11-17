@@ -21,8 +21,8 @@ import { FALLBACK_URL, deviceOf } from './marketing-links';
 // Jon's emails share one sender and one reply-to address (the review email defines them).
 import { FROM_NAME, REPLY_TO } from './review-requests';
 import {
-  OfferText, codeFromLinkCode, enquiryThanksRewardLine, makeReferralCode, referralForwardUrl,
-  referralStage, referralUrl, referralUrlText,
+  BOOKED_STATUSES, OfferText, bookedRewardLine, codeFromLinkCode, enquiryThanksRewardLine, makeReferralCode,
+  referralForwardUrl, referralStage, referralUrl, referralUrlText,
 } from './referral-rules';
 
 export const REFERRAL_EMAILS_SETTING = 'referral_emails_enabled';
@@ -237,12 +237,16 @@ function greeting(name: string) {
 export async function sendEnquiryThanks(referralId: string): Promise<boolean> {
   if (!(await referralEmailsEnabled())) return false;
   const r = await query(
-    `SELECT rf.referrer_person_id, rf.thanks_email_sent_at, o.referrer_reward, o.friend_offer
-       FROM referrals rf LEFT JOIN referral_offers o ON o.id = rf.offer_id WHERE rf.id = $1`,
+    `SELECT rf.referrer_person_id, rf.thanks_email_sent_at, o.referrer_reward, o.friend_offer, j.pipeline_status
+       FROM referrals rf JOIN jobs j ON j.id = rf.job_id
+       LEFT JOIN referral_offers o ON o.id = rf.offer_id WHERE rf.id = $1`,
     [referralId],
   );
   const row = r.rows[0];
   if (!row || row.thanks_email_sent_at) return false;
+  // "Has just been in touch" only reads right for an enquiry. Linked later, once it's already
+  // booked, the "they've booked" email (daily) says it instead.
+  if (!['new_enquiry', 'quoting', 'paused', 'provisional'].includes(row.pipeline_status)) return false;
   const who = await referrer(row.referrer_person_id);
   if (!who.email) return false;
   // Stamp first, then send — a failure never sends twice.
@@ -258,6 +262,42 @@ export async function sendEnquiryThanks(referralId: string): Promise<boolean> {
     variables: { ...greeting(who.name), rewardLine: enquiryThanksRewardLine({ referrerReward: row.referrer_reward, friendOffer: row.friend_offer }) },
   });
   return result.success;
+}
+
+/**
+ * Email 2b — "good news, they've booked" (email 2 promises the update). Daily, once per
+ * referral, only when the emails are on, only while the friend's job is booked and not yet
+ * finished (a completed one gets email 3 instead). Stamp first, then send. Never throws per row.
+ */
+export async function runReferralBookedEmails(): Promise<number> {
+  if (!(await referralEmailsEnabled())) return 0;
+  const due = await query(
+    `SELECT rf.id, rf.referrer_person_id, o.referrer_reward, o.friend_offer
+       FROM referrals rf JOIN jobs j ON j.id = rf.job_id
+       LEFT JOIN referral_offers o ON o.id = rf.offer_id
+      WHERE rf.status = 'open' AND rf.booked_email_sent_at IS NULL AND j.is_deleted = false
+        AND j.pipeline_status = ANY($1::text[])`,
+    [[...BOOKED_STATUSES]],
+  );
+  let n = 0;
+  for (const row of due.rows) {
+    try {
+      const who = await referrer(row.referrer_person_id);
+      const claim = await query(
+        `UPDATE referrals SET booked_email_sent_at = NOW(), updated_at = NOW() WHERE id = $1 AND booked_email_sent_at IS NULL RETURNING id`,
+        [row.id],
+      );
+      if (!claim.rows.length || !who.email) continue;
+      const result = await emailService.send('referral_booked', {
+        to: who.email, replyTo: REPLY_TO, fromName: FROM_NAME,
+        variables: { ...greeting(who.name), bookedLine: bookedRewardLine({ referrerReward: row.referrer_reward, friendOffer: row.friend_offer }) },
+      });
+      if (result.success) n++;
+    } catch (err) {
+      console.error(`[referrals] booked email for ${row.id} failed (non-fatal):`, err);
+    }
+  }
+  return n;
 }
 
 /** Email 3 — the thank-you itself, sent by a person from Marketing › Referrals. */
@@ -283,11 +323,15 @@ export async function sendReferralTestEmails(toEmail: string, personId: string |
     to: toEmail, replyTo: REPLY_TO, fromName: FROM_NAME, subjectOverride: '[Test] Thank you for sending someone our way',
     variables: { ...greeting(name), rewardLine: enquiryThanksRewardLine(offer) },
   });
+  const e2b = await emailService.send('referral_booked', {
+    to: toEmail, replyTo: REPLY_TO, fromName: FROM_NAME, subjectOverride: "[Test] Good news - they've booked with us",
+    variables: { ...greeting(name), bookedLine: bookedRewardLine(offer) },
+  });
   const e3 = await emailService.send('referral_reward_thanks', {
     to: toEmail, replyTo: REPLY_TO, fromName: FROM_NAME, subjectOverride: '[Test] A thank-you from Ooosh',
     variables: { ...greeting(name), detail: offer.referrerReward || 'your Tour Store code is ABC123', refLink: referralUrl(sample), refLinkText: referralUrlText(sample) },
   });
-  return e2.success && e3.success ? { ok: true } : { ok: false, error: e2.error || e3.error };
+  return e2.success && e2b.success && e3.success ? { ok: true } : { ok: false, error: e2.error || e2b.error || e3.error };
 }
 
 // ── Thank-you due, given, declined ───────────────────────────────────────────

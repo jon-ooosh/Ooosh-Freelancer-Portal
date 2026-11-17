@@ -265,7 +265,8 @@ Offers are plain text jon rotates; each referral keeps the offer that was live.
 
 - **Personal links** (`referral_links`, one per person, the code never changes): `go.oooshtours.co.uk/r/<code>`
   (`routes/go.ts` → `services/referrals.ts` `resolveReferralScan()`), counted like a tracked link (previews and
-  crawlers not), forwarded to the website tagged `ol=ref-<code>`. Codes are the first name + four characters
+  crawlers not), forwarded to the website's enquiry page **oooshtours.co.uk/contact** (jon, 17 Nov 2026 — straight onto
+  the form, so the tag doesn't depend on cookie consent) tagged `ol=ref-<code>`. Codes are the first name + four characters
   without 0/o/1/l/i (`referral-rules.ts`). Made automatically for the client in Jon's review email; "Make a
   referral link" on a person's page for anyone else. Marketing codes may not start `ref-`.
 - **How a referral is recorded** (`referrals`, one per job):
@@ -276,8 +277,9 @@ Offers are plain text jon rotates; each referral keeps the offer that was live.
   `referralBlockReason()` is every rule: not internal; not the referrer's own booking (a contact on it, or a
   member of its client org); a NEW client by `returning-client.ts` at the time the enquiry arrived; and not
   already referred (same client org or a shared contact). The link path skips quietly; staff see the reason.
-- **The friend's welcome credit IS a goodwill credit** (`GOODWILL-CREDIT-SPEC.md`, source `'referral'`): a
-  manager presses "Give £20 welcome credit" on the job; it's offered to the job's band / client (the goodwill
+- **The friend's voucher IS a goodwill credit** (labelled "Friend's voucher amount" on the offer since 17 Nov —
+  "welcome credit" confused) (`GOODWILL-CREDIT-SPEC.md`, source `'referral'`): a
+  manager presses "Give the £20 voucher" on the job; it's offered to the job's band / client (the goodwill
   owner rule) and reserved on this hire, so whoever quotes sees it — applied in HireHop with its GW code like
   any goodwill credit. Once per referral.
 - **Thank-you due**: daily 10:20 UK (`runReferralRewardsDue()`) — a referral whose job is now Completed becomes
@@ -288,10 +290,15 @@ Offers are plain text jon rotates; each referral keeps the offer that was live.
   - the review email's referral line becomes their own link + the offer: "Know a band who needs vans, backline
     or rehearsal space? Send them your link - go.oooshtours.co.uk/r/sam-7k2p - and they'll get £20 off their
     first hire. If they book, we'll send you a Tour Store voucher to say thanks." (no person → "mention your name");
-  - **email 2** `referral_enquiry_thanks` — "someone you recommended has just been in touch", once per referral,
-    **OFF until Marketing › Referrals turns it on** (`referral_emails_enabled`);
+  - **email 2** `referral_enquiry_thanks` — "someone you recommended has just been in touch with us!", once per
+    referral, only while the friend's job is still an enquiry, **OFF until Marketing › Referrals turns it on**
+    (`referral_emails_enabled`). It promises "We'll keep you updated if they confirm and complete a booking";
+  - **email 2b** `referral_booked` — "Good news - the person you recommended has booked with us! Once their hire is
+    done, we'll send you {reward} as promised." Daily 10:20, once per referral (`booked_email_sent_at`, mig 348),
+    while the job is booked and not finished; same switch as email 2;
   - **email 3** `referral_reward_thanks` — the thank-you itself, only when a person marks it given, ending with
-    their link and "You can use the same link as many times as you like!".
+    their referral link and "You can use the same link as many times as you like!". It says whatever the manager typed
+    as "what they got" — a voucher with a code to redeem is the next step (§8b).
   Wording agreed with jon, 17 Nov 2026 (plain dashes). "Send me a test" sends both to the person pressing it.
 - **Cards** (not built — jon, later): one QR per card design (a tracked link, e.g. `van-card`) plus a
   "Recommended by: ______" line the client fills in; the friend's form "Who recommended us?" catches the name and

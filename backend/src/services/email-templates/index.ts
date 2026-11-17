@@ -3047,9 +3047,24 @@ const templates: Record<string, EmailTemplate> = {
     body: `
       {{#if hasName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi {{name}},</p>{{/if}}
       {{#if noName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi there,</p>{{/if}}
-      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Just a quick note to say thank you - someone you recommended has just been in touch with us.</p>
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Just a quick note to say thank you - someone you recommended has just been in touch with us!</p>
       <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">{{rewardLine}} These word of mouth referrals really make a difference to a small team like ours.</p>
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">We'll keep you updated if they confirm and complete a booking.</p>
       <p style="margin:0 0 4px;font-size:15px;color:#334155;line-height:1.6;">Thanks,<br>Jon<br>Director, Ooosh! Tours Ltd</p>`,
+  },
+
+  // Email 2b: the person they recommended has booked (the "keep you updated" promise in
+  // email 2). Daily, once per referral, same switch as email 2. Never names the friend.
+  referral_booked: {
+    variant: 'client',
+    preheader: 'The person you recommended has booked with us',
+    subject: "Good news - they've booked with us",
+    body: `
+      {{#if hasName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi {{name}},</p>{{/if}}
+      {{#if noName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi there,</p>{{/if}}
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Good news - the person you recommended has booked with us!</p>
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">{{bookedLine}}</p>
+      <p style="margin:0 0 4px;font-size:15px;color:#334155;line-height:1.6;">Thanks again,<br>Jon</p>`,
   },
 
   // Email 3: the thank-you itself, sent by a person when marking it given. {{detail}} is
@@ -3062,7 +3077,7 @@ const templates: Record<string, EmailTemplate> = {
       {{#if hasName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi {{name}},</p>{{/if}}
       {{#if noName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi there,</p>{{/if}}
       <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">The band you sent our way have just finished their hire with us, so as promised, here's a little thank-you: {{detail}}.</p>
-      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Thanks again for recommending us - and if you know anyone else who's heading out on the road, your link still works:
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Thanks again for recommending us - and if you know anyone else who's heading out on the road, your referral link still works:
         <a href="{{refLink}}" style="color:#7B5EA7;">{{refLinkText}}</a>. You can use the same link as many times as you like!</p>
       <p style="margin:0 0 4px;font-size:15px;color:#334155;line-height:1.6;">Jon</p>`,
   },

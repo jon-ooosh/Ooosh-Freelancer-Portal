@@ -1,6 +1,6 @@
 // The referral scheme's pure rules (docs/BUSINESS-FIGURES-SPEC.md §8d).
 import {
-  codeFromLinkCode, enquiryThanksRewardLine, makeReferralCode, referralForwardUrl, referralStage,
+  bookedRewardLine, codeFromLinkCode, enquiryThanksRewardLine, makeReferralCode, referralForwardUrl, referralStage,
   referralUrl, referralUrlText, reviewReferralLine,
 } from '../referral-rules';
 
@@ -28,6 +28,7 @@ describe('links', () => {
   it('forwards to the website tagged so the enquiry form hands the code back', () => {
     const u = new URL(referralForwardUrl('sam-7k2p'));
     expect(u.hostname).toBe('www.oooshtours.co.uk');
+    expect(u.pathname).toBe('/contact');   // straight onto the enquiry form (jon, 17 Nov 2026)
     expect(u.searchParams.get('ol')).toBe('ref-sam-7k2p');
     expect(u.searchParams.get('utm_source')).toBe('referral');
   });
@@ -49,8 +50,10 @@ describe('wording', () => {
   it('reads naturally with no offer set', () => {
     const l = reviewReferralLine({ referrerReward: null, friendOffer: '  ' });
     expect(l.after).toBe(". If they book, we'll send you a thank-you.");
-    expect(enquiryThanksRewardLine({ referrerReward: null, friendOffer: null })).toBe("If they end up booking, we'll send a thank-you your way.");
-    expect(enquiryThanksRewardLine({ referrerReward: 'a hoodie', friendOffer: null })).toBe("If they end up booking, we'll send a hoodie your way as a thank-you.");
+    expect(enquiryThanksRewardLine({ referrerReward: null, friendOffer: null })).toBe("If they end up booking, we'll send you a thank-you.");
+    expect(bookedRewardLine({ referrerReward: 'a hoodie', friendOffer: null })).toBe("Once their hire is done, we'll send you a hoodie as promised.");
+    expect(bookedRewardLine({ referrerReward: '', friendOffer: null })).toBe("Once their hire is done, we'll send you a thank-you as promised.");
+    expect(enquiryThanksRewardLine({ referrerReward: 'a hoodie', friendOffer: null })).toBe("If they end up booking, we'll send you a hoodie as a thank-you.");
   });
 });
 
