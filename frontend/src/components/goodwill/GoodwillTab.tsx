@@ -91,7 +91,7 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
                 const live = g.status === 'offered' || g.status === 'reserved';
                 return (
                   <tr key={g.id} className={`border-t border-gray-100 align-top ${live ? '' : 'text-gray-500'}`}>
-                    <td className="px-3 py-2"><b>{money(g.amount_ex_vat)} + VAT</b><div className="text-xs text-gray-500 font-mono">{g.ref}</div></td>
+                    <td className="px-3 py-2"><b>{money(g.amount_ex_vat)}+VAT</b><div className="text-xs text-gray-500 font-mono">{g.ref}</div></td>
                     <td className="px-3 py-2">
                       {gwDay(g.offered_at)}
                       <div className="text-xs">
@@ -108,7 +108,7 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
                       <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${STATUS_PILL[g.status]}`}>{STATUS_LABEL[g.status]}</span>
                       {(g.status === 'reserved' || g.status === 'used') && g.reserved_job_id && (
                         <div className="text-xs mt-1">
-                          {g.status === 'used' ? `${money(g.used_amount_ex_vat ?? 0)} + VAT on ` : 'on '}
+                          {g.status === 'used' ? `${money(g.used_amount_ex_vat ?? 0)}+VAT on ` : 'on '}
                           <Link to={`/jobs/${g.reserved_job_id}`} className="text-ooosh-600 hover:underline">job {g.reserved_job_number}</Link>
                           {g.reserved_for === 'invoice' && g.reserved_invoice_number ? ` (${g.reserved_invoice_number})` : ''}
                         </div>

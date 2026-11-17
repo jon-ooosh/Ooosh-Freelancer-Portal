@@ -229,10 +229,11 @@ export function startScheduler() {
   });
   console.log('Scheduler: card-reader receipt sweep scheduled every 5 minutes');
 
-  // Goodwill read-back (docs/GOODWILL-CREDIT-SPEC.md §6): reserved credits read from HireHop
-  // and GW codes on stored lines. Read-only on HireHop. At :15 and :45, between the job syncs.
+  // Goodwill read-back (docs/GOODWILL-CREDIT-SPEC.md §6, §15). Hourly at :50, after the line sync,
+  // from the lines that sync has already stored — no HireHop calls. Credit notes: the Money tab's
+  // own billing read, plus one billing read a day per invoice credit still waiting (07:40).
   if (isHireHopConfigured()) {
-    cron.schedule('15,45 * * * *', async () => {
+    cron.schedule('50 * * * *', async () => {
       try {
         const { runGoodwillCheck } = await import('../services/goodwill-check');
         const r = await runGoodwillCheck();
@@ -241,7 +242,16 @@ export function startScheduler() {
         console.error('Scheduler: goodwill check failed:', err instanceof Error ? err.message : err);
       }
     });
-    console.log('Scheduler: goodwill read-back scheduled at :15 and :45');
+    cron.schedule('40 7 * * *', async () => {
+      try {
+        const { runGoodwillBillingCheck } = await import('../services/goodwill-check');
+        const r = await runGoodwillBillingCheck();
+        if (r.checked) console.log(`Scheduler: goodwill billing check — ${r.checked} invoice credits read`);
+      } catch (err) {
+        console.error('Scheduler: goodwill billing check failed:', err instanceof Error ? err.message : err);
+      }
+    }, { timezone: 'Europe/London' });
+    console.log('Scheduler: goodwill read-back hourly at :50 (stored lines), billing daily 07:40');
   }
 
   // ── HireHop Job Sync ──────────────────────────────────────────────────

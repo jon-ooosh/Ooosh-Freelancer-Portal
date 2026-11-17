@@ -67,7 +67,7 @@ router.post('/:id/check', async (req: AuthRequest, res: Response) => {
   try {
     const id = String(req.params.id);
     if (!isUuid(id)) { res.status(400).json({ error: 'Bad id' }); return; }
-    const g = await checkReservedGoodwill(id);
+    const g = await checkReservedGoodwill(id, 'live');  // the one place it reads HireHop live — a person asked
     if (!g) { res.status(404).json({ error: 'Goodwill credit not found' }); return; }
     res.json({ data: g });
   } catch (err) { fail(res, err, 'check'); }

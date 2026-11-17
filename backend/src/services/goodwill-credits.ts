@@ -96,11 +96,19 @@ const SELECT = `
     LEFT JOIN people op ON op.id = ou.person_id`;
 
 const money = (n: number) => `£${n.toFixed(2)}`;
-const plusVat = (n: number) => `${money(n)} + VAT (${money(Math.round(n * 120) / 100)})`;
-/** '2027-11-16' → '16 Nov 2027' (a DATE string, read as a calendar day — never shifted by a time zone). */
+const plusVat = (n: number) => `${money(n)}+VAT (${money(Math.round(n * 120) / 100)})`;
+/** 1 → '1st', 2 → '2nd', 11 → '11th', 22 → '22nd'. */
+function ordinal(n: number): string {
+  const teen = n % 100 >= 11 && n % 100 <= 13;
+  const suffix = teen ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[n % 10] || 'th';
+  return `${n}${suffix}`;
+}
+/** '2027-11-16' → '16th Nov 2027' (a DATE string, read as a calendar day — never shifted by a time zone). */
 const day = (ymd: string) => {
   const d = new Date(`${ymd}T12:00:00Z`);
-  return Number.isNaN(d.getTime()) ? ymd : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+  if (Number.isNaN(d.getTime())) return ymd;
+  const month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+  return `${ordinal(d.getUTCDate())} ${month} ${d.getUTCFullYear()}`;
 };
 
 async function getRow(id: string): Promise<GoodwillCredit | null> {
@@ -251,7 +259,7 @@ export async function editGoodwill(id: string, patch: { amount_ex_vat?: number; 
   await query(`UPDATE goodwill_credits SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${vals.length}`, vals);
   const g = (await getRow(id))!;
   const changes = [
-    patch.amount_ex_vat !== undefined && g.amount_ex_vat !== before.amount_ex_vat ? `amount ${money(before.amount_ex_vat)} → ${money(g.amount_ex_vat)} + VAT` : '',
+    patch.amount_ex_vat !== undefined && g.amount_ex_vat !== before.amount_ex_vat ? `amount ${money(before.amount_ex_vat)} → ${money(g.amount_ex_vat)}+VAT` : '',
     patch.expires_on !== undefined && g.expires_on !== before.expires_on ? `use by ${day(before.expires_on)} → ${day(g.expires_on)}` : '',
   ].filter(Boolean).join(', ');
   if (changes) await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} changed: ${changes}`, userId, []);
@@ -274,7 +282,7 @@ export async function reserveGoodwill(id: string, input: ReserveInput, userId: s
       ? `It's already reserved on job ${before.reserved_job_number ?? ''}`.trim()
       : `This credit is ${before.status}`);
   }
-  if (input.amount_ex_vat > before.amount_ex_vat + 0.004) throw new GoodwillError(`It's only worth ${money(before.amount_ex_vat)} + VAT`);
+  if (input.amount_ex_vat > before.amount_ex_vat + 0.004) throw new GoodwillError(`It's only worth ${money(before.amount_ex_vat)}+VAT`);
   const job = await query(`SELECT id FROM jobs WHERE id = $1 AND is_deleted = false`, [input.job_id]);
   if (job.rows.length === 0) throw new GoodwillError('Job not found', 404);
   // "Still free to use" is repeated in the WHERE, so two people reserving at once can't both win.
@@ -292,7 +300,7 @@ export async function reserveGoodwill(id: string, input: ReserveInput, userId: s
   const where = g.reserved_for === 'invoice'
     ? `against ${g.reserved_invoice_number || 'an invoice'} (a credit note in HireHop with ${g.ref} in its description)`
     : `off the hire (a discount in HireHop with "Goodwill credit ${g.ref}" in the line's note)`;
-  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} reserved on this job: ${money(input.amount_ex_vat)} + VAT ${where}.`, userId, [g.reserved_job_id]);
+  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} reserved on this job: ${money(input.amount_ex_vat)}+VAT ${where}.`, userId, [g.reserved_job_id]);
   return g;
 }
 
@@ -328,7 +336,7 @@ export async function markGoodwillApplied(id: string, amountExVat: number | null
   );
   const g = (await getRow(id))!;
   const lapsed = before.amount_ex_vat - amount;
-  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} applied on this job: ${money(amount)} + VAT off.${lapsed > 0.004 ? ` The other ${money(lapsed)} + VAT lapses.` : ''}`,
+  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} applied on this job: ${money(amount)}+VAT off.${lapsed > 0.004 ? ` The other ${money(lapsed)}+VAT lapses.` : ''}`,
     userId, [g.reserved_job_id]);
   return g;
 }

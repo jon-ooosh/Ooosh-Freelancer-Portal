@@ -1,7 +1,8 @@
 # Goodwill credit — spec
 
 Status: **phases 1 and 2 BUILT (16 Nov 2026) — §13 is phase 1 and where it differs from the plan,
-§14 is phase 2 (the HireHop read-back).** Decisions: jon, 16 Nov 2026. Mockups: the "Goodwill credit
+§14 is phase 2 (the HireHop read-back), §15 how it was made cheap on HireHop calls (17 Nov).**
+Decisions: jon, 16–17 Nov 2026. Mockups: the "Goodwill credit
 mockups" canvas (claude.ai artifact, private to jon) — screens 1a–1d, 2–6 below refer to it.
 
 Born from job 16815: a support band lost a tour when the headliner cancelled. We kept the
@@ -373,4 +374,33 @@ The decision `decideGoodwill()` is pure and tested on the probe's real rows.
 - **"Unknown code" only goes to the log.** No job flag.
 - **Codes on credit notes are only found for RESERVED credits.** OP doesn't sweep every job's
   billing.
+
+## 15. The read-back on a HireHop-call budget (jon, 17 Nov 2026)
+
+As first shipped, the §14 check read each reserved credit's supply list and billing live, at :15
+and :45. That is two calls × 48 runs, about 96 HireHop calls a day per credit, for something that can
+wait an hour. Jon asked for it to ride on calls OP makes anyway.
+
+**Now:**
+
+| Look | When | HireHop calls |
+|---|---|---|
+| A credit used on a hire: its code on a line | Hourly at :50, after the line sync. Reads `jobs.line_items`, which the sync already fetched and which now keeps `ADDITIONAL`, `TECHNICAL`, `UNIT_PRICE`, `PRICE` | **0** |
+| A code on any live job's lines (link a free credit / flag a second use) | Same run, same stored lines | **0** |
+| A credit note carrying the code | Whenever someone opens the job's Money tab. The summary already reads billing, and passes it to `applyGoodwillFromBilling()` (fire-and-forget) | **0** |
+| A credit reserved against an invoice and still not found | Daily 07:40, `runGoodwillBillingCheck()` | **1 per such credit** |
+| "Check HireHop now" | When a person presses it | 2 (lines + billing, live) |
+
+**What this costs and what it guards against:**
+- **"Nothing in HireHop yet" is only flagged where the look could have seen it:**
+  - a hire credit on a job the line sync keeps fresh (HireHop status 1–6, lines synced);
+  - an invoice credit after a billing read.
+
+  Enquiries (status 0) and returned or completed jobs aren't refreshed by the sync, so a credit
+  there waits quietly. Reserved credits on enquiries are found once the job is provisional or
+  booked, which is when the discount actually matters.
+- **A line stored before prices were kept** is still found. The "isn't discounted" warning just
+  can't be judged for it until the next sync.
+- **Marking a credit used takes up to about an hour** (the line sync's 1-hour refresh, then :50),
+  instead of 30 minutes.
 

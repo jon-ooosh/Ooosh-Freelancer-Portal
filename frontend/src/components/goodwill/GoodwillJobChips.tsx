@@ -19,7 +19,7 @@ export function useGoodwillOnJob(jobId: string | null | undefined) {
  * The job header's goodwill chips (docs/GOODWILL-CREDIT-SPEC.md §4.3 / §6): one per
  * credit reserved or used on this job. Amber while it waits for HireHop or the
  * read-back found something wrong; green once used cleanly. Clicking a reserved one
- * asks HireHop now instead of waiting for the half-hourly check. Nothing when none.
+ * asks HireHop now instead of waiting for the hourly check. Nothing when none.
  */
 export default function GoodwillJobChips({ jobId }: { jobId: string }) {
   const { credits, reload } = useGoodwillOnJob(jobId);
@@ -39,11 +39,11 @@ export default function GoodwillJobChips({ jobId }: { jobId: string }) {
         const used = c.status === 'used';
         const warn = !used || !!c.check_problem;
         const label = used
-          ? `Goodwill ${c.ref}: −${money(c.used_amount_ex_vat ?? c.amount_ex_vat)} + VAT`
+          ? `Goodwill ${c.ref}: −${money(c.used_amount_ex_vat ?? c.amount_ex_vat)}+VAT`
           : `Goodwill ${c.ref} reserved`;
         const title = [
           used ? `Used on this job (${c.used_how === 'credit_note' ? `credit note ${c.used_hh_ref ?? ''}` : c.used_how === 'line' ? 'found on a HireHop line' : 'marked applied'}).`
-            : `Reserved: ${money(c.reserved_amount_ex_vat ?? c.amount_ex_vat)} + VAT — waiting for "Goodwill credit ${c.ref}" in HireHop. Click to check now.`,
+            : `Reserved: ${money(c.reserved_amount_ex_vat ?? c.amount_ex_vat)}+VAT — waiting for "Goodwill credit ${c.ref}" in HireHop. Click to check now.`,
           c.check_problem ? `⚠ ${c.check_problem}` : '',
         ].filter(Boolean).join('\n');
         const cls = `inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full border ${

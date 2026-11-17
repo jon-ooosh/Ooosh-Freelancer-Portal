@@ -108,7 +108,7 @@ describe('markGoodwillApplied', () => {
     await markGoodwillApplied('g1', null, USER);
     expect(mockQuery.mock.calls[1][1][1]).toBe(80);
     const noteText = mockQuery.mock.calls.find((c: any[]) => String(c[0]).includes('INSERT INTO interactions (job_id'))![1][1];
-    expect(noteText).toContain('The other £20.00 + VAT lapses');
+    expect(noteText).toContain('The other £20.00+VAT lapses');
   });
 });
 
