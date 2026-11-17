@@ -5,7 +5,7 @@ import { useAuthStore } from '../../hooks/useAuthStore';
 import { hasManagerRole } from '../../lib/roles';
 import { ukToday } from '../../lib/ukDate';
 import {
-  type GoodwillCredit, type GoodwillOwner, STATUS_LABEL, STATUS_PILL, money, plusVat, gwDay, emailPoints, copyText,
+  type GoodwillCredit, type GoodwillOwner, STATUS_LABEL, STATUS_PILL, money, plusVat, gwDay, emailPoints, copyText, creditHeadline,
 } from '../../lib/goodwillCopy';
 import OfferGoodwillModal from './OfferGoodwillModal';
 
@@ -40,7 +40,8 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
   }
 
   const edit = (g: GoodwillCredit) => {
-    const amt = prompt(`Amount for ${g.ref}, ex VAT (£)`, String(g.amount_ex_vat));
+    // A voucher's value is what the client was told, so only its use-by date changes.
+    const amt = g.voucher_code ? String(g.amount_ex_vat) : prompt(`Amount for ${g.ref}, ex VAT (£)`, String(g.amount_ex_vat));
     if (amt === null) return;
     const until = prompt(`Use by (YYYY-MM-DD) — today or later`, g.expires_on);
     if (until === null) return;
@@ -91,7 +92,11 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
                 const live = g.status === 'offered' || g.status === 'reserved';
                 return (
                   <tr key={g.id} className={`border-t border-gray-100 align-top ${live ? '' : 'text-gray-500'}`}>
-                    <td className="px-3 py-2"><b>{money(g.amount_ex_vat)}+VAT</b><div className="text-xs text-gray-500 font-mono">{g.ref}</div></td>
+                    <td className="px-3 py-2">
+                      <b>{g.voucher_code ? creditHeadline(g) : `${money(g.amount_ex_vat)}+VAT`}</b>
+                      <div className="text-xs text-gray-500 font-mono">{g.ref}</div>
+                      {g.voucher_code && <div className="text-xs text-gray-700 font-mono" title="The voucher code the client was given">🎟️ {g.voucher_code}</div>}
+                    </td>
                     <td className="px-3 py-2">
                       {gwDay(g.offered_at)}
                       <div className="text-xs">
@@ -106,6 +111,9 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
                     <td className="px-3 py-2 whitespace-nowrap">{gwDay(g.expires_on)}</td>
                     <td className="px-3 py-2">
                       <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${STATUS_PILL[g.status]}`}>{STATUS_LABEL[g.status]}</span>
+                      {g.status === 'used' && g.used_how === 'shop' && (
+                        <div className="text-xs mt-1">At the shop till{g.used_hh_ref ? ` (${g.used_hh_ref})` : ''}</div>
+                      )}
                       {(g.status === 'reserved' || g.status === 'used') && g.reserved_job_id && (
                         <div className="text-xs mt-1">
                           {g.status === 'used' ? `${money(g.used_amount_ex_vat ?? 0)}+VAT on ` : 'on '}

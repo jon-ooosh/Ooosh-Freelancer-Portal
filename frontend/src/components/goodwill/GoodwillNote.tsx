@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useAuthStore } from '../../hooks/useAuthStore';
 import { hasManagerRole } from '../../lib/roles';
-import { type GoodwillCredit, money, plusVat, gwDay, hireHopNote, copyText } from '../../lib/goodwillCopy';
+import { type GoodwillCredit, money, plusVat, gwDay, hireHopNote, copyText, creditHeadline } from '../../lib/goodwillCopy';
 
 /**
  * Goodwill credits for whoever is on this enquiry / job — the Client History
@@ -12,7 +12,8 @@ import { type GoodwillCredit, money, plusVat, gwDay, hireHopNote, copyText } fro
  * it only pass ids.
  *
  * `jobId` is the saved job; without one (a New Enquiry not saved yet) a credit can
- * be seen but not reserved.
+ * be seen but not reserved. On a saved job staff can also type a VOUCHER code the client
+ * gave them (GOODWILL-CREDIT-SPEC §16) — it is then held for this hire like any credit.
  */
 export default function GoodwillNote({ orgIds, personIds = [], jobId }: {
   orgIds: Array<string | null | undefined>;
@@ -43,7 +44,10 @@ export default function GoodwillNote({ orgIds, personIds = [], jobId }: {
   useEffect(() => { load(); }, [load]);
 
   const shown = credits.filter((c) => c.status === 'reserved' || !hidden.has(c.id));
-  if (shown.length === 0 && !using) return null;
+  if (shown.length === 0 && !using) {
+    // Nothing to show — on a saved job, just the quiet way in for a voucher code.
+    return jobId ? <div className="mb-3"><VoucherCodeEntry jobId={jobId} onHeld={load} /></div> : null;
+  }
 
   async function act(c: GoodwillCredit, path: 'applied' | 'unreserve' | 'check', body: unknown = {}) {
     setBusy(c.id);
@@ -70,9 +74,10 @@ export default function GoodwillNote({ orgIds, personIds = [], jobId }: {
       <ul className="space-y-2.5">
         {shown.map((c) => (
           <li key={c.id} className="text-xs text-gray-700">
-            <div className="text-sm font-bold text-gray-900">{plusVat(c.amount_ex_vat)}</div>
+            <div className="text-sm font-bold text-gray-900">{creditHeadline(c)}</div>
+            {c.voucher_code && <div className="text-[11px] text-gray-500">Voucher code <span className="font-mono text-gray-800">{c.voucher_code}</span> · {plusVat(c.amount_ex_vat)} off the hire</div>}
             <div>
-              For {c.owner_name} · <span className="font-mono">{c.ref}</span> · offered {gwDay(c.offered_at)}
+              {c.organisation_id || c.person_id ? <>For {c.owner_name}</> : 'Anyone with the code'} · <span className="font-mono">{c.ref}</span> · offered {gwDay(c.offered_at)}
               {c.source_job_id && c.source_job_number && <> after <Link to={`/jobs/${c.source_job_id}`} className="text-ooosh-600 hover:underline">job {c.source_job_number}</Link></>}
               {c.offered_by_name && <> by {c.offered_by_name}</>}. Use by {gwDay(c.expires_on)}.
             </div>
@@ -118,9 +123,57 @@ export default function GoodwillNote({ orgIds, personIds = [], jobId }: {
         ))}
       </ul>
       {error && <div className="text-xs text-red-600 mt-1">{error}</div>}
+      {jobId && <div className="mt-2"><VoucherCodeEntry jobId={jobId} onHeld={load} /></div>}
       {using && jobId && (
         <UseGoodwillModal credit={using} jobId={jobId} onClose={() => setUsing(null)} onDone={() => { setUsing(null); load(); }} />
       )}
+    </div>
+  );
+}
+
+/**
+ * "Have a voucher code?" — staff type the code the client gave them; OP checks it and
+ * holds the whole voucher for this hire. Codes are only ever checked by staff, here and at
+ * the shop till — there is no public lookup (spec §16).
+ */
+function VoucherCodeEntry({ jobId, onHeld }: { jobId: string; onHeld: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  if (!open) {
+    return (
+      <button type="button" onClick={() => setOpen(true)} className="text-xs text-ooosh-600 hover:underline">
+        🎟️ Have a voucher code?
+      </button>
+    );
+  }
+  async function hold() {
+    setBusy(true);
+    setError('');
+    try {
+      await api.post('/vouchers/hold-on-job', { code: code.trim(), job_id: jobId });
+      setOpen(false);
+      setCode('');
+      onHeld();
+    } catch (e) {
+      setError((e as { body?: { error?: string } })?.body?.error || 'Could not check that code');
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="text-xs">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <input autoFocus value={code} onChange={(e) => setCode(e.target.value)} placeholder="XXXX-XXXX-XXXX"
+          onKeyDown={(e) => { if (e.key === 'Enter' && code.trim()) void hold(); }}
+          className="border border-gray-300 rounded px-2 py-1 font-mono uppercase w-40" />
+        <button type="button" disabled={busy || !code.trim()} onClick={() => void hold()}
+          className="px-2 py-1 bg-green-700 text-white rounded hover:bg-green-800 disabled:opacity-50">{busy ? 'Checking…' : 'Hold for this hire'}</button>
+        <button type="button" onClick={() => { setOpen(false); setError(''); }} className="text-gray-400 hover:text-gray-600">Cancel</button>
+      </div>
+      {error && <div className="text-red-600 mt-1">{error}</div>}
     </div>
   );
 }

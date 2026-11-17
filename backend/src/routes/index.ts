@@ -77,6 +77,7 @@ import goRouter from './go';
 import marketingRouter from './marketing';
 import reviewRequestsRouter from './review-requests';
 import referralsRouter from './referrals';
+import vouchersRouter from './vouchers';
 import cspReportRouter from './csp-report';
 
 const router = Router();
@@ -159,6 +160,7 @@ router.use('/go', goRouter);  // Tracked links — PUBLIC redirect, counts the s
 router.use('/marketing', marketingRouter);
 router.use('/review-requests', reviewRequestsRouter);  // Jon's review email — public "don't ask me again" + staff/admin (docs/BUSINESS-FIGURES-SPEC.md §8c)  // Marketing page — admin only (docs/BUSINESS-FIGURES-SPEC.md §8)
 router.use('/referrals', referralsRouter);  // the referral scheme — staff / managers / admin (docs/BUSINESS-FIGURES-SPEC.md §8d)
+router.use('/vouchers', vouchersRouter);  // vouchers — a goodwill credit with a code (docs/GOODWILL-CREDIT-SPEC.md §16)
 router.use('/csp-report', cspReportRouter);  // PUBLIC — browser CSP violation reports (no auth, rate-limited, log only)
 
 // Alias: /api/jobs/:jobNumber → /api/driver-verification/validate-job/:jobNumber

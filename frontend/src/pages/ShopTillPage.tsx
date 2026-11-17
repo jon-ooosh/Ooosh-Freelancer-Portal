@@ -14,6 +14,10 @@
  * Saves to OP instantly; the drain sends each transaction to HireHop after the
  * push hold (Window A). A sale that has reached HireHop is refunded from the
  * Recent Sales list (Window B, spec §8) — it is never deleted.
+ *
+ * A VOUCHER (staff till only — GOODWILL-CREDIT-SPEC §16) is applied as lowered line
+ * prices, like any discount here, so HireHop sees what was charged. The server spreads
+ * it (`POST /shop/voucher`); the code goes with the sale, which uses the voucher up.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -26,6 +30,7 @@ import { hasManagerRole } from '../lib/roles';
 import { jobDisplayOrgName } from '../lib/jobOrgName';
 import ShopWeekPanel from '../components/shop/ShopWeekPanel';
 import { TENDERS } from '../lib/shopTenders';
+import { gwDay } from '../lib/goodwillCopy';
 import CardReaderPayment, { type CardReaderAccess, type Session as ReaderSession } from '../components/CardReaderPayment';
 
 type BottomTab = 'recent' | 'attention' | 'review' | 'week' | 'used' | 'reorder';
@@ -263,6 +268,16 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
   const [readerOpen, setReaderOpen] = useState(false);
   const [readerActive, setReaderActive] = useState(false);
   const [maxDiscountPct, setMaxDiscountPct] = useState(0);
+  // A voucher on this basket: the server's spread, and each line's price before it so
+  // Remove puts them back. Never on the kiosk (the server refuses it there too).
+  const [voucher, setVoucher] = useState<{
+    code: string; ref: string; valueIncVat: number; ownerName: string; expiresOn: string;
+    before: Record<number, string>;
+  } | null>(null);
+  const [voucherText, setVoucherText] = useState('');
+  const [voucherOpen, setVoucherOpen] = useState(false);
+  const [voucherBusy, setVoucherBusy] = useState(false);
+  const [voucherError, setVoucherError] = useState<string | null>(null);
   const [cacheAge, setCacheAge] = useState<string | null>(null);
   const [availability, setAvailability] = useState<Record<string, number | null>>({});
   const [availChecked, setAvailChecked] = useState(false);
@@ -650,11 +665,56 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
     };
   })();
 
-  const overDiscountCap = totals.discount > 0 && totals.discountPct > maxDiscountPct + 0.001;
+  // What a voucher covers is measured inc VAT, as the server does (shop-sales.ts
+  // checkVoucher): only the discount ON TOP of it counts against the role's ceiling.
+  const listGross = Math.round(basket.reduce((sum, l) => {
+    const net = Math.round((l.stock.priceExVat ?? 0) * l.qty * 100) / 100;
+    return sum + net + Math.round(net * ((l.stock.vatRatePct ?? 20) / 100) * 100) / 100;
+  }, 0) * 100) / 100;
+  const grossOff = Math.max(0, Math.round((listGross - totals.gross) * 100) / 100);
+  const voucherTakesOff = voucher ? Math.min(voucher.valueIncVat, grossOff) : 0;
+  const extraPct = listGross > 0 ? ((grossOff - voucherTakesOff) / listGross) * 100 : 0;
+  const overDiscountCap = voucher
+    ? extraPct > 0.001 && extraPct > maxDiscountPct + 0.001
+    : totals.discount > 0 && totals.discountPct > maxDiscountPct + 0.001;
+
+  async function applyVoucher() {
+    setVoucherBusy(true);
+    setVoucherError(null);
+    try {
+      const r = await api.post<{ data: {
+        voucher: { code: string; ref: string; valueIncVat: number; ownerName: string; expiresOn: string };
+        lines: Array<{ hhStockId: number; unitPriceCharged: number }>;
+      } }>('/shop/voucher', { code: voucherText.trim(), lines: basketLines() });
+      const before: Record<number, string> = {};
+      for (const l of basket) before[l.stock.hhStockId] = l.priceText;
+      const next = new Map(r.data.lines.map(x => [x.hhStockId, x.unitPriceCharged]));
+      setBasket(prev => prev.map(l => next.has(l.stock.hhStockId) ? { ...l, priceText: next.get(l.stock.hhStockId)!.toFixed(2) } : l));
+      setVoucher({ ...r.data.voucher, before });
+      setVoucherOpen(false);
+      setVoucherText('');
+    } catch (e: any) {
+      setVoucherError(e?.body?.error || e?.message || 'Could not apply that voucher.');
+    } finally {
+      setVoucherBusy(false);
+    }
+  }
+
+  /** Take the voucher off: the lines go back to the prices they had before it. */
+  function removeVoucher() {
+    if (voucher) {
+      const before = voucher.before;
+      setBasket(prev => prev.map(l => before[l.stock.hhStockId] !== undefined ? { ...l, priceText: before[l.stock.hhStockId] } : l));
+    }
+    setVoucher(null);
+    setVoucherError(null);
+  }
 
   // A different payment method or mode, or an emptied basket, starts the cash helper afresh.
   const basketEmpty = basket.length === 0;
   useEffect(() => { setCashGiven(null); setCashOther(''); }, [tender, mode, basketEmpty]);
+  // An emptied basket, or recording stock use, ends the voucher (its prices went with the lines).
+  useEffect(() => { if (basketEmpty || mode !== 'sale') { setVoucher(null); setVoucherOpen(false); setVoucherError(null); } }, [basketEmpty, mode]);
   const cashGivenAmount = mode !== 'sale' || tender !== 'till_cash' || cashGiven === null
     ? null
     : cashGiven === 'exact' ? totals.gross
@@ -679,6 +739,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
       if (err) setError(`Sale recorded, but the receipt didn't send: ${err}`);
     }
     setSaved({ gross, id: saleId, kind: 'sale', receipt });
+    setVoucher(null);
     setBasket([]);
     setNotes('');
     setReceiptTo('');
@@ -709,6 +770,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
         notes: notes.trim() || null,
         // The kiosk names the person; a staff login is the person.
         ...(kiosk ? { soldByPersonId: sellerId } : {}),
+        ...(mode === 'sale' && voucher ? { voucherCode: voucher.code } : {}),
       };
       const r = await api.post<{ data: { id: string; kind: string; totals: Totals } }>('/shop/sales', body);
       // The sale is recorded whatever happens to the email — a receipt that
@@ -723,6 +785,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
       // Repeat the change, in case they pressed Take before counting it out.
       const change = mode === 'sale' && tender === 'till_cash' && cashChange !== null && cashChange > 0 ? cashChange : undefined;
       setSaved({ gross: r.data.totals.gross, id: r.data.id, kind: r.data.kind, receipt, change });
+      setVoucher(null);
       setBasket([]);
       setNotes('');
       setReceiptTo('');
@@ -1237,9 +1300,46 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
 
               {overDiscountCap && (
                 <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800">
-                  That is a {totals.discountPct.toFixed(1)}% discount and your limit is {maxDiscountPct}%
+                  {voucher ? `On top of the voucher that is a ${extraPct.toFixed(1)}% discount` : `That is a ${totals.discountPct.toFixed(1)}% discount`} and your limit is {maxDiscountPct}%
                   {user?.role ? ` (${user.role.replace(/_/g, ' ')})` : ''}. Ask a manager to apply it.
                 </p>
+              )}
+
+              {/* Voucher (staff till only). Applied as lower line prices — see the file header. */}
+              {!kiosk && (
+                <div className="mb-3">
+                  {voucher ? (
+                    <div className="rounded border border-green-300 bg-green-50 px-3 py-2 text-xs text-green-900">
+                      <div className="flex items-start justify-between gap-2">
+                        <span>
+                          🎟️ Voucher <span className="font-mono">{voucher.code}</span> ({voucher.ref}) — {money(voucherTakesOff)} off
+                          {voucherTakesOff < voucher.valueIncVat - 0.045 && <> of {money(voucher.valueIncVat)}; the other {money(voucher.valueIncVat - voucherTakesOff)} lapses (single use)</>}.
+                        </span>
+                        <button type="button" onClick={removeVoucher} className="shrink-0 text-green-800 underline">Remove</button>
+                      </div>
+                      <span className="block text-green-800/80">{voucher.ownerName} · use by {gwDay(voucher.expiresOn)}. Used up when the sale is saved. Changed the basket? Remove it and apply it again.</span>
+                    </div>
+                  ) : voucherOpen ? (
+                    <div>
+                      <div className="flex gap-1.5">
+                        <input
+                          autoFocus
+                          value={voucherText}
+                          onChange={e => setVoucherText(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter' && voucherText.trim()) void applyVoucher(); }}
+                          placeholder="XXXX-XXXX-XXXX"
+                          className="min-w-0 flex-1 rounded border border-gray-300 px-3 py-2 font-mono text-sm uppercase"
+                        />
+                        <button type="button" disabled={voucherBusy || !voucherText.trim()} onClick={() => void applyVoucher()}
+                          className="rounded bg-gray-900 px-3 py-2 text-xs font-medium text-white disabled:opacity-50">{voucherBusy ? 'Checking…' : 'Apply'}</button>
+                        <button type="button" onClick={() => { setVoucherOpen(false); setVoucherError(null); }} className="px-1 text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+                      </div>
+                      {voucherError && <p className="mt-1 text-xs text-red-700">{voucherError}</p>}
+                    </div>
+                  ) : (
+                    <button type="button" onClick={() => setVoucherOpen(true)} className="text-xs text-ooosh-600 hover:underline">🎟️ Voucher code</button>
+                  )}
+                </div>
               )}
 
               {/* Who it's for. Walk-in pools on the week's shop job; a band's
@@ -1626,6 +1726,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
                 notes: notes.trim() || null,
                 reader_id: readerId,
                 ...(kiosk ? { sold_by_person_id: sellerId } : {}),
+                ...(voucher ? { voucher_code: voucher.code } : {}),
               })}
               onRecorded={(sess) => {
                 if (sess.status === 'succeeded' && sess.shop_sale_id) {

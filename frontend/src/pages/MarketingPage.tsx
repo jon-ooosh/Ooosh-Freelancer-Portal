@@ -449,14 +449,17 @@ function ReviewEmailsPanel() {
 // ── Referrals (docs/BUSINESS-FIGURES-SPEC.md §8d) ────────────────────────────
 
 interface ReferralOverview {
-  offer: { referrerReward: string | null; friendOffer: string | null; friendCreditExVat: number | null; since: string | null };
+  offer: {
+    referrerReward: string | null; friendOffer: string | null;
+    friendVoucherIncVat: number | null; referrerVoucherIncVat: number | null; since: string | null;
+  };
   emailsEnabled: boolean;
   totals: { links: number; scans: number; referrals: number; booked: number; due: number };
   referrals: Array<{
     id: string; referrerPersonId: string; referrerName: string; referrerHasEmail: boolean;
     jobId: string; jobNumber: number | null; jobName: string | null; how: string; status: string; stage: string;
-    createdAt: string; offer: { referrerReward: string | null }; rewardDetail: string | null; declinedReason: string | null;
-    welcomeCreditRef: string | null; thanksEmailSentAt: string | null;
+    createdAt: string; offer: { referrerReward: string | null; referrerVoucherIncVat: number | null }; rewardDetail: string | null; declinedReason: string | null;
+    welcomeCreditRef: string | null; thanksEmailSentAt: string | null; rewardVoucherRef: string | null; rewardVoucherCode: string | null;
   }>;
 }
 
@@ -467,23 +470,37 @@ const STAGE_CLS: Record<string, string> = {
   "Didn't book": 'bg-gray-100 text-gray-600',
 };
 const HOW_LABEL: Record<string, string> = { link: 'Their link', named: 'Named', card: 'Card' };
+const pounds = (n: number) => `£${n.toFixed(n % 1 ? 2 : 0)}`;
+/** A typed amount box: '' → null, else a positive number or an error. */
+function amountOrNull(text: string, what: string): number | null {
+  if (!text.trim()) return null;
+  const n = Number(text.trim().replace(/^£/, ''));
+  if (!(n > 0)) throw new Error(`${what} must be a number of pounds`);
+  return Math.round(n * 100) / 100;
+}
 
 function ReferralsPanel() {
   const [data, setData] = useState<ReferralOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [offer, setOffer] = useState({ referrerReward: '', friendOffer: '', credit: '' });
+  const [offer, setOffer] = useState({ referrerReward: '', friendOffer: '', friendVoucher: '', referrerVoucher: '' });
   const [editingOffer, setEditingOffer] = useState(false);
   const [thanking, setThanking] = useState<ReferralOverview['referrals'][number] | null>(null);
   const [detail, setDetail] = useState('');
   const [sendEmail, setSendEmail] = useState(true);
+  const [giveVoucher, setGiveVoucher] = useState(true);
+  const [voucherAmount, setVoucherAmount] = useState('');
 
   const load = useCallback(async () => {
     try {
       const d = (await api.get<{ data: ReferralOverview }>('/referrals/overview')).data;
       setData(d);
-      setOffer({ referrerReward: d.offer.referrerReward || '', friendOffer: d.offer.friendOffer || '', credit: d.offer.friendCreditExVat ? String(d.offer.friendCreditExVat) : '' });
+      setOffer({
+        referrerReward: d.offer.referrerReward || '', friendOffer: d.offer.friendOffer || '',
+        friendVoucher: d.offer.friendVoucherIncVat ? String(d.offer.friendVoucherIncVat) : '',
+        referrerVoucher: d.offer.referrerVoucherIncVat ? String(d.offer.referrerVoucherIncVat) : '',
+      });
     } catch (e) { setError((e as Error).message || 'Could not load.'); }
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -514,13 +531,16 @@ function ReferralsPanel() {
               <div><dt className="inline text-gray-500">The referrer gets: </dt><dd className="inline text-gray-900">{data.offer.referrerReward || <em className="text-gray-400">a thank-you (not set)</em>}</dd></div>
               <div><dt className="inline text-gray-500">Their friend gets: </dt><dd className="inline text-gray-900">{data.offer.friendOffer || <em className="text-gray-400">nothing set</em>}</dd></div>
               <div className="pt-1 border-t border-gray-100">
-                <dt className="inline text-gray-500">Friend's voucher amount: </dt>
-                <dd className="inline text-gray-900">{data.offer.friendCreditExVat
-                  ? `£${data.offer.friendCreditExVat} + VAT`
-                  : <em className="text-gray-400">not set</em>}</dd>
+                <dt className="inline text-gray-500">Referrer's thank-you voucher: </dt>
+                <dd className="inline text-gray-900">{data.offer.referrerVoucherIncVat ? `${pounds(data.offer.referrerVoucherIncVat)} inc VAT` : <em className="text-gray-400">none</em>}</dd>
+              </div>
+              <div>
+                <dt className="inline text-gray-500">Friend's welcome voucher: </dt>
+                <dd className="inline text-gray-900">{data.offer.friendVoucherIncVat ? `${pounds(data.offer.friendVoucherIncVat)} inc VAT` : <em className="text-gray-400">none</em>}</dd>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  The money behind "their friend gets": when a manager presses "Give the voucher" on the friend's job, OP holds
-                  this amount for them on that hire (as a goodwill credit with a GW code). Not set = there's nothing to give.
+                  The money behind the words. Each is a voucher with its own code, single use, for a hire or the shop.
+                  The friend's is given by a manager from "Referred by" on their job (held for that hire, and emailed to them);
+                  the referrer's when you mark the thank-you given (its code goes in Jon's thank-you email).
                 </p>
               </div>
             </dl>
@@ -530,15 +550,22 @@ function ReferralsPanel() {
                 <input className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1.5" value={offer.referrerReward} placeholder="a Tour Store voucher" onChange={(e) => setOffer({ ...offer, referrerReward: e.target.value })} /></label>
               <label className="block"><span className="text-gray-600">Their friend gets (finishes "they'll get …")</span>
                 <input className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1.5" value={offer.friendOffer} placeholder="£20 off their first hire" onChange={(e) => setOffer({ ...offer, friendOffer: e.target.value })} /></label>
-              <label className="block"><span className="text-gray-600">Friend's voucher amount, £ + VAT (what OP holds for them on their hire; blank = none)</span>
-                <input className="mt-0.5 w-32 border border-gray-300 rounded px-2 py-1.5" inputMode="decimal" value={offer.credit} placeholder="20" onChange={(e) => setOffer({ ...offer, credit: e.target.value })} /></label>
+              <div className="flex flex-wrap gap-4">
+                <label className="block"><span className="text-gray-600">Referrer's voucher, £ inc VAT</span>
+                  <input className="mt-0.5 block w-28 border border-gray-300 rounded px-2 py-1.5" inputMode="decimal" value={offer.referrerVoucher} placeholder="20" onChange={(e) => setOffer({ ...offer, referrerVoucher: e.target.value })} /></label>
+                <label className="block"><span className="text-gray-600">Friend's voucher, £ inc VAT</span>
+                  <input className="mt-0.5 block w-28 border border-gray-300 rounded px-2 py-1.5" inputMode="decimal" value={offer.friendVoucher} placeholder="20" onChange={(e) => setOffer({ ...offer, friendVoucher: e.target.value })} /></label>
+              </div>
+              <p className="text-xs text-gray-500">Blank = no voucher of that kind (the referrer can still be thanked some other way).</p>
               <p className="text-xs text-gray-500">Each referral keeps the offer that was live when it came in, so you can compare offers later.</p>
               <div className="flex gap-2">
                 <button type="button" disabled={busy} className="px-3 py-1.5 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50"
                   onClick={() => run(async () => {
-                    const credit = offer.credit.trim() ? Number(offer.credit) : null;
-                    if (credit !== null && !(credit > 0)) throw new Error('The welcome credit must be a number of pounds');
-                    await api.put('/referrals/offer', { referrerReward: offer.referrerReward.trim() || null, friendOffer: offer.friendOffer.trim() || null, friendCreditExVat: credit });
+                    await api.put('/referrals/offer', {
+                      referrerReward: offer.referrerReward.trim() || null, friendOffer: offer.friendOffer.trim() || null,
+                      friendVoucherIncVat: amountOrNull(offer.friendVoucher, "The friend's voucher"),
+                      referrerVoucherIncVat: amountOrNull(offer.referrerVoucher, "The referrer's voucher"),
+                    });
                     setEditingOffer(false);
                   }, 'Offer saved.')}>Save</button>
                 <button type="button" onClick={() => setEditingOffer(false)} className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50">Cancel</button>
@@ -553,7 +580,7 @@ function ReferralsPanel() {
               <span className={`ml-1 align-middle text-[11px] font-semibold rounded-full px-2 py-0.5 ${data.emailsEnabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>{data.emailsEnabled ? 'On' : 'Off'}</span>
             </h2>
             <div className="flex gap-2">
-              <button type="button" disabled={busy} onClick={() => run(async () => { await api.post('/referrals/test', {}); }, 'Both test emails sent to you.')}
+              <button type="button" disabled={busy} onClick={() => run(async () => { await api.post('/referrals/test', {}); }, 'The test emails are on their way to you (four: in touch, booked, thank-you, the friend’s welcome).')}
                 className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50">Send me a test</button>
               <button type="button" disabled={busy}
                 onClick={() => {
@@ -607,13 +634,18 @@ function ReferralsPanel() {
                       <td className="px-3 py-2">
                         <span className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${STAGE_CLS[r.stage] || 'bg-blue-50 text-blue-700'}`}>{r.stage}</span>
                         {r.rewardDetail && <span className="text-xs text-gray-500"> {r.rewardDetail}</span>}
+                        {r.rewardVoucherCode && <span className="text-xs text-gray-500"> · voucher <span className="font-mono">{r.rewardVoucherCode}</span> ({r.rewardVoucherRef})</span>}
                         {r.declinedReason && <span className="text-xs text-gray-500"> {r.declinedReason}</span>}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap text-right text-xs">
                         {(r.status === 'open' || r.status === 'reward_due') && (
                           <>
                             <button type="button" className="text-ooosh-700 hover:underline mr-3"
-                              onClick={() => { setThanking(r); setDetail(r.offer.referrerReward || ''); setSendEmail(r.referrerHasEmail); }}>Thank-you given…</button>
+                              onClick={() => {
+                                const v = r.offer.referrerVoucherIncVat ?? data.offer.referrerVoucherIncVat;
+                                setThanking(r); setDetail(r.offer.referrerReward || ''); setSendEmail(r.referrerHasEmail);
+                                setGiveVoucher(!!v || !!r.rewardVoucherRef); setVoucherAmount(v ? String(v) : '');
+                              }}>Thank-you given…</button>
                             <button type="button" className="text-gray-500 hover:underline"
                               onClick={() => { const why = window.prompt('Why is this referral declined?'); if (why && why.trim()) run(() => api.post(`/referrals/${r.id}/decline`, { reason: why.trim() })); }}>Decline</button>
                           </>
@@ -630,17 +662,35 @@ function ReferralsPanel() {
       {thanking && (
         <ModalShell title={`Thank ${thanking.referrerName}`} subtitle="Mark the thank-you as given" onClose={() => setThanking(null)} width="max-w-md">
           <div className="space-y-3 text-sm">
-            <label className="block"><span className="text-gray-600">What did they get?</span>
-              <input autoFocus className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1.5" value={detail} placeholder="your Tour Store code is THANKS20" onChange={(e) => setDetail(e.target.value)} /></label>
+            {thanking.rewardVoucherRef ? (
+              <p className="rounded border border-green-200 bg-green-50 px-2 py-1.5 text-xs text-green-900">
+                Their voucher is already made: <span className="font-mono">{thanking.rewardVoucherCode}</span> ({thanking.rewardVoucherRef}). Saving uses it — no second one.
+              </p>
+            ) : (
+              <label className="flex items-start gap-2">
+                <input type="checkbox" className="mt-1" checked={giveVoucher} onChange={(e) => setGiveVoucher(e.target.checked)} />
+                <span>
+                  Give them a voucher of £
+                  <input className="mx-1 w-16 border border-gray-300 rounded px-1.5 py-0.5" inputMode="decimal" value={voucherAmount} disabled={!giveVoucher}
+                    onChange={(e) => setVoucherAmount(e.target.value)} placeholder="20" />
+                  inc VAT
+                  <span className="block text-xs text-gray-500">Its own code, single use, a hire or the shop, for 12 months. The code goes in the email.</span>
+                </span>
+              </label>
+            )}
+            <label className="block"><span className="text-gray-600">What did they get? (the email says “here's a little thank-you: …”)</span>
+              <input autoFocus className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1.5" value={detail} placeholder={giveVoucher ? `a ${voucherAmount ? pounds(Number(voucherAmount) || 0) : '£20'} voucher for a hire or our shop` : 'your Tour Store code is THANKS20'} onChange={(e) => setDetail(e.target.value)} /></label>
             <label className={`flex items-start gap-2 ${thanking.referrerHasEmail ? '' : 'opacity-50'}`}>
               <input type="checkbox" className="mt-0.5" disabled={!thanking.referrerHasEmail} checked={sendEmail && thanking.referrerHasEmail} onChange={(e) => setSendEmail(e.target.checked)} />
-              <span>Email them Jon's thank-you with this in it, and their link to share again{thanking.referrerHasEmail ? '' : ' (no email address on file)'}</span>
+              <span>Email them Jon's thank-you with this in it{giveVoucher || thanking.rewardVoucherRef ? ', the voucher code' : ''}, and their link to share again{thanking.referrerHasEmail ? '' : ' (no email address on file)'}</span>
             </label>
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setThanking(null)} className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50">Cancel</button>
               <button type="button" disabled={busy} className="px-3 py-1.5 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50"
                 onClick={() => run(async () => {
-                  await api.post(`/referrals/${thanking.id}/thanked`, { detail, sendEmail: sendEmail && thanking.referrerHasEmail });
+                  const voucherIncVat = !thanking.rewardVoucherRef && giveVoucher ? amountOrNull(voucherAmount, 'The voucher') : null;
+                  if (!thanking.rewardVoucherRef && giveVoucher && !voucherIncVat) throw new Error('Say how much the voucher is for, or untick it');
+                  await api.post(`/referrals/${thanking.id}/thanked`, { detail, sendEmail: sendEmail && thanking.referrerHasEmail, voucherIncVat });
                   setThanking(null);
                 }, 'Thank-you recorded.')}>Save</button>
             </div>

@@ -14,7 +14,7 @@ export interface GoodwillCredit {
   owner_name: string;
   amount_ex_vat: number;
   reason: string;
-  source_kind: 'close_out' | 'problem' | 'cancellation' | 'organisation' | 'person' | 'referral';
+  source_kind: 'close_out' | 'problem' | 'cancellation' | 'organisation' | 'person' | 'referral' | 'voucher';
   source_job_id: string | null;
   source_job_number: number | null;
   source_issue_id: string | null;
@@ -37,6 +37,10 @@ export interface GoodwillCredit {
   check_problem: string | null;
   last_checked_at: string | null;
   used_hh_ref: string | null;
+  /** A voucher (GOODWILL-CREDIT-SPEC §16): the code the client was given, and its face value INC VAT. */
+  voucher_code?: string | null;
+  voucher_value_inc_vat?: number | null;
+  used_shop_sale_id?: string | null;
 }
 
 export interface GoodwillOwner { kind: 'organisation' | 'person'; id: string; name: string; role?: string }
@@ -46,6 +50,17 @@ export const money = (n: number) => `£${(Math.round(n * 100) / 100).toFixed(2)}
 export const grossAt20 = (n: number) => money(Math.round(n * 120) / 100);
 /** "£100.00+VAT (£120.00)" — the credit is net. */
 export const plusVat = (n: number) => `${money(n)}+VAT (${grossAt20(n)})`;
+
+/** £20 → "£20", £12.50 → "£12.50". */
+export const voucherMoney = (n: number) => `£${n.toFixed(n % 1 ? 2 : 0)}`;
+
+/**
+ * How a credit's value reads: a voucher by what the client was told ("£20 voucher (inc VAT)"),
+ * plain goodwill as "£100.00+VAT (£120.00)".
+ */
+export function creditHeadline(c: { amount_ex_vat: number; voucher_value_inc_vat?: number | null }): string {
+  return c.voucher_value_inc_vat != null ? `${voucherMoney(c.voucher_value_inc_vat)} voucher (inc VAT)` : plusVat(c.amount_ex_vat);
+}
 
 /** '2027-11-16' → '16th Nov 2027'. A DATE string is a calendar day, never shifted; a
  *  timestamp is shown as its UK day. */
@@ -82,7 +97,16 @@ export const STATUS_PILL: Record<GoodwillStatus, string> = {
 };
 
 /** The points for staff to put in their own email to the client — OP sends nothing (spec §5). */
-export function emailPoints(g: { ref: string; owner_name: string; amount_ex_vat: number; expires_on: string }): string {
+export function emailPoints(g: { ref: string; owner_name: string; amount_ex_vat: number; expires_on: string; voucher_code?: string | null; voucher_value_inc_vat?: number | null }): string {
+  if (g.voucher_code && g.voucher_value_inc_vat != null) {
+    return [
+      `- A ${voucherMoney(g.voucher_value_inc_vat)} voucher (inc VAT) off a hire with Ooosh or in our shop`,
+      `- Your voucher code: ${g.voucher_code}`,
+      `- Use it by ${gwDay(g.expires_on)} (for a hire, the booking must be made by then)`,
+      `- Single use - anything it doesn't cover lapses`,
+      `- Not exchangeable for cash`,
+    ].join('\n');
+  }
   return [
     `- ${plusVat(g.amount_ex_vat)} off a future hire with Ooosh, or towards anything you still owe us, for ${g.owner_name}`,
     `- Use it by ${gwDay(g.expires_on)} (for a hire, the booking must be made by then)`,

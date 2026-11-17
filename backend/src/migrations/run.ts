@@ -388,6 +388,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '346_google_review_link.sql',
         '347_referrals.sql',
         '348_referral_booked_email.sql',
+        '349_vouchers.sql',
       ];
 
       for (const migration of migrations) {

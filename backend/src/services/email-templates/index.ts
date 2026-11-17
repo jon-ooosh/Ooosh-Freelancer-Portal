@@ -3077,9 +3077,26 @@ const templates: Record<string, EmailTemplate> = {
       {{#if hasName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi {{name}},</p>{{/if}}
       {{#if noName}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi there,</p>{{/if}}
       <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">The band you sent our way have just finished their hire with us, so as promised, here's a little thank-you: {{detail}}.</p>
+      {{#if voucherCode}}<p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Your voucher code is <strong style="font-family:monospace;font-size:16px;letter-spacing:1px;">{{voucherCode}}</strong> - {{voucherValue}} off a hire with us or in our shop, valid until {{voucherExpiry}}. It's single use, so just quote the code when you book or pay.</p>{{/if}}
       <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Thanks again for recommending us - and if you know anyone else who's heading out on the road, your referral link still works:
         <a href="{{refLink}}" style="color:#7B5EA7;">{{refLinkText}}</a>. You can use the same link as many times as you like!</p>
       <p style="margin:0 0 4px;font-size:15px;color:#334155;line-height:1.6;">Jon</p>`,
+  },
+
+  // The friend's welcome voucher (GOODWILL-CREDIT-SPEC §16): sent when a manager gives it
+  // from "Referred by" on the job, with "Email them the code" ticked. Jon's wording,
+  // 17 Nov 2026. {{referrerName}} is the referrer's first name; the code is the voucher's.
+  referral_welcome_voucher: {
+    variant: 'client',
+    preheader: 'A welcome voucher, already set against your hire',
+    subject: 'A welcome voucher from Ooosh - #{{jobNumber}}',
+    body: `
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Hi {{name}},</p>
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Thanks for getting in touch - {{referrerName}} recommended us! As a welcome, there's a {{voucherValue}} voucher waiting for you, already set against your hire (on bookings over £100).</p>
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Your voucher code is <strong style="font-family:monospace;font-size:16px;letter-spacing:1px;">{{voucherCode}}</strong>, valid until {{voucherExpiry}}.</p>
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Any questions, just reply to this email.</p>
+      <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">Jon</p>
+      {{#if jobNumber}}<p style="margin:0;font-size:12px;color:#94a3b8;line-height:1.6;">Your enquiry: #{{jobNumber}}</p>{{/if}}`,
   },
 
 };

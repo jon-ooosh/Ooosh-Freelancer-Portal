@@ -116,6 +116,8 @@ const shopPaySchema = z.object({
   sold_by_person_id: z.string().guid().nullable().optional(),
   notes: z.string().max(1000).nullable().optional(),
   reader_id: z.string().min(1).max(100),
+  /** A voucher (staff till only — shop-sales.ts refuses it from the kiosk). GOODWILL-CREDIT-SPEC §16. */
+  voucher_code: z.string().max(40).nullable().optional(),
 });
 
 router.post('/shop/pay', requireTerminalAccess, validate(shopPaySchema), async (req: AuthRequest, res: Response) => {
@@ -129,6 +131,7 @@ router.post('/shop/pay', requireTerminalAccess, validate(shopPaySchema), async (
         notes: req.body.notes || null,
         recordedIn: req.kiosk ? 'kiosk_till' : 'staff_till',
         shiftId: null,
+        voucherCode: req.body.voucher_code || null,
       },
       actor: kioskSeller
         ? { id: null, personId: kioskSeller, role: 'staff', via: 'kiosk' }

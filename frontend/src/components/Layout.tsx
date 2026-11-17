@@ -78,6 +78,7 @@ const navItems: NavItem[] = [
     children: [
       { path: '/money/overview', label: 'Overview', roles: ['admin', 'manager'] },
       { path: '/money/excess', label: 'Excess', roles: ['admin', 'manager'] },
+      { path: '/money/vouchers', label: 'Vouchers', roles: ['admin', 'manager'] },
       { path: '/money/cashflow', label: 'Cash forecast', roles: ['admin'] },
       { path: '/money/business', label: 'Business figures', roles: ['admin'] },
       // Every staff role (jon, Oct 2026): general assistants hold company cards

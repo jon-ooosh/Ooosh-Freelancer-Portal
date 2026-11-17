@@ -15,6 +15,24 @@ Future enhancements. Nothing here is committed work; treat as a menu, not a queu
 
 ### Future Enhancements (captured, not scheduled)
 
+- **Parked 17 Nov 2026 (jon: "lets hold off … make sure they're recorded so they don't get forgotten")** — three
+  marketing / money follow-ons, in no order:
+  - **Referral postcards and review posters** — the van / kit-case "Recommended by: ______" card with one QR per
+    card design (a tracked link, e.g. `van-card`), and QR posters to the Google review box around the building
+    (rehearsal rooms, the back of the loo door). Nothing to build: a tracked link on Marketing › Tracked links
+    each, then print. Staff link a card's referral with "Referred by" → "Referral card". `docs/BUSINESS-FIGURES-SPEC.md`
+    §8b and §8d "Cards".
+  - **Business figures step 3 — reply speed against booking** — due about a month after step 1 started
+    recording (so early December 2026). First reply by email from `message_at`, against outcome, compared within
+    channel and likelihood; phone joins after Twilio call matching. `docs/BUSINESS-FIGURES-SPEC.md` §6.
+  - **Cash forecast phase 4 — the Monday email** to jon (the four tiles, the low point, the fix-it list) and the
+    "last week we said X, it was Y" line. `docs/CASHFLOW-FORECAST-SPEC.md` §11 / §13 "Next".
+
+- **A multi-use promo code (raised 17 Nov 2026, not asked for yet)** — one code printed for anyone to use (a
+  magazine ad, a festival programme), as opposed to the single-use vouchers built in `GOODWILL-CREDIT-SPEC.md` §16.
+  Would need its own shape: no single holder, a count of uses and maybe a cap, perhaps once per client. Ask jon
+  before building — a stack of single-use vouchers from Money › Vouchers covers a giveaway already.
+
 - **Marketing: advert register, tracked links / QR codes, review requests, referrals, content library (jon, Nov 2026)** — agreed in outline, sequenced in `docs/BUSINESS-FIGURES-SPEC.md` §8. The content library (photos / videos used on Instagram etc.: a register of Drive links with where and when each was used — files stay in the shared Drive) is to be discussed after the register and links are built.
 
 - **Business figures tab, beside the cash forecast (jon, 5 Nov 2026: "once we've got the cashflow sheet working as best we can")** — **now a spec: `docs/BUSINESS-FIGURES-SPEC.md`** (step 1, recording, built Nov 2026; the conversion and reply-time parts live there). Original note: admin-only, its own tab, not on the cash page. Three figures, each with a definition to settle first: **monthly utilisation by service** — vans are solid (days on hire ÷ days in the fleet, from `vehicle_hire_assignments`); rehearsals need the rooms' opening hours as the denominator; backline across hundreds of items is noisy, so income per month by category plus the most- and least-used items may say more. **Enquiry-to-booking conversion** by month — the forecast already learns booked ÷ (booked + lost) by likelihood (`cashflow-sources.ts` `loadOutcomeHistory()`; alternative-quote losses excluded, `notAltQuoteLossSql`), so this is mostly a view of it. **Repeat-client rate** — the share of a month's booked jobs whose client had an earlier completed job; decide first whether "client" is the band or the paying organisation (the band-centric model gives different answers). `job-outcomes.ts` `JOB_OUTCOME_SQL` is the starting point for both of the last two.

@@ -320,6 +320,12 @@ credit note) and OP never writes it to HireHop. Managers offer (⋯ on the close
 org / person pages; a tick on Cancel Job); any staff reserves it from the Client History note and marks it
 applied. Expired and "freed by a lost / cancelled job" are DERIVED on read (`EFFECTIVE_STATUS_SQL`), never swept.
 §13 is phase 1; **§14 phase 2**: `services/goodwill-check.ts` — the code in a line's Item Note / Item Memo (`ADDITIONAL` / `TECHNICAL`, kept on `jobs.line_items` with the prices) or an APPROVED credit note marks it used; job header chips + a close-out ledger line. **§15: it makes almost no HireHop calls of its own** — hourly (:50) from the lines the sync already stored, credit notes from the Money tab summary's own billing read (`applyGoodwillFromBilling()`) plus one billing read a day per waiting invoice credit (07:40); only "Check HireHop now" reads live.
+**§16 is VOUCHERS** (17 Nov 2026, mig 349): a goodwill credit with a random 12-character code
+(`voucher_code`, `K7QM-4XWP-C9TR`) and a face value INC VAT (`voucher_value_inc_vat`), single use, may be held by
+nobody. **The code is the secret, the GW ref stays internal** — only staff look a code up (the till, "Have a voucher
+code?" on a job), never a public route. Made on Money › Vouchers (admin + managers) and by referrals. At the shop
+till (**staff till only** — never kiosk or sitter) it is spread as lowered line prices and used up in the sale's own
+transaction; its own amount is outside the role's discount ceiling; a cancelled / refunded sale gives it back.
 
 **PHASES 1–3 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
 (Money › Cash forecast, `/money/cashflow`): the committed line by week and the next 14 days by day,
@@ -352,8 +358,10 @@ Completed, not when completed >10 days after the return, once a year per client 
 the Completion modal, the button via `go.oooshtours.co.uk/google-review` (mig 346), a "Don't ask me again" page with a button (never acts on the click — mail scanners open links), Reply-To jon@.
 **§8d is the referral scheme** (mig 347, `services/referrals.ts` + pure `referral-rules.ts`,
 Marketing › Referrals): a referral belongs to a PERSON; personal links `go.oooshtours.co.uk/r/<code>` travel as
-`ol=ref-<code>`; "Referred by" on the job; only a new client, once; the friend's welcome credit IS a goodwill credit
-(source `referral`); thank-you due when the friend's hire is Completed — a To Do, never automatic; the referrer's
+`ol=ref-<code>`; "Referred by" on the job; only a new client, once; both rewards are VOUCHERS (goodwill credits with a
+code, source `referral`, amounts inc VAT): the friend's held for their hire and emailed in Jon's words
+(`referral_welcome_voucher`, never to info@), the referrer's made at "Thank-you given" with its code in email 3;
+thank-you due when the friend's hire is Completed — a To Do, never automatic; the referrer's
 "someone's been in touch" email is OFF until switched on (`referral_emails_enabled`). §8b is what's left.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
@@ -475,6 +483,7 @@ existing definition:
 | Is this new person / org probably already in the address book? | `services/address-book-similar.ts` (fuzzy, warn-only; `GET /duplicates/similar`, frontend `SimilarRecordsWarning.tsx`). The Duplicates page is the exact after-the-fact clean-up |
 | Does this search look like a phone number? | `services/address-book-search.ts` `phoneDigitsForSearch()` — shared by the People and Organisations list searches |
 | Goodwill credit (offer, reserve on a job, applied, withdraw; is it still to use?) | `services/goodwill-credits.ts` — `EFFECTIVE_STATUS_SQL` is THE status (expired / freed are derived, never stored); copy and sums `frontend/src/lib/goodwillCopy.ts`; never written to HireHop (`GOODWILL-CREDIT-SPEC.md`) |
+| A voucher (its code, is it usable, make one, hold it on a job, use it at the till, give it back) | `services/vouchers.ts` + pure `voucher-rules.ts` (codes, inc→ex VAT, `spreadVoucher()`); the sale side is `shop-sales.ts` `checkVoucher()` — a voucher IS a goodwill credit, never a second money-off system (`GOODWILL-CREDIT-SPEC.md` §16) |
 | Artist endorsements (who, which brand, the deal, last confirmed) | `services/endorsements.ts` — on a person OR a band (artist not in OP), never both; deal is free text; over 12 months since the last check is flagged. `forClientContext()` feeds New Enquiry / Job view. Page: Operations › Backline – Endorsements |
 | Recently viewed (per user) | `services/address-book-views.ts` — written ONLY when a detail page passes `?track_view=1`; pickers reading the same GET must not count |
 | Which address-book tabs have content (main row vs "More")? | `frontend/src/hooks/useTabPresence.ts` + `components/EntityTabs.tsx` — asks each tab's own endpoint; an empty tab moves under More, never hidden; one opened during a visit stays in the row until you leave the page. Both pages keep the tab in `?tab=` |
