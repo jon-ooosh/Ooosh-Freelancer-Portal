@@ -727,6 +727,23 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   );
   const opDeposits = op.rows.filter((r: any) => ['deposit', 'balance'].includes(r.payment_type) && r.source !== 'cross_job_apply');
   const opRefunds = op.rows.filter((r: any) => r.payment_type === 'refund');
+  // A till sale paid on the spot and put on this job ("16390 - shop sale") is money OP took,
+  // but the till records it on the sale (`shop_sales.hh_deposit_id`), never in job_payments —
+  // and a till refund on its reversal row. Count both, or every sitter sale paid by card or
+  // cash blocks the close-out as money OP never took (job 16390, Nov 2026).
+  const shop = await query(
+    `SELECT s.hh_deposit_id, s.gross_amount::float8 AS amount,
+            r.gross_amount::float8 AS refunded
+       FROM shop_sales s
+       LEFT JOIN shop_sales r ON r.reverses_sale_id = s.id AND r.kind = 'reversal'
+                             AND r.status = 'pushed' AND r.hh_refund_id IS NOT NULL
+      WHERE s.sold_to_job_id = $1 AND s.kind = 'sale' AND s.hh_deposit_id IS NOT NULL`,
+    [job.id],
+  );
+  for (const s of shop.rows as any[]) {
+    opDeposits.push({ hirehop_deposit_id: s.hh_deposit_id, amount: s.amount });
+    if (s.refunded != null) opRefunds.push({ hirehop_deposit_id: s.hh_deposit_id, amount: s.refunded });
+  }
   // A combined booking's payments moved to the booking it was combined into: Combine
   // re-creates each one there and refunds it back off this job in HireHop, but records
   // the move on the kept job only. So a payment here that HireHop shows refunded back

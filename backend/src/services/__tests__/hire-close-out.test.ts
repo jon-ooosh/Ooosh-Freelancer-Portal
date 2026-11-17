@@ -193,6 +193,8 @@ function installXero() {
 
 const JOB = { id: '8d4ac717-705d-4378-b640-44adb766f65c', hh_job_number: 16015, job_name: 'Headsend', is_internal: false, pipeline_status: 'returned' };
 let opPayments: Array<{ hirehop_deposit_id: number; payment_type: string; amount: number; payment_method: string; source: string; notes: string | null }>;
+/** Till sales paid on the spot and put on the job (`shop_sales`), with any pushed refund. */
+let shopSales: Array<{ hh_deposit_id: number; amount: number; refunded: number | null }>;
 let excessHeld: number;
 /** What OP has recorded as claimed from an excess deposit (`job_excess.claim_amount`). */
 let excessClaimed: number;
@@ -210,6 +212,7 @@ function installDb() {
     if (sql.includes('FROM system_settings')) return { rows: [{ value: params[0] === 'closeout_invoice_layout' ? layout : arrivalEnabled }] };
     if (sql.includes('FROM jobs WHERE')) return { rows: [{ ...JOB }] };
     if (sql.includes('FROM job_payments')) return { rows: opPayments };
+    if (sql.includes('FROM shop_sales')) return { rows: shopSales };
     if (sql.includes('FROM v_excess_held')) return { rows: [{ held: excessHeld }] };
     if (sql.includes('FROM job_excess')) return { rows: [{ claimed: excessClaimed }] };
     if (sql.includes('INSERT INTO job_closeout_log')) {
@@ -243,6 +246,7 @@ function job16015Corrected() {
     { hirehop_deposit_id: 9091, payment_type: 'deposit', amount: 4629.82, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null },
     { hirehop_deposit_id: 9093, payment_type: 'excess', amount: 1200, payment_method: 'stripe_gbp', source: 'payment_portal', notes: null },
   ];
+  shopSales = [];
   excessHeld = 0;
   // These tests treat 9093's £1,200 on the invoice as a claim OP knows about; the by-hand case has its own test.
   excessClaimed = 1200;
@@ -340,6 +344,39 @@ describe('planHireCloseOut', () => {
     expect(plan.blockers.join(' ')).toContain('delete that payment row in HireHop');
     expect(plan.allocations).toEqual([]);
     expect(plan.shortfall).toBe(254.17);
+  });
+
+  it('16390: a till sale paid by card on the job is money OP took — no blocker, and it can go on the invoice', async () => {
+    hh.deposits.push({ id: 9590, credit: 25.5, bank: 267, allocated: 0, desc: '16015 - shop sale', date: '2026-11-09' });
+    hh.invoices[0].gross = r2(hh.invoices[0].gross + 25.5);
+    shopSales = [{ hh_deposit_id: 9590, amount: 25.5, refunded: null }];
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.blockers.join(' ')).not.toContain('OP has no record of taking it');
+    expect(plan.ready).toBe(true);
+    expect(plan.payments.map((p) => p.depositId)).toContain(9590);   // available to allocate (8661 is older, so it goes first)
+  });
+
+  it('a "shop sale" payment with no till sale behind it still blocks', async () => {
+    hh.deposits.push({ id: 9590, credit: 25.5, bank: 267, allocated: 0, desc: '16015 - shop sale', date: '2026-11-09' });
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.ready).toBe(false);
+    expect(plan.blockers.join(' ')).toContain('Payment 9590 (£25.50, 16015 - shop sale) is in HireHop but OP has no record of taking it');
+  });
+
+  it('a till sale whose amount disagrees with HireHop blocks', async () => {
+    hh.deposits.push({ id: 9590, credit: 25.5, bank: 267, allocated: 0, desc: '16015 - shop sale', date: '2026-11-09' });
+    shopSales = [{ hh_deposit_id: 9590, amount: 20, refunded: null }];
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.blockers.join(' ')).toContain('Payment 9590 is £25.50 in HireHop but £20.00 in OP');
+  });
+
+  it('a till refund the till pushed is recorded — no "did not record" warning', async () => {
+    hh.deposits.push({ id: 9590, credit: 25.5, bank: 267, allocated: 25.5, desc: '16015 - shop sale', date: '2026-11-09' });
+    hh.apps.push({ id: 950, invoiceId: 0, depositId: 9590, amount: 25.5, desc: '16015 - shop refund OT-SHOP-00165' });
+    shopSales = [{ hh_deposit_id: 9590, amount: 25.5, refunded: -25.5 }];
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.warnings.join(' ')).not.toContain('refunded from payment 9590');
+    expect(plan.blockers.join(' ')).not.toContain('9590');
   });
 
   it('a refund OP itself recorded is fine', async () => {
@@ -540,6 +577,7 @@ describe('completeHireJob', () => {
       if (sql.includes('FROM job_closeout_log')) return { rows: logRows };
       if (sql.includes('INSERT INTO job_closeout_log')) { logRows.unshift({ id: 'x', step: params[1], ok: params[2], detail: params[3], hh_refs: null, user_id: params[5], user_name: null, created_at: 'now' }); return { rows: [] }; }
       if (sql.includes('FROM job_payments')) return { rows: opPayments };
+      if (sql.includes('FROM shop_sales')) return { rows: shopSales };
       if (sql.includes('FROM v_excess_held')) return { rows: [{ held: excessHeld }] };
       if (sql.includes('FROM job_excess')) return { rows: [{ claimed: excessClaimed }] };
       throw new Error(`unexpected SQL: ${sql}`);
