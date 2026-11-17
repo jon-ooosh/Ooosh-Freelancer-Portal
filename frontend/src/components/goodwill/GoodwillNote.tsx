@@ -81,10 +81,10 @@ export default function GoodwillNote({ orgIds, personIds = [], jobId }: {
             {c.status === 'reserved' ? (
               <div className="mt-1.5 p-2 bg-amber-50 border border-amber-200 rounded">
                 <div className="text-amber-900">
-                  <b>Reserved on this job</b>: {money(c.reserved_amount_ex_vat ?? c.amount_ex_vat)} + VAT{' '}
+                  <b>Reserved on this job</b>: {money(c.reserved_amount_ex_vat ?? c.amount_ex_vat)}+VAT{' '}
                   {c.reserved_for === 'invoice' ? `against ${c.reserved_invoice_number || 'an invoice'} (a credit note in HireHop)` : 'off the hire (a discount in HireHop)'}.
                   {' '}Put <b className="font-mono">{hireHopNote(c.ref)}</b> in {c.reserved_for === 'invoice' ? 'the credit note\'s description' : 'the line\'s Item Note'}.
-                  {' '}OP checks HireHop every half hour and marks it used when it finds it.
+                  {' '}OP checks HireHop's lines every hour (credit notes when the Money tab is opened, or daily) and marks it used when it finds it.
                 </div>
                 {c.check_problem && <div className="mt-1 text-amber-900 font-medium">⚠ {c.check_problem}</div>}
                 <div className="flex flex-wrap gap-1.5 mt-1.5">
@@ -206,7 +206,7 @@ function UseGoodwillModal({ credit, jobId, onClose, onDone }: {
           </div>
           {amountOk && net < credit.amount_ex_vat - 0.004 && (
             <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
-              The other {money(credit.amount_ex_vat - net)} + VAT lapses once it's applied.
+              The other {money(credit.amount_ex_vat - net)}+VAT lapses once it's applied.
             </div>
           )}
 
@@ -215,7 +215,7 @@ function UseGoodwillModal({ credit, jobId, onClose, onDone }: {
             <p className="text-xs text-gray-600">
               {where === 'hire'
                 ? `Discount the line(s) it's for by ${money(amountOk ? net : credit.amount_ex_vat)} in all, and put this in that line's Item Note:`
-                : `Raise a credit note for ${money(amountOk ? net : credit.amount_ex_vat)} + VAT on the invoice, with this in its description:`}
+                : `Raise a credit note for ${money(amountOk ? net : credit.amount_ex_vat)}+VAT on the invoice, with this in its description:`}
             </p>
             <div className="flex items-center gap-2">
               <code className="flex-1 bg-gray-50 rounded px-2 py-1.5 text-xs">{hireHopNote(credit.ref)}</code>

@@ -8,7 +8,7 @@ jest.mock('../../config/database', () => ({ query: jest.fn(), getClient: jest.fn
 jest.mock('../hirehop-broker', () => ({ hhBroker: { get: jest.fn() } }));
 jest.mock('../job-issues', () => ({ logIssueEvent: jest.fn(async () => undefined) }));
 
-import { codesIn, parseSupplyList, parseBilling, decideGoodwill } from '../goodwill-check';
+import { codesIn, parseSupplyList, parseBilling, parseStoredLines, decideGoodwill } from '../goodwill-check';
 
 const NOW = new Date('2026-11-18T10:00:00Z');
 const credit = (over: Record<string, unknown> = {}) => ({
@@ -68,7 +68,7 @@ describe('decideGoodwill', () => {
 
   it('an approved credit note → used; one bigger than the credit + 20% is flagged', () => {
     expect(decideGoodwill(credit(), read([], approvedNote(96)), NOW)).toEqual({ outcome: 'used', how: 'credit_note', hhRef: 'OT-CRE-1223', problem: null });
-    expect(decideGoodwill(credit(), read([], approvedNote(96.02)), NOW).problem).toMatch(/more than the credit \(£80.00 \+ VAT\)/);
+    expect(decideGoodwill(credit(), read([], approvedNote(96.02)), NOW).problem).toMatch(/more than the credit \(£80.00\+VAT\)/);
   });
 
   it('a DRAFT credit note never counts', () => {
@@ -83,5 +83,38 @@ describe('decideGoodwill', () => {
 
   it('another credit\'s code is not this one', () => {
     expect(decideGoodwill(credit(), read([amp({ ADDITIONAL: 'Goodwill credit GW-0013' })]), NOW)).toMatchObject({ outcome: 'waiting' });
+  });
+});
+
+describe('stored lines (phase 2, jon 17 Nov 2026 — no extra HireHop calls)', () => {
+  // What hirehop-job-sync.ts stores on jobs.line_items.
+  const stored = (over: Record<string, unknown> = {}) => ({
+    ITEM_ID: 701, LIST_ID: 12, ITEM_NAME: 'Magnatone amp', QUANTITY: 1, kind: 2,
+    ADDITIONAL: 'Goodwill credit GW-0012', TECHNICAL: '', UNIT_PRICE: 48, PRICE: 45.6, ...over,
+  });
+
+  it('reads the code from the stored Item Note or Item Memo, and the prices', () => {
+    const [l] = parseStoredLines([stored()]);
+    expect(l).toMatchObject({ id: 701, unitPrice: 48, price: 45.6 });
+    expect(codesIn(l.text)).toEqual(['GW-0012']);
+    expect(codesIn(parseStoredLines([stored({ ADDITIONAL: '', TECHNICAL: 'gw-0012' })])[0].text)).toEqual(['GW-0012']);
+    expect(parseStoredLines(null)).toEqual([]);
+  });
+
+  it('a line stored before prices were kept is used WITHOUT the "not discounted" warning', () => {
+    const lines = parseStoredLines([stored({ UNIT_PRICE: undefined, PRICE: undefined })]);
+    expect(lines[0].unitPrice).toBeNull();
+    expect(decideGoodwill(credit(), { lines, creditNotes: [] }, NOW)).toEqual({ outcome: 'used', how: 'line', hhRef: '701', problem: null });
+  });
+
+  it('a stored line that isn\'t discounted still warns', () => {
+    const lines = parseStoredLines([stored({ PRICE: 48 })]);
+    expect(decideGoodwill(credit(), { lines, creditNotes: [] }, NOW).problem).toMatch(/isn't discounted/);
+  });
+
+  it('"nothing yet" is never flagged when the look couldn\'t have seen it', () => {
+    const old = credit({ reserved_at: '2026-11-01T09:00:00Z' });
+    expect(decideGoodwill(old, { lines: [], creditNotes: [] }, NOW, false)).toEqual({ outcome: 'waiting', problem: null });
+    expect(decideGoodwill(old, { lines: [], creditNotes: [] }, NOW, true).problem).toMatch(/No line or credit note/);
   });
 });

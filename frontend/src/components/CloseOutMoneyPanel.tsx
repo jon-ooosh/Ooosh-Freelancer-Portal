@@ -207,7 +207,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
 
   const run = async () => {
     const what = view.stage === 'to_invoice' && cancel
-      ? `Raise the cancellation fee invoice for ${money(cancel.feeNet)} + VAT = ${money(cancel.feeGross)} (one Misc income line, dated today, approved, sent to Xero) and allocate the client's payments up to it. Anything left stays on the payment to be refunded`
+      ? `Raise the cancellation fee invoice for ${money(cancel.feeNet)}+VAT = ${money(cancel.feeGross)} (one Misc income line, dated today, approved, sent to Xero) and allocate the client's payments up to it. Anything left stays on the payment to be refunded`
       : view.stage === 'to_invoice'
       ? `Create the invoice for ${money(inv.netToInvoice)} ex VAT (dated today, approved, sent to Xero) and allocate the payments`
       : 'Allocate the payments to the invoice in HireHop and Xero';
@@ -285,7 +285,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     case 'to_invoice':
       if (cancel) {
         title = `Raise the cancellation fee invoice — ${money(cancel.feeGross)} inc VAT`;
-        why = `One line, "Cancellation fee", ${money(cancel.feeNet)} + VAT on Misc income. It is raised in HireHop, sent to Xero, and the client's payments are allocated up to it — the rest stays on the payment so it can be refunded.`;
+        why = `One line, "Cancellation fee", ${money(cancel.feeNet)}+VAT on Misc income. It is raised in HireHop, sent to Xero, and the client's payments are allocated up to it — the rest stays on the payment so it can be refunded.`;
         acts = [checkAgain];
         if (isManager) acts.push({ label: 'Raise fee invoice', onClick: () => void run(), kind: 'primary' });
         if (plan.excessHeld >= PENNY) chips.push([false, `${money(plan.excessHeld)} excess held — return it from the Excess card`]);
@@ -549,7 +549,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
                 </span>
                 {g.check_problem && <span className="block text-xs">⚠ {g.check_problem}</span>}
               </span>
-              <span className="tabular-nums text-gray-600">{money(g.used_amount_ex_vat ?? g.reserved_amount_ex_vat ?? g.amount_ex_vat)} + VAT</span>
+              <span className="tabular-nums text-gray-600">{money(g.used_amount_ex_vat ?? g.reserved_amount_ex_vat ?? g.amount_ex_vat)}+VAT</span>
             </div>
           ))}
           {paidSoFar >= PENNY && (

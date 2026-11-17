@@ -44,17 +44,30 @@ export interface GoodwillOwner { kind: 'organisation' | 'person'; id: string; na
 export const money = (n: number) => `£${(Math.round(n * 100) / 100).toFixed(2)}`;
 /** The usual 20% total: £100 → "£120.00". Illustrative — VAT follows what the credit comes off. */
 export const grossAt20 = (n: number) => money(Math.round(n * 120) / 100);
-/** "£100.00 + VAT (£120.00)" — the credit is net. */
-export const plusVat = (n: number) => `${money(n)} + VAT (${grossAt20(n)})`;
+/** "£100.00+VAT (£120.00)" — the credit is net. */
+export const plusVat = (n: number) => `${money(n)}+VAT (${grossAt20(n)})`;
 
-/** '2027-11-16' → '16 Nov 2027'. A DATE string is a calendar day, never shifted; a
+/** '2027-11-16' → '16th Nov 2027'. A DATE string is a calendar day, never shifted; a
  *  timestamp is shown as its UK day. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** 1 → '1st', 2 → '2nd', 11 → '11th', 22 → '22nd'. */
+export function ordinal(n: number): string {
+  const teen = n % 100 >= 11 && n % 100 <= 13;
+  const suffix = teen ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[n % 10] || 'th';
+  return `${n}${suffix}`;
+}
 export function gwDay(value: string | null | undefined): string {
   if (!value) return '—';
   const isDate = /^\d{4}-\d{2}-\d{2}$/.test(value);
   const d = new Date(isDate ? `${value}T12:00:00Z` : value);
   if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: isDate ? 'UTC' : 'Europe/London' });
+  // "16th Nov 2027" — jon, 17 Nov 2026.
+  // Numbers from Intl (for the UK day of a timestamp), month names from a fixed list —
+  // en-GB "short" months read "Sept" in some browsers and "Sep" in others.
+  const parts = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'numeric', year: 'numeric', timeZone: isDate ? 'UTC' : 'Europe/London' }).formatToParts(d);
+  const get = (t: string) => Number(parts.find((x) => x.type === t)?.value || 0);
+  return `${ordinal(get('day'))} ${MONTHS[get('month') - 1] ?? ''} ${get('year')}`;
 }
 
 export const STATUS_LABEL: Record<GoodwillStatus, string> = {
@@ -73,7 +86,7 @@ export function emailPoints(g: { ref: string; owner_name: string; amount_ex_vat:
   return [
     `- ${plusVat(g.amount_ex_vat)} off a future hire with Ooosh, or towards anything you still owe us, for ${g.owner_name}`,
     `- Use it by ${gwDay(g.expires_on)} (for a hire, the booking must be made by then)`,
-    `- Used once, up to ${money(g.amount_ex_vat)} + VAT - anything unused lapses`,
+    `- Used once, up to ${money(g.amount_ex_vat)}+VAT - anything unused lapses`,
     `- Not exchangeable for cash`,
     `- Quote ${g.ref} when you book`,
   ].join('\n');

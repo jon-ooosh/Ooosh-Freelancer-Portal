@@ -1468,6 +1468,15 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Goodwill credit notes ride on this read — no HireHop call of their own
+    // (docs/GOODWILL-CREDIT-SPEC.md §15). Fire-and-forget; never slows or fails the summary.
+    if (hhBilling) {
+      const billingForGoodwill = hhBilling;
+      void import('../services/goodwill-check')
+        .then((m) => m.applyGoodwillFromBilling(job.id, billingForGoodwill))
+        .catch((e) => console.warn('[money] goodwill from billing failed:', e));
+    }
+
     // Parse HireHop financial data from billing_list.php
     // Returns { rows, subs, banks, page, total, records }
     // Row kinds: 0=Job total (accrued), 1=Invoice, 2=Credit note, 3=Payment application, 6=Deposit

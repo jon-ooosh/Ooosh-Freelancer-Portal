@@ -656,6 +656,10 @@ export interface HHLineItem {
    *  goodwill check can spot a GW code on any job (docs/GOODWILL-CREDIT-SPEC.md §6). */
   ADDITIONAL?: string;
   TECHNICAL?: string;
+  /** List price and the price charged — the goodwill check's "isn't discounted" test, from the
+   *  stored lines rather than a HireHop call of its own (GOODWILL-CREDIT-SPEC.md §15). */
+  UNIT_PRICE?: number;
+  PRICE?: number;
 }
 
 /**
@@ -708,6 +712,8 @@ async function fetchLineItemsForJob(jobNumber: number): Promise<HHLineItem[]> {
         TYPE_CUSTOM_FIELDS: customFields,
         ADDITIONAL: String(item.ADDITIONAL ?? ''),
         TECHNICAL: String(item.TECHNICAL ?? ''),
+        UNIT_PRICE: Number(item.UNIT_PRICE ?? 0),
+        PRICE: Number(item.PRICE ?? 0),
       };
     });
 }
@@ -838,6 +844,8 @@ export async function fetchLineItemsOnDemand(jobNumber: number): Promise<HHLineI
         TYPE_CUSTOM_FIELDS: customFields,
         ADDITIONAL: String(item.ADDITIONAL ?? ''),
         TECHNICAL: String(item.TECHNICAL ?? ''),
+        UNIT_PRICE: Number(item.UNIT_PRICE ?? 0),
+        PRICE: Number(item.PRICE ?? 0),
       };
     });
 }
