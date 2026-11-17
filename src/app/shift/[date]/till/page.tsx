@@ -22,8 +22,12 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Search, Check, Minus, Plus } from 'lucide-react'
+import { Search, Check, Minus, Plus, ScanBarcode } from 'lucide-react'
 import { cls, BackLink, Banner, SectionLabel } from '@/components/ui'
+import CameraBarcodeScanner from '@/components/CameraBarcodeScanner'
+
+/** Most of one item a line may carry — OP's `shop-sales.ts` MAX_LINE_QTY refuses more. */
+const MAX_LINE_QTY = 999
 
 interface Tender { key: string; label: string; needsJob?: boolean }
 interface TillJob { job_id: string; hh_job_number: number | null; label: string; rooms: string[] }
@@ -170,6 +174,9 @@ export default function SitterTillPage() {
   const [term, setTerm] = useState('')
   const [results, setResults] = useState<StockItem[]>([])
   const [searching, setSearching] = useState(false)
+  // The phone camera reading a barcode, and what a scan that didn't land one item says.
+  const [scanning, setScanning] = useState(false)
+  const [scanNote, setScanNote] = useState<string | null>(null)
   const [basket, setBasket] = useState<BasketLine[]>([])
   // undefined = not chosen yet, null = walk-in, else the band's job. With ONE
   // band in, it defaults to them (most sitter sales are to the band in the
@@ -273,17 +280,48 @@ export default function SitterTillPage() {
   const add = (item: StockItem) => {
     setBasket((prev) => {
       const ex = prev.find((l) => l.item.hhStockId === item.hhStockId)
-      if (ex) return prev.map((l) => (l.item.hhStockId === item.hhStockId ? { ...l, qty: l.qty + 1 } : l))
+      if (ex) return prev.map((l) => (l.item.hhStockId === item.hhStockId ? { ...l, qty: Math.min(l.qty + 1, MAX_LINE_QTY) } : l))
       return [...prev, { item, qty: 1 }]
     })
     setTerm('')
     setResults([])
+    setScanNote(null)
     setDone(null)
   }
   const bump = (id: number, delta: number) =>
     setBasket((prev) => prev
-      .map((l) => (l.item.hhStockId === id ? { ...l, qty: l.qty + delta } : l))
+      .map((l) => (l.item.hhStockId === id ? { ...l, qty: Math.min(l.qty + delta, MAX_LINE_QTY) } : l))
       .filter((l) => l.qty > 0))
+
+  // The camera's Scan button. The box is emptied as the camera opens, so the
+  // type-ahead search can't overwrite what the scan finds.
+  const openScanner = () => {
+    setTerm('')
+    setResults([])
+    setScanNote(null)
+    setScanning(true)
+  }
+  const onScanned = async (code: string) => {
+    setScanning(false)
+    try {
+      const r = await fetch(`/api/studio-sitter/shifts/${date}/till/barcode?q=${encodeURIComponent(code)}`)
+      const data = await r.json().catch(() => ({}))
+      if (!r.ok) { setScanNote(data.error || 'Couldn’t look that barcode up. Search by name instead.'); return }
+      const items: StockItem[] = data.items || []
+      if (items.length === 1 && ctx?.open) {
+        add(items[0])
+      } else if (items.length === 1) {
+        setResults(items)   // price lookup only: show it, don't sell it
+      } else if (items.length > 1) {
+        setResults(items)
+        setScanNote(`${items.length} items have this barcode. Tap the right one, and leave the office a note.`)
+      } else {
+        setScanNote(`No item has barcode ${code}. Search by name instead, and leave the office a note.`)
+      }
+    } catch {
+      setScanNote('Couldn’t reach the office system. Check your signal, or search by name.')
+    }
+  }
 
   // An emptied basket (a sale taken, or everything removed) starts the cash helper afresh.
   useEffect(() => {
@@ -479,6 +517,7 @@ export default function SitterTillPage() {
 
   return (
     <div className="min-h-screen bg-hf-page safe-top safe-bottom pb-10 flex flex-col">
+      {scanning && <CameraBarcodeScanner onCode={onScanned} onClose={() => setScanning(false)} />}
       <header className="max-w-lg w-full mx-auto px-2 pt-2 flex items-center gap-2">
         <div className="px-2.5"><BackLink href={`/shift/${date}`} label="Shift" /></div>
         <h1 className="ml-auto text-[16px] font-semibold text-hf-ink">Shop till</h1>
@@ -519,19 +558,29 @@ export default function SitterTillPage() {
 
         {/* Search — price lookup is the headline feature */}
         <section className="flex flex-col gap-2">
-          <div className="relative">
-            <Search size={20} strokeWidth={1.8} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-hf-muted pointer-events-none" />
-            <input
-              ref={searchRef}
-              value={term}
-              onChange={(e) => setTerm(e.target.value)}
-              placeholder="Look up an item: strings, jack lead, gaffa…"
-              className={`${cls.input} h-[52px] !pl-11 !text-[17px]`}
-              inputMode="search"
-              autoComplete="off"
-            />
+          <div className="flex gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Search size={20} strokeWidth={1.8} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-hf-muted pointer-events-none" />
+              <input
+                ref={searchRef}
+                value={term}
+                onChange={(e) => { setTerm(e.target.value); setScanNote(null) }}
+                placeholder="Look up: strings, gaffa…"
+                className={`${cls.input} h-[52px] !pl-11 !text-[17px]`}
+                inputMode="search"
+                autoComplete="off"
+              />
+            </div>
+            {/* The phone's camera reads the barcode: no two tapes mixed up. */}
+            {/* Off while a payment is under way: the basket must not change under it. */}
+            <button type="button" onClick={openScanner} aria-label="Scan a barcode with the camera"
+              disabled={readerOpen || saving}
+              className="h-[52px] flex-none rounded-xl border-[1.5px] border-hf-control bg-white px-3.5 flex items-center gap-1.5 text-[15px] font-semibold text-hf-link active:bg-hf-inset disabled:opacity-50">
+              <ScanBarcode size={22} strokeWidth={1.8} /> Scan
+            </button>
           </div>
           {searching && <p className="px-1 text-[13px] text-hf-muted">Searching…</p>}
+          {scanNote && <Banner tone="warning">{scanNote}</Banner>}
           {results.length > 0 && (
             <ul className={`${cls.card} overflow-hidden`}>
               {results.map((it, i) => (

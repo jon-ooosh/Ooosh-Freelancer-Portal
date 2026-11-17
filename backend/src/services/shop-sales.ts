@@ -54,6 +54,13 @@ const DEFAULT_DISCOUNT_CAPS: Record<string, number> = {
 const DEFAULT_PUSH_HOLD_SECONDS = 120;
 
 /**
+ * Most of one item a single till line may carry (jon, Nov 2026: "we'd never log
+ * 1000 of anything"). Mirrored by the staff till (`ShopTillPage.tsx`) and the
+ * sitter till (`src/app/shift/[date]/till/page.tsx`) — change all three.
+ */
+export const MAX_LINE_QTY = 999;
+
+/**
  * A sitter sale asks staff for a tick only at this much or more (gross, inc VAT)
  * — jon, Nov 2026: the review queue was nearly all £1.50 / £3 cans. Applies to
  * every tender, "on their bill" included. Per SALE, not per night; the night's
@@ -229,6 +236,11 @@ export async function priceLines(lines: ShopSaleLineInput[]): Promise<PricedLine
 
     const qty = Number(line.qty);
     if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Invalid quantity for "${stock.title}".`);
+    // A barcode scanned into a quantity box rang up 749,699,128,328 strings (Nov 2026).
+    // The tills refuse it first; this is the backstop for every route in.
+    if (qty > MAX_LINE_QTY) {
+      throw new Error(`${qty} of "${stock.title}" is more than the till allows (${MAX_LINE_QTY}). Check the quantity.`);
+    }
 
     const listPrice = stock.price != null ? Number(stock.price) : 0;
     let charged = line.unitPriceCharged != null ? Number(line.unitPriceCharged) : listPrice;

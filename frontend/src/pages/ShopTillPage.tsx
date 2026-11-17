@@ -30,8 +30,12 @@ import { hasManagerRole } from '../lib/roles';
 import { jobDisplayOrgName } from '../lib/jobOrgName';
 import ShopWeekPanel from '../components/shop/ShopWeekPanel';
 import { TENDERS } from '../lib/shopTenders';
+import { useBarcodeScanner } from '../hooks/useBarcodeScanner';
 import { gwDay } from '../lib/goodwillCopy';
 import CardReaderPayment, { type CardReaderAccess, type Session as ReaderSession } from '../components/CardReaderPayment';
+
+/** Most of one item a till line may carry — OP's `shop-sales.ts` MAX_LINE_QTY refuses more. */
+const MAX_LINE_QTY = 999;
 
 type BottomTab = 'recent' | 'attention' | 'review' | 'week' | 'used' | 'reorder';
 const BOTTOM_TABS: BottomTab[] = ['recent', 'attention', 'review', 'week', 'used', 'reorder'];
@@ -592,7 +596,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
     setBasket(prev => {
       const existing = prev.find(l => l.stock.hhStockId === item.hhStockId);
       if (existing) {
-        return prev.map(l => l.stock.hhStockId === item.hhStockId ? { ...l, qty: l.qty + 1 } : l);
+        return prev.map(l => l.stock.hhStockId === item.hhStockId ? { ...l, qty: Math.min(l.qty + 1, MAX_LINE_QTY) } : l);
       }
       return [...prev, { stock: item, qty: 1, priceText: (item.priceExVat ?? 0).toFixed(2) }];
     });
@@ -608,9 +612,11 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
    * barcode match: one item goes straight in the basket (scan it again for
    * qty 2), several are listed to pick from, none says so. The type-ahead
    * search carries on regardless, so a typed name + Enter loses nothing.
+   * A scan that landed anywhere else on the page arrives here too, through
+   * useBarcodeScanner below.
    */
-  const lookupBarcode = useCallback(async () => {
-    const code = term.trim();
+  const lookupBarcode = useCallback(async (raw: string) => {
+    const code = raw.trim();
     if (!code || /\s/.test(code)) return;          // a barcode is one word
     try {
       const r = await api.get<{ data: StockItem[] }>(`/shop/stock/barcode/${encodeURIComponent(code)}`);
@@ -625,12 +631,27 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
     } catch {
       // Lookup failed — the type-ahead search is still running underneath.
     }
-  }, [term, addItem]);
+  }, [addItem]);
 
-  const setQty = (id: number, qty: number) =>
+  // A scan wherever the cursor is — a quantity box, a button, nowhere. Never
+  // while a payment or refund is under way: the basket must not change under it.
+  useBarcodeScanner(code => {
+    if (readerOpen || saving || refundFor) {
+      setScanNote(`Scanned ${code}, but nothing was added: finish the payment first, then scan again.`);
+      return;
+    }
+    void lookupBarcode(code);
+  }, searchRef);
+
+  // A quantity over the limit is quietly refused (the box keeps its last good
+  // number) rather than shown as an error: mid-scan the box passes through
+  // 7, 74, 749, 7496… before useBarcodeScanner puts it back. OP refuses it too.
+  const setQty = (id: number, qty: number) => {
+    if (qty > MAX_LINE_QTY) return;
     setBasket(prev => qty <= 0
       ? prev.filter(l => l.stock.hhStockId !== id)
       : prev.map(l => l.stock.hhStockId === id ? { ...l, qty } : l));
+  };
 
   const setPriceText = (id: number, priceText: string) =>
     setBasket(prev => prev.map(l => l.stock.hhStockId === id ? { ...l, priceText } : l));
@@ -1134,7 +1155,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
             onChange={e => { setTerm(e.target.value); setScanNote(null); }}
             onKeyDown={e => {
               if (e.key === 'Escape') clearSearch();
-              if (e.key === 'Enter') { e.preventDefault(); void lookupBarcode(); }
+              if (e.key === 'Enter') { e.preventDefault(); void lookupBarcode(term); }
             }}
             placeholder="Search or scan — name, part number, barcode…"
             className="w-full rounded border border-gray-300 py-3 pl-4 pr-10 text-base focus:border-ooosh-500 focus:outline-none"
@@ -1221,7 +1242,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
                 </div>
 
                 <input
-                  type="number" min={0} step={1} value={l.qty}
+                  type="number" min={0} max={MAX_LINE_QTY} step={1} value={l.qty}
                   onChange={e => setQty(l.stock.hhStockId, Number(e.target.value))}
                   className="w-16 rounded border border-gray-300 px-2 py-1.5 text-center text-sm"
                   aria-label="Quantity"

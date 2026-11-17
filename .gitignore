@@ -54,3 +54,7 @@ next-env.d.ts
 
 # Netlify
 .netlify/
+
+# The camera barcode reader engine, copied from node_modules at dev/build
+# time (scripts/copy-zxing-wasm.cjs) so it always matches the installed version.
+public/zxing/
