@@ -40,7 +40,7 @@ import { emailService } from '../email-service';
 import { sendPaymentEmail, sendExcessEmail, resolveClientEmailTarget } from '../money-emails';
 import { recordPreauthHold, preauthEligibility } from '../excess-preauth';
 import { createShopSale } from '../shop-sales';
-import { handleTerminalWebhookEvent, checkSession, canUseTerminal, sendTerminalReceipt, sweepTerminalReceipts, defaultReceiptRecipients } from '../stripe-terminal';
+import { handleTerminalWebhookEvent, checkSession, canUseTerminal, sendTerminalReceipt, sweepTerminalReceipts, defaultReceiptRecipients, startTerminalPayment } from '../stripe-terminal';
 
 const mockQuery = query as jest.Mock;
 const mockRecord = recordPayment as jest.Mock;
@@ -386,6 +386,42 @@ describe('an excess payment on the reader', () => {
     sessions = [session({ payment_type: 'excess', excess_id: 'ex-1' })];
     await handleTerminalWebhookEvent({ type: 'payment_intent.succeeded', livemode: false, data: { object: succeededPi } });
     expect(mockRecord.mock.calls[0][1]).toMatchObject({ payment_type: 'excess', excess_id: 'ex-1', stripe_payment_intent: 'pi_1', skip_client_email: true });
+  });
+});
+
+describe('the amount of a pre-auth on the reader (job 17022)', () => {
+  const realKey = process.env.STRIPE_TEST_SECRET_KEY;
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-20T08:00:00Z'));
+    process.env.STRIPE_TEST_SECRET_KEY = 'sk_test_x';
+    mockQuery.mockImplementation(async (sql: string, params: unknown[]) => {
+      const s = sql.replace(/\s+/g, ' ');
+      if (s.startsWith('SELECT id, hh_job_number, job_name FROM jobs')) return { rows: [{ id: 'job-1', hh_job_number: 17022, job_name: 'Test' }] };
+      if (s.startsWith('SELECT id, excess_amount_required FROM job_excess')) return { rows: [{ id: 'ex-1', excess_amount_required: '1200.00' }] };
+      if (s.startsWith('SELECT id, job_id, excess_status')) {
+        return { rows: [{ id: 'ex-1', job_id: 'job-1', excess_status: 'needed', excess_amount_required: '1200.00', excess_amount_taken: '0', amount_held: '0', hh_deposit_id: null }] };
+      }
+      return fakeQuery(sql, params);
+    });
+    // Past the amount check, the next step asks Stripe for the reader.
+    fakeStripe.terminal.readers.retrieve.mockRejectedValue(new Error('no reader'));
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    process.env.STRIPE_TEST_SECRET_KEY = realKey;
+  });
+
+  const start = (amount: number) => startTerminalPayment({
+    jobId: 'job-1', amount, paymentType: 'excess_preauth', readerId: 'tmr_1', excessId: 'ex-1', userId: 'user-1',
+  });
+
+  it('refuses any amount but the excess required — a different figure is Edit Required Amount', async () => {
+    await expect(start(250)).rejects.toThrow(/holds the excess required on the record \(£1200\.00\)/);
+    await expect(start(1500)).rejects.toThrow(/Edit Required Amount/);
+  });
+
+  it('lets the required amount through to the reader', async () => {
+    await expect(start(1200)).rejects.toThrow(/That reader was not found/);
   });
 });
 

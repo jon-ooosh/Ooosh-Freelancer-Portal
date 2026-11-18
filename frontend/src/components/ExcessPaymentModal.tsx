@@ -1328,7 +1328,12 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
               const isPre = action === 'reader_preauth';
               const required = Number(excess.excess_amount_required || 0);
               const defaultAmt = isPre ? required : (readerOptions?.outstanding ?? required);
-              const amountText = readerAmount === null ? (defaultAmt > 0 ? defaultAmt.toFixed(2) : '') : readerAmount;
+              // A pre-auth holds exactly the required excess — never typed (jon, Nov 2026, after
+              // job 17022). A different figure is a change to the excess itself: Edit Required
+              // Amount, which the close-out and portal read too. The server enforces the same.
+              const amountText = isPre
+                ? (defaultAmt > 0 ? defaultAmt.toFixed(2) : '')
+                : readerAmount === null ? (defaultAmt > 0 ? defaultAmt.toFixed(2) : '') : readerAmount;
               const amt = parseFloat(amountText) || 0;
               // Not one of the figures OP worked out — ask why (spec §1.11, as on Record Payment).
               const isCustom = amountText !== '' && Math.abs(amt - defaultAmt) >= 0.005;
@@ -1348,12 +1353,13 @@ export default function ExcessPaymentModal({ excess: excessProp, onClose, onUpda
                     <div className="relative">
                       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
                       <input type="number" step="0.01" value={amountText} disabled={readerActive}
-                        onChange={(e) => setReaderAmount(e.target.value)}
-                        className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md" />
+                        readOnly={isPre}
+                        onChange={(e) => { if (!isPre) setReaderAmount(e.target.value); }}
+                        className={`w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md ${isPre ? 'bg-gray-50 text-gray-700' : ''}`} />
                     </div>
                     <p className="mt-1 text-xs text-gray-500">
                       {isPre
-                        ? `Required: £${required.toFixed(2)}.`
+                        ? 'The excess required on this record. To change it, go back and use Edit Required Amount.'
                         : `Required £${required.toFixed(2)}, already collected £${Number(excess.excess_amount_taken || 0).toFixed(2)}.`}
                     </p>
                   </div>
