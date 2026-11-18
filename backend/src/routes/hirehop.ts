@@ -5,6 +5,9 @@ import { previewHireHopSync, syncContactsFromHireHop } from '../services/hirehop
 import { previewHireHopJobSync, syncJobsFromHireHop } from '../services/hirehop-job-sync';
 import { query } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
+import {
+  STRIP_MAPPING, STRIP_DONE_STATUSES, STRIP_WIP_STATUSES, ProgressStripCategory,
+} from '../services/job-progress-strip';
 
 const router = Router();
 router.use(authenticate);
@@ -115,7 +118,7 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
     const {
       status, search, ooh_only, manager, service_type,
       date_from, date_to, date_field,
-      has_issues, has_retro, overdue,
+      has_issues, has_retro, overdue, closeout,
       sort,
       page = '1', limit = '50',
     } = req.query;
@@ -240,6 +243,61 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
         SELECT 1 FROM interactions i
         WHERE i.job_id = jobs.id AND i.content LIKE 'Job retro:%'
       )`;
+    }
+
+    // "Waiting on" filter — the Returns page (Nov 2026). Built from the same
+    // post-hire mapping and status sets as the progress strip
+    // (services/job-progress-strip.ts), so a job the filter finds always shows
+    // that pip as not done, and vice versa. Values: a strip slot ('payment',
+    // 'excess', …), 'invoice_raise' (Invoice card still to do — no invoice yet),
+    // 'invoice_send' (invoice raised, not sent), or 'ready' (has close-out cards
+    // and none left open). Cancelled and suspended cards never count.
+    if (closeout && typeof closeout === 'string') {
+      const liveCard = `jr.job_id = jobs.id AND jr.phase = 'post_hire'
+            AND jr.status <> 'cancelled'
+            AND COALESCE(jr.notes, '') NOT LIKE '%[Suspended:%'`;
+      if (closeout === 'invoice_raise' || closeout === 'invoice_send') {
+        params.push(STRIP_DONE_STATUSES);
+        const doneIdx = params.length;
+        params.push(STRIP_WIP_STATUSES);
+        const wipIdx = params.length;
+        const wipTest = closeout === 'invoice_send'
+          ? `COALESCE(jr.status, '') = ANY($${wipIdx})`
+          : `COALESCE(jr.status, '') <> ALL($${wipIdx})`;
+        whereClause += ` AND EXISTS (
+          SELECT 1 FROM job_requirements jr
+          WHERE ${liveCard}
+            AND jr.requirement_type = 'invoice'
+            AND COALESCE(jr.status, '') <> ALL($${doneIdx})
+            AND ${wipTest}
+        )`;
+      } else if (closeout === 'ready') {
+        params.push(Object.values(STRIP_MAPPING.post_hire).flat());
+        const typesIdx = params.length;
+        params.push(STRIP_DONE_STATUSES);
+        const doneIdx = params.length;
+        whereClause += ` AND EXISTS (
+          SELECT 1 FROM job_requirements jr
+          WHERE ${liveCard} AND jr.requirement_type = ANY($${typesIdx})
+        ) AND NOT EXISTS (
+          SELECT 1 FROM job_requirements jr
+          WHERE ${liveCard} AND jr.requirement_type = ANY($${typesIdx})
+            AND COALESCE(jr.status, '') <> ALL($${doneIdx})
+        )`;
+      } else if (Object.prototype.hasOwnProperty.call(STRIP_MAPPING.post_hire, closeout)) {
+        const types = STRIP_MAPPING.post_hire[closeout as ProgressStripCategory];
+        if (types.length > 0) {
+          params.push(types);
+          const typesIdx = params.length;
+          params.push(STRIP_DONE_STATUSES);
+          const doneIdx = params.length;
+          whereClause += ` AND EXISTS (
+            SELECT 1 FROM job_requirements jr
+            WHERE ${liveCard} AND jr.requirement_type = ANY($${typesIdx})
+              AND COALESCE(jr.status, '') <> ALL($${doneIdx})
+          )`;
+        }
+      }
     }
 
     // Service type filter — comma-separated requirement_type values

@@ -24,6 +24,7 @@ import { BACKLINE_CATEGORY_IDS } from './backline-categories';
 import { computeRehearsalDetail, buildRehearsalSummary, type RehearsalDetail } from './rehearsal-plan';
 import { syncRehearsalRequirementStatus } from './studio-sitter';
 import { hireGenuinelyReturning } from './hire-lifecycle';
+import { STRIP_DONE_STATUSES } from './job-progress-strip';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
 // Source: HireHop categories_list.php, verified 9 Apr 2026
@@ -1502,14 +1503,44 @@ export async function deriveRequirementsForActiveJobs(): Promise<{ processed: nu
   let mismatches = 0;
 
   try {
+    // Statuses 7 (Returned) and 8 (Requires Attention) joined in Nov 2026 so the
+    // Returns page's close-out pips stay true without anyone opening the job —
+    // e.g. an invoice raised straight in HireHop flips the Invoice card here.
+    // Only while there is money close-out left to watch (an Invoice or Payment
+    // card not done), or the cards don't exist yet on a recent return; a long
+    // tail of old never-completed status-7 jobs would otherwise cost a HireHop
+    // billing read each, every half hour.
     const jobsResult = await query(
       `SELECT id FROM jobs
        WHERE is_deleted = false
-         AND status = ANY($1)
          AND hh_job_number IS NOT NULL
          AND line_items IS NOT NULL
-         AND line_items != '[]'::jsonb`,
-      [[1, 2, 3, 4, 5, 6]]
+         AND line_items != '[]'::jsonb
+         AND (
+           status = ANY($1)
+           OR (
+             status IN (7, 8)
+             AND COALESCE(pipeline_status, '') NOT IN ('lost', 'cancelled', 'completed')
+             AND (
+               EXISTS (
+                 SELECT 1 FROM job_requirements jr
+                 WHERE jr.job_id = jobs.id AND jr.phase = 'post_hire'
+                   AND jr.requirement_type IN ('invoice', 'payment_reconcile')
+                   AND jr.status <> 'cancelled'
+                   AND COALESCE(jr.status, '') <> ALL($2)
+               )
+               OR (
+                 NOT EXISTS (
+                   SELECT 1 FROM job_requirements jr
+                   WHERE jr.job_id = jobs.id AND jr.phase = 'post_hire'
+                     AND jr.requirement_type = 'invoice'
+                 )
+                 AND COALESCE(return_date, job_end)::date >= CURRENT_DATE - 30
+               )
+             )
+           )
+         )`,
+      [[1, 2, 3, 4, 5, 6], STRIP_DONE_STATUSES]
     );
 
     for (const row of jobsResult.rows) {
