@@ -1,7 +1,8 @@
 /**
- * Goodwill credit — the words and the sums (docs/GOODWILL-CREDIT-SPEC.md).
- * Shared by the offer modal, the Client History note, the use modal and the
- * Goodwill tab, so they all say the same thing.
+ * Vouchers (once "goodwill credit") — the words and the sums (docs/GOODWILL-CREDIT-SPEC.md;
+ * §17: every credit is a voucher with ONE code, used everywhere — the GW ref is internal).
+ * Shared by the voucher modal, the Client History note, the use modal, the Vouchers tab
+ * and Money › Vouchers, so they all say the same thing.
  */
 
 export type GoodwillStatus = 'offered' | 'reserved' | 'used' | 'withdrawn' | 'expired';
@@ -37,9 +38,9 @@ export interface GoodwillCredit {
   check_problem: string | null;
   last_checked_at: string | null;
   used_hh_ref: string | null;
-  /** A voucher (GOODWILL-CREDIT-SPEC §16): the code the client was given, and its face value INC VAT. */
-  voucher_code?: string | null;
-  voucher_value_inc_vat?: number | null;
+  /** The code the client is given (every credit has one since §17), and its face value INC VAT. */
+  voucher_code: string | null;
+  voucher_value_inc_vat: number | null;
   used_shop_sale_id?: string | null;
 }
 
@@ -52,15 +53,19 @@ export const grossAt20 = (n: number) => money(Math.round(n * 120) / 100);
 export const plusVat = (n: number) => `${money(n)}+VAT (${grossAt20(n)})`;
 
 /** £20 → "£20", £12.50 → "£12.50". */
-export const voucherMoney = (n: number) => `£${n.toFixed(n % 1 ? 2 : 0)}`;
+export const voucherMoney = (n: number) => `£${n.toFixed(Math.round(n * 100) % 100 ? 2 : 0)}`;
 
-/**
- * How a credit's value reads: a voucher by what the client was told ("£20 voucher (inc VAT)"),
- * plain goodwill as "£100.00+VAT (£120.00)".
- */
+/** A voucher's value inc VAT (its face value; else the ex-VAT amount + 20%). */
+export const incVatOf = (c: { amount_ex_vat: number; voucher_value_inc_vat?: number | null }) =>
+  c.voucher_value_inc_vat ?? Math.round(c.amount_ex_vat * 120) / 100;
+
+/** "£16.67 + VAT = £20" — how every voucher's value reads (jon, 18 Nov 2026). */
 export function creditHeadline(c: { amount_ex_vat: number; voucher_value_inc_vat?: number | null }): string {
-  return c.voucher_value_inc_vat != null ? `${voucherMoney(c.voucher_value_inc_vat)} voucher (inc VAT)` : plusVat(c.amount_ex_vat);
+  return `${voucherMoney(c.amount_ex_vat)} + VAT = ${voucherMoney(incVatOf(c))}`;
 }
+
+/** The one code a person sees and types (an old credit without one shows its GW ref). */
+export const creditCode = (c: { voucher_code?: string | null; ref: string }) => c.voucher_code || c.ref;
 
 /** '2027-11-16' → '16th Nov 2027'. A DATE string is a calendar day, never shifted; a
  *  timestamp is shown as its UK day. */
@@ -97,27 +102,18 @@ export const STATUS_PILL: Record<GoodwillStatus, string> = {
 };
 
 /** The points for staff to put in their own email to the client — OP sends nothing (spec §5). */
-export function emailPoints(g: { ref: string; owner_name: string; amount_ex_vat: number; expires_on: string; voucher_code?: string | null; voucher_value_inc_vat?: number | null }): string {
-  if (g.voucher_code && g.voucher_value_inc_vat != null) {
-    return [
-      `- A ${voucherMoney(g.voucher_value_inc_vat)} voucher (inc VAT) off a hire with Ooosh or in our shop`,
-      `- Your voucher code: ${g.voucher_code}`,
-      `- Use it by ${gwDay(g.expires_on)} (for a hire, the booking must be made by then)`,
-      `- Single use - anything it doesn't cover lapses`,
-      `- Not exchangeable for cash`,
-    ].join('\n');
-  }
+export function emailPoints(g: { ref: string; amount_ex_vat: number; expires_on: string; voucher_code?: string | null; voucher_value_inc_vat?: number | null }): string {
   return [
-    `- ${plusVat(g.amount_ex_vat)} off a future hire with Ooosh, or towards anything you still owe us, for ${g.owner_name}`,
+    `- A ${voucherMoney(incVatOf(g))} voucher (inc VAT) off a hire with Ooosh or in our shop`,
+    `- Your voucher code: ${creditCode(g)}`,
     `- Use it by ${gwDay(g.expires_on)} (for a hire, the booking must be made by then)`,
-    `- Used once, up to ${money(g.amount_ex_vat)}+VAT - anything unused lapses`,
+    `- Single use - anything it doesn't cover lapses`,
     `- Not exchangeable for cash`,
-    `- Quote ${g.ref} when you book`,
   ].join('\n');
 }
 
-/** The text staff type into the HireHop line's note / the credit note's description. */
-export const hireHopNote = (ref: string) => `Goodwill credit ${ref}`;
+/** What staff put in the HireHop line's Item Note / the credit note's description: the code. */
+export const hireHopNote = (c: { voucher_code?: string | null; ref: string }) => `Voucher ${creditCode(c)}`;
 
 /** Copy to the clipboard; false when the browser refused. */
 export async function copyText(text: string): Promise<boolean> {

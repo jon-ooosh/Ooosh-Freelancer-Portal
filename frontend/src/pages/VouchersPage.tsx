@@ -1,9 +1,10 @@
 /**
- * Money › Vouchers (docs/GOODWILL-CREDIT-SPEC.md §16) — admin and managers.
+ * Money › Vouchers (docs/GOODWILL-CREDIT-SPEC.md §16–17) — admin and managers.
  *
- * A voucher is a goodwill credit with a code: £X inc VAT, single use, off a hire or at the
- * shop till; whatever it doesn't cover lapses. Made here by hand (a promo, a prize, a
- * sorry), or by the referral scheme. Staff check a code at the till ("Voucher") or on a job
+ * EVERY voucher, wherever it was made (here, a referral, a Problem, the close-out panel,
+ * Cancel Job, an org or person page — once called "goodwill credit"). Each has one code,
+ * is single use, works off a hire, at the shop till or against money owed; whatever it
+ * doesn't cover lapses. Staff check a code at the till ("Voucher") or on a job
  * ("Have a voucher code?") — there is no public lookup, so a code can't be guessed at.
  * Backend: routes/vouchers.ts; withdraw is the usual goodwill route.
  */
@@ -14,13 +15,17 @@ import ModalShell from '../components/ModalShell';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import { ukDatePlus, ukToday } from '../lib/ukDate';
-import { type GoodwillCredit, STATUS_LABEL, STATUS_PILL, gwDay, voucherMoney, copyText } from '../lib/goodwillCopy';
+import { type GoodwillCredit, STATUS_LABEL, STATUS_PILL, gwDay, voucherMoney, copyText, creditHeadline, creditCode, incVatOf } from '../lib/goodwillCopy';
+import VoucherAmount, { useVoucherAmount } from '../components/goodwill/VoucherAmount';
+import { amountsFromNumbers } from '../components/damage-money/AmountInputs';
 import EmailPointsModal from '../components/goodwill/EmailPointsModal';
 
 type Filter = 'live' | 'used' | 'all';
 
-// Only a referral's voucher says where it came from; one made on this page needs no label.
-const SOURCE_LABEL: Record<string, string> = { referral: 'Referral' };
+// Where a voucher came from, when it wasn't made on this page (that needs no label).
+const SOURCE_LABEL: Record<string, string> = {
+  referral: 'Referral', close_out: 'After a hire', problem: 'From a Problem', cancellation: 'Cancelled job',
+};
 
 export default function VouchersPage() {
   const role = useAuthStore((s) => s.user?.role);
@@ -62,8 +67,8 @@ export default function VouchersPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Vouchers</h1>
           <p className="text-sm text-gray-600 mt-0.5 max-w-3xl">
-            Money off a hire or at the shop till, with its own code. Single use — whatever it doesn't cover lapses. Amounts are inc VAT.
-            Staff check a code at the <Link to="/money/shop" className="text-ooosh-700 hover:underline">Shop Till</Link> ("Voucher") or on the job ("Have a voucher code?").
+            Every voucher, wherever it was given. Money off a hire, the shop or what they owe, each with its own code; used once.
+            Take a code at the <Link to="/money/shop" className="text-ooosh-700 hover:underline">Shop Till</Link> ("Voucher code") or on the job ("Have a voucher code?").
           </p>
         </div>
         <button type="button" onClick={() => { setMade(null); setMaking(true); }} className="px-3 py-2 text-sm rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700">+ Make vouchers</button>
@@ -76,7 +81,7 @@ export default function VouchersPage() {
               className={`px-3 py-1.5 rounded-md ${filter === k ? 'bg-ooosh-600 text-white' : 'text-gray-700 hover:bg-gray-50'}`}>{label}</button>
           ))}
         </div>
-        {rows && <span className="text-sm text-gray-500">{live.length} out there, worth {voucherMoney(live.reduce((s, g) => s + (g.voucher_value_inc_vat || 0), 0))} inc VAT</span>}
+        {rows && <span className="text-sm text-gray-500">{live.length} out there, worth {voucherMoney(live.reduce((s, g) => s + incVatOf(g), 0))} inc VAT</span>}
       </div>
 
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
@@ -103,10 +108,9 @@ export default function VouchersPage() {
                 return (
                   <tr key={g.id} className={`align-top ${isLive ? '' : 'text-gray-500'}`}>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      <span className="font-mono text-gray-900">{g.voucher_code}</span>
-                      <div className="text-xs text-gray-400 font-mono">{g.ref}</div>
+                      <span className="font-mono text-gray-900">{creditCode(g)}</span>
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap font-semibold">{voucherMoney(g.voucher_value_inc_vat || 0)}</td>
+                    <td className="px-3 py-2 whitespace-nowrap font-semibold">{creditHeadline(g)}</td>
                     <td className="px-3 py-2">{ownerLink ? <Link to={ownerLink} className="text-ooosh-700 hover:underline">{g.owner_name}</Link> : <span className="text-gray-500">{g.owner_name}</span>}</td>
                     <td className="px-3 py-2 max-w-xs">
                       {g.reason}
@@ -124,7 +128,7 @@ export default function VouchersPage() {
                       )}
                     </td>
                     <td className="px-3 py-2 text-right whitespace-nowrap text-xs space-x-2">
-                      {isLive && <button type="button" onClick={() => copy(`c${g.id}`, g.voucher_code || '')} className="text-ooosh-700 hover:underline">{copied === `c${g.id}` ? '✓ Copied' : 'Copy code'}</button>}
+                      {isLive && <button type="button" onClick={() => copy(`c${g.id}`, creditCode(g))} className="text-ooosh-700 hover:underline">{copied === `c${g.id}` ? '✓ Copied' : 'Copy code'}</button>}
                       {isLive && <button type="button" onClick={() => setPointsFor(g)} className="text-ooosh-700 hover:underline">Email points</button>}
                       {isLive && <button type="button" disabled={busy === g.id} onClick={() => withdraw(g)} className="text-red-600 hover:underline disabled:opacity-50">Withdraw</button>}
                     </td>
@@ -144,10 +148,10 @@ export default function VouchersPage() {
         />
       )}
       {made && made.length > 0 && (
-        <ModalShell title={made.length === 1 ? 'Voucher made' : `${made.length} vouchers made`} subtitle={`${voucherMoney(made[0].voucher_value_inc_vat || 0)} inc VAT each, use by ${gwDay(made[0].expires_on)}`} onClose={() => setMade(null)} width="max-w-md">
+        <ModalShell title={made.length === 1 ? 'Voucher made' : `${made.length} vouchers made`} subtitle={`${creditHeadline(made[0])} each, use by ${gwDay(made[0].expires_on)}`} onClose={() => setMade(null)} width="max-w-md">
           <div className="space-y-3 text-sm">
             <ul className="max-h-72 overflow-y-auto rounded border border-gray-200 divide-y font-mono">
-              {made.map((g) => <li key={g.id} className="px-3 py-1.5 flex justify-between"><span>{g.voucher_code}</span><span className="text-gray-400">{g.ref}</span></li>)}
+              {made.map((g) => <li key={g.id} className="px-3 py-1.5"><span>{creditCode(g)}</span></li>)}
             </ul>
             <p className="text-xs text-gray-500">Each code works once. They stay on this page, so you can copy them again later.</p>
             <div className="flex justify-end gap-2">
@@ -162,7 +166,7 @@ export default function VouchersPage() {
 }
 
 function MakeVouchersModal({ onClose, onMade }: { onClose: () => void; onMade: (made: GoodwillCredit[]) => void }) {
-  const [value, setValue] = useState('20');
+  const { amounts, setAmounts, value } = useVoucherAmount(amountsFromNumbers(16.67, 3.33, 20));
   const [count, setCount] = useState('1');
   const [reason, setReason] = useState('');
   const [until, setUntil] = useState(ukDatePlus(365));
@@ -183,8 +187,7 @@ function MakeVouchersModal({ onClose, onMade }: { onClose: () => void; onMade: (
   }, [search]);
 
   async function save() {
-    const v = Number(value.replace(/^£/, ''));
-    if (!(v > 0)) { setError('Say how much each voucher is worth'); return; }
+    if (!value) { setError('Say how much each voucher is worth'); return; }
     if (!(n >= 1 && n <= 50)) { setError('Between 1 and 50 vouchers at a time'); return; }
     if (!reason.trim()) { setError('Say what they are for — it shows on the list and the timelines'); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(until) || until < ukToday()) { setError('The use-by date must be today or later'); return; }
@@ -192,7 +195,7 @@ function MakeVouchersModal({ onClose, onMade }: { onClose: () => void; onMade: (
     setError('');
     try {
       const r = await api.post<{ data: GoodwillCredit[] }>('/vouchers', {
-        value_inc_vat: Math.round(v * 100) / 100, count: n, reason: reason.trim(), expires_on: until,
+        value_inc_vat: value.value_inc_vat, amount_ex_vat: value.amount_ex_vat, count: n, reason: reason.trim(), expires_on: until,
         person_id: n === 1 && person ? person.id : null,
       });
       onMade(r.data);
@@ -205,9 +208,11 @@ function MakeVouchersModal({ onClose, onMade }: { onClose: () => void; onMade: (
   return (
     <ModalShell title="Make vouchers" subtitle="Each one gets its own code and works once." onClose={() => { if (!saving) onClose(); }} width="max-w-lg">
       <div className="space-y-3 text-sm">
+        <div>
+          <span className="text-gray-600">Worth</span>
+          <VoucherAmount amounts={amounts} onChange={setAmounts} />
+        </div>
         <div className="flex flex-wrap gap-4">
-          <label className="block"><span className="text-gray-600">Worth, £ inc VAT</span>
-            <input autoFocus inputMode="decimal" value={value} onChange={(e) => setValue(e.target.value)} className="mt-0.5 block w-24 border border-gray-300 rounded px-2 py-1.5" /></label>
           <label className="block"><span className="text-gray-600">How many</span>
             <input inputMode="numeric" value={count} onChange={(e) => setCount(e.target.value)} className="mt-0.5 block w-20 border border-gray-300 rounded px-2 py-1.5" /></label>
           <label className="block"><span className="text-gray-600">Use by</span>

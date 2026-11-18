@@ -1,19 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { api } from '../../services/api';
 import { useAuthStore } from '../../hooks/useAuthStore';
 import { hasManagerRole } from '../../lib/roles';
-import { type GoodwillCredit, money, plusVat, gwDay, hireHopNote, copyText, creditHeadline } from '../../lib/goodwillCopy';
+import { type GoodwillCredit, money, gwDay, hireHopNote, copyText, creditHeadline, creditCode } from '../../lib/goodwillCopy';
 
 /**
- * Goodwill credits for whoever is on this enquiry / job — the Client History
- * sidebar, above Endorsed artists (docs/GOODWILL-CREDIT-SPEC.md §4.3). Renders
- * nothing when there are none. Fetches its own data so the two pages that show
- * it only pass ids.
+ * Vouchers for whoever is on this enquiry / job — the Client History sidebar, above
+ * Endorsed artists (docs/GOODWILL-CREDIT-SPEC.md §4.3, §17). Fetches its own data so the
+ * two pages that show it only pass ids. Kept short on purpose (jon, 18 Nov 2026): the
+ * value once, the code, one line of what to do in HireHop.
  *
- * `jobId` is the saved job; without one (a New Enquiry not saved yet) a credit can
- * be seen but not reserved. On a saved job staff can also type a VOUCHER code the client
- * gave them (GOODWILL-CREDIT-SPEC §16) — it is then held for this hire like any credit.
+ * `jobId` is the saved job; without one (a New Enquiry not saved yet) a voucher can be
+ * seen but not held. On a saved job staff can also type a code the client gave them.
  */
 export default function GoodwillNote({ orgIds, personIds = [], jobId }: {
   orgIds: Array<string | null | undefined>;
@@ -49,7 +47,7 @@ export default function GoodwillNote({ orgIds, personIds = [], jobId }: {
     return jobId ? <div className="mb-3"><VoucherCodeEntry jobId={jobId} onHeld={load} /></div> : null;
   }
 
-  async function act(c: GoodwillCredit, path: 'applied' | 'unreserve' | 'check', body: unknown = {}) {
+  async function act(c: GoodwillCredit, path: 'applied' | 'unreserve', body: unknown = {}) {
     setBusy(c.id);
     setError('');
     try {
@@ -68,59 +66,51 @@ export default function GoodwillNote({ orgIds, personIds = [], jobId }: {
     writeHidden(jobId, next);
   }
 
+  const btn = 'px-2 py-1 text-xs border border-gray-300 bg-white rounded hover:bg-gray-50 disabled:opacity-50';
   return (
     <div className="mb-3 p-2.5 bg-green-50 border border-green-200 rounded-lg">
-      <div className="text-xs font-semibold text-green-800 uppercase mb-1">Goodwill credit</div>
+      <div className="text-xs font-semibold text-green-800 uppercase mb-1">Vouchers</div>
       <ul className="space-y-2.5">
-        {shown.map((c) => (
-          <li key={c.id} className="text-xs text-gray-700">
-            <div className="text-sm font-bold text-gray-900">{creditHeadline(c)}</div>
-            {c.voucher_code && <div className="text-[11px] text-gray-500">Voucher code <span className="font-mono text-gray-800">{c.voucher_code}</span> · {plusVat(c.amount_ex_vat)} off the hire</div>}
-            <div>
-              {c.organisation_id || c.person_id ? <>For {c.owner_name}</> : 'Anyone with the code'} · <span className="font-mono">{c.ref}</span> · offered {gwDay(c.offered_at)}
-              {c.source_job_id && c.source_job_number && <> after <Link to={`/jobs/${c.source_job_id}`} className="text-ooosh-600 hover:underline">job {c.source_job_number}</Link></>}
-              {c.offered_by_name && <> by {c.offered_by_name}</>}. Use by {gwDay(c.expires_on)}.
-            </div>
-            <div className="italic text-gray-600">“{c.reason}”</div>
+        {shown.map((c) => {
+          const code = creditCode(c);
+          const off = c.reserved_amount_ex_vat ?? c.amount_ex_vat;
+          return (
+            <li key={c.id} className="text-xs text-gray-700">
+              <div className="text-sm font-bold text-gray-900">{creditHeadline(c)}</div>
+              <div><span className="font-mono text-gray-900">{code}</span> · {c.organisation_id || c.person_id ? c.owner_name : 'Anyone with the code'} · use by {gwDay(c.expires_on)}</div>
+              <div className="italic text-gray-500">{c.reason}</div>
 
-            {c.status === 'reserved' ? (
-              <div className="mt-1.5 p-2 bg-amber-50 border border-amber-200 rounded">
-                <div className="text-amber-900">
-                  <b>Reserved on this job</b>: {money(c.reserved_amount_ex_vat ?? c.amount_ex_vat)}+VAT{' '}
-                  {c.reserved_for === 'invoice' ? `against ${c.reserved_invoice_number || 'an invoice'} (a credit note in HireHop)` : 'off the hire (a discount in HireHop)'}.
-                  {' '}Put <b className="font-mono">{hireHopNote(c.ref)}</b> in {c.reserved_for === 'invoice' ? 'the credit note\'s description' : 'the line\'s Item Note'}.
-                  {' '}OP checks HireHop's lines every hour (credit notes when the Money tab is opened, or daily) and marks it used when it finds it.
-                </div>
-                {c.check_problem && <div className="mt-1 text-amber-900 font-medium">⚠ {c.check_problem}</div>}
-                <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  <button type="button" onClick={async () => { if (await copyText(hireHopNote(c.ref))) setCopied(c.id); }}
-                    className="px-2 py-1 text-xs border border-gray-300 bg-white rounded hover:bg-gray-50">{copied === c.id ? '✓ Copied' : 'Copy note text'}</button>
-                  <button type="button" disabled={busy === c.id} onClick={() => void act(c, 'check')}
-                    className="px-2 py-1 text-xs border border-gray-300 bg-white rounded hover:bg-gray-50 disabled:opacity-50">{busy === c.id ? 'Checking…' : 'Check HireHop now'}</button>
-                  <button type="button" disabled={busy === c.id}
-                    onClick={() => { if (confirm(`Mark ${c.ref} as applied in HireHop? Anything it didn't take lapses.`)) void act(c, 'applied'); }}
-                    className="px-2 py-1 text-xs bg-green-700 text-white rounded hover:bg-green-800 disabled:opacity-50">Mark as applied</button>
-                  {isManager && (
+              {c.status === 'reserved' ? (
+                <div className="mt-1.5 p-2 bg-amber-50 border border-amber-200 rounded text-amber-900">
+                  {c.reserved_for === 'invoice'
+                    ? <>Held against {c.reserved_invoice_number || 'an invoice'}. In HireHop, raise a {money(off)} + VAT credit note on it with <b className="font-mono">{code}</b> in its description.</>
+                    : <>Held for this hire. In HireHop, take {money(off)} off the line and put <b className="font-mono">{code}</b> in its Item Note.</>}
+                  {c.check_problem && <div className="mt-1 font-medium">⚠ {c.check_problem}</div>}
+                  <div className="flex flex-wrap gap-1.5 mt-1.5">
+                    <button type="button" className={btn} onClick={async () => { if (await copyText(code)) setCopied(c.id); }}>{copied === c.id ? '✓ Copied' : 'Copy code'}</button>
                     <button type="button" disabled={busy === c.id}
-                      onClick={() => { if (confirm(`Take ${c.ref} off this job? It goes back to being free to use.`)) void act(c, 'unreserve'); }}
-                      className="px-2 py-1 text-xs border border-gray-300 bg-white rounded hover:bg-gray-50 disabled:opacity-50">Take off this job</button>
-                  )}
+                      onClick={() => { if (confirm(`Mark ${code} as done in HireHop? Anything it didn't take lapses.`)) void act(c, 'applied'); }}
+                      className="px-2 py-1 text-xs bg-green-700 text-white rounded hover:bg-green-800 disabled:opacity-50">Done</button>
+                    {isManager && (
+                      <button type="button" disabled={busy === c.id} className={btn}
+                        onClick={() => { if (confirm(`Take ${code} off this job? It goes back to being free to use.`)) void act(c, 'unreserve'); }}>Take off this job</button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <div className="flex flex-wrap gap-1.5 mt-1.5">
-                {jobId ? (
-                  <button type="button" onClick={() => setUsing(c)}
-                    className="px-2 py-1 text-xs bg-green-700 text-white rounded hover:bg-green-800">Use on this job</button>
-                ) : (
-                  <span className="text-[11px] text-gray-500">Save the enquiry to use it on this job.</span>
-                )}
-                <button type="button" onClick={() => hide(c)}
-                  className="px-2 py-1 text-xs border border-gray-300 bg-white rounded hover:bg-gray-50">Not this time</button>
-              </div>
-            )}
-          </li>
-        ))}
+              ) : (
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {jobId ? (
+                    <button type="button" onClick={() => setUsing(c)}
+                      className="px-2 py-1 text-xs bg-green-700 text-white rounded hover:bg-green-800">Use on this job</button>
+                  ) : (
+                    <span className="text-[11px] text-gray-500">Save the enquiry to use it on this job.</span>
+                  )}
+                  <button type="button" onClick={() => hide(c)} className={btn}>Not this time</button>
+                </div>
+              )}
+            </li>
+          );
+        })}
       </ul>
       {error && <div className="text-xs text-red-600 mt-1">{error}</div>}
       {jobId && <div className="mt-2"><VoucherCodeEntry jobId={jobId} onHeld={load} /></div>}
@@ -224,8 +214,8 @@ function UseGoodwillModal({ credit, jobId, onClose, onDone }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => { if (!saving) onClose(); }}>
       <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="px-5 pt-5 pb-3 border-b border-gray-100">
-          <h3 className="text-lg font-semibold text-gray-900">Use {credit.ref} on this job</h3>
-          <p className="text-sm text-gray-500 mt-0.5">Up to {plusVat(credit.amount_ex_vat)}, for {credit.owner_name}. Use by {gwDay(credit.expires_on)}.</p>
+          <h3 className="text-lg font-semibold text-gray-900">Use {creditCode(credit)} on this job</h3>
+          <p className="text-sm text-gray-500 mt-0.5">{creditHeadline(credit)} · use by {gwDay(credit.expires_on)}</p>
         </div>
         <div className="px-5 py-4 space-y-4 text-sm">
           <fieldset className="space-y-2">
@@ -259,7 +249,7 @@ function UseGoodwillModal({ credit, jobId, onClose, onDone }: {
           </div>
           {amountOk && net < credit.amount_ex_vat - 0.004 && (
             <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
-              The other {money(credit.amount_ex_vat - net)}+VAT lapses once it's applied.
+              The other {money(credit.amount_ex_vat - net)} + VAT lapses once it's used.
             </div>
           )}
 
@@ -267,15 +257,15 @@ function UseGoodwillModal({ credit, jobId, onClose, onDone }: {
             <div className="text-xs font-semibold text-gray-700">Then in HireHop</div>
             <p className="text-xs text-gray-600">
               {where === 'hire'
-                ? `Discount the line(s) it's for by ${money(amountOk ? net : credit.amount_ex_vat)} in all, and put this in that line's Item Note:`
-                : `Raise a credit note for ${money(amountOk ? net : credit.amount_ex_vat)}+VAT on the invoice, with this in its description:`}
+                ? `Take ${money(amountOk ? net : credit.amount_ex_vat)} off the line(s) it's for, and put this in the line's Item Note:`
+                : `Raise a ${money(amountOk ? net : credit.amount_ex_vat)} + VAT credit note on the invoice, with this in its description:`}
             </p>
             <div className="flex items-center gap-2">
-              <code className="flex-1 bg-gray-50 rounded px-2 py-1.5 text-xs">{hireHopNote(credit.ref)}</code>
-              <button type="button" onClick={async () => setCopied(await copyText(hireHopNote(credit.ref)))}
+              <code className="flex-1 bg-gray-50 rounded px-2 py-1.5 text-xs">{hireHopNote(credit)}</code>
+              <button type="button" onClick={async () => setCopied(await copyText(hireHopNote(credit)))}
                 className="px-2.5 py-1.5 text-xs border border-gray-300 rounded hover:bg-gray-50">{copied ? '✓ Copied' : 'Copy'}</button>
             </div>
-            <p className="text-[11px] text-gray-500">The code is what OP will look for — keep it in, word for word. Once it's in HireHop, press "Mark as applied" on the job.</p>
+            <p className="text-[11px] text-gray-500">OP spots the code in HireHop and marks it used.</p>
           </div>
 
           {error && <div className="text-red-600">{error}</div>}

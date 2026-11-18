@@ -463,3 +463,38 @@ doesn't have that problem (staff see it's for that band); a voucher does.
 make, hold on a job, use on a sale, give back), `routes/vouchers.ts` (`/api/vouchers`), `routes/shop.ts`
 `POST /shop/voucher`, frontend `pages/VouchersPage.tsx`, the till's voucher box (`ShopTillPage.tsx`),
 `GoodwillNote.tsx` `VoucherCodeEntry`, `lib/goodwillCopy.ts` `creditHeadline()`.
+
+## 17. One money-off system: every credit is a voucher, one code (BUILT 18 Nov 2026, migration 350)
+
+**Why (jon, 18 Nov 2026):** three new things (goodwill credit, voucher, referral) were confusing staff —
+"even I found it confusing and slightly unsure what to do". A voucher carried TWO references (its code and a
+GW ref), and staff were told to put the GW ref in HireHop while the client had the code.
+
+**Settled:**
+- **There is one thing: a voucher.** "Goodwill credit" is simply a voucher held by a band or person (a sorry, a
+  thanks). Screens say "voucher"; the org / person tab is **Vouchers** (its URL key stays `goodwill`); the menus
+  say **Give a voucher…**; Money › Vouchers lists every one, wherever it was made.
+- **One code, everywhere.** Every credit has a `voucher_code` — migration 350 gave one to every credit that had
+  none (including the live GW-0001), with a face value of its ex-VAT amount + 20%. The client quotes it, staff
+  type it into OP, and it goes in HireHop: **"Voucher K7QM-4XWP-C9TR" in the line's Item Note** (or a credit
+  note's description). HireHop prints the Item Note on quotes and invoices — harmless (jon): it's the client's own,
+  already-used code beside the discount. The GW ref stays in the table as an internal id and **old GW refs keep
+  working** — the read-back (`goodwill-check.ts` `codesIn()`) finds either, and staff can type one.
+- **Value shown as "£16.67 + VAT = £20"** everywhere (`creditValueText()` / `creditHeadline()`), entered with the
+  Costs-style **Net · VAT · Gross** boxes at 20% (`components/goodwill/VoucherAmount.tsx`, built on
+  `damage-money/AmountInputs.tsx` `only20`) — type either side, the other follows. Both are stored as typed
+  (`amount_ex_vat`, `voucher_value_inc_vat`); `voucherAmounts()` fills in whichever is missing.
+- **A voucher's value can't be edited** (the client was told it) — withdraw it and give another. Its use-by can.
+- **The job panel is short:** the value once, the code, one line ("Held for this hire. In HireHop, take £16.67 off
+  the line and put K7QM-4XWP-C9TR in its Item Note."), and **Copy code · Done · Take off this job**. OP still marks
+  it used by itself when it sees the code; "Done" is the manual way.
+- **The front desk (warehouse kiosk) takes vouchers** (jon): `POST /shop/voucher` is on `KIOSK_TILL_ALLOW`, and
+  `checkVoucher()` accepts `kiosk_till` with the named seller. The sitter till still never offers them.
+- **Referral vouchers are automatic** (`BUSINESS-FIGURES-SPEC.md` §8d): the friend's when the referral is linked,
+  the referrer's when the friend's hire is Completed.
+
+**Code:** `goodwill-credits.ts` (`creditCode()`, `hireHopNoteFor()`, `getGoodwillByAnyCode()`, `voucherAmounts()`),
+`goodwill-check.ts` (codes as well as GW refs), `vouchers.ts` (`findVoucher()` takes either), `shop-sales.ts`
+`checkVoucher()`, `kiosk-till.ts`; frontend `lib/goodwillCopy.ts` (`creditHeadline`, `creditCode`, `hireHopNote`),
+`GoodwillNote.tsx`, `GoodwillTab.tsx`, `OfferGoodwillModal.tsx` ("Give a voucher"), `GoodwillTick.tsx`,
+`VouchersPage.tsx`, `ShopTillPage.tsx`.

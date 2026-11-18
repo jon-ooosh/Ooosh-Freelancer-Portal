@@ -278,37 +278,38 @@ Offers are plain text jon rotates; each referral keeps the offer that was live.
   `referralBlockReason()` is every rule: not internal; not the referrer's own booking (a contact on it, or a
   member of its client org); a NEW client by `returning-client.ts` at the time the enquiry arrived; and not
   already referred (same client org or a shared contact). The link path skips quietly; staff see the reason.
-- **Both rewards are VOUCHERS** — a goodwill credit with a code (`GOODWILL-CREDIT-SPEC.md` §16, source
-  `'referral'`), amounts **inc VAT** on the offer (`referral_offers.friend_voucher_inc_vat` /
-  `referrer_voucher_inc_vat`, mig 349; the old `friend_credit_ex_vat` is no longer read — jon had typed it
-  meaning inc VAT, so it was copied across as typed, and the referrer's £ figure was lifted out of the reward text).
-  - **The friend's:** a manager presses "Give the £20 voucher" on the job, with "Email them the code" ticked by
-    default. It's made for the job's band / client (the goodwill owner rule) and held for this hire, so whoever
-    quotes sees it. The email is `referral_welcome_voucher` — Jon's wording, 17 Nov 2026: "Hi {name}, thanks for
-    getting in touch - {Sam} recommended us! As a welcome, there's a £20 voucher waiting for you, already set
-    against your hire (on bookings over £100). Your voucher code is K7QM-4XWP-C9TR, valid until {date}. Any
-    questions, just reply to this email. Jon" — to the job's client via `resolveClientEmailTarget()` (never
-    info@: a job with no client email gets nothing and the manager is told), once (`referrals.welcome_email_sent_at`,
-    un-stamped if the send fails); "Email them the code" on the job sends it later. Not behind the email switch —
-    a manager presses it. Once per referral.
-  - **The referrer's:** "Thank-you given…" makes it (ticked when the offer has a referrer voucher; the amount can
-    be changed) and its code goes in email 3. Made once (`referrals.reward_credit_id`) — pressing again after a
-    failed email reuses it.
-- **Thank-you due**: daily 10:20 UK (`runReferralRewardsDue()`) — a referral whose job is now Completed becomes
-  `reward_due` with a To Do for each admin (`source_type = 'referral'`, links to Marketing › Referrals). "Thank-you
-  given…" there (managers) records what they got and can send email 3; "Decline" needs a reason. Both close the
-  To Dos. Before then a referral reads its stage off the job (Enquired / Booked / Didn't book) — never stored.
+- **Both rewards are VOUCHERS** (`GOODWILL-CREDIT-SPEC.md` §16–17, source `'referral'`), amounts **inc VAT** on the
+  offer (`referral_offers.friend_voucher_inc_vat` / `referrer_voucher_inc_vat`, mig 349 — the old
+  `friend_credit_ex_vat` is no longer read), and **both are automatic** (jon, 18 Nov 2026 — they replaced a manager's
+  "Give the voucher" and an admin's "Thank-you given…"):
+  - **The friend's welcome voucher** is made the moment a referral is linked (link or "Referred by"), for the job's
+    band / client and held for their enquiry; while the referral emails are on, `referral_welcome_voucher` goes to the
+    job's client (`resolveClientEmailTarget()`, never info@) in Jon's words: "Hi {name}, thanks for getting in touch -
+    {Sam} recommended us! As a welcome, there's a £20 voucher waiting for you, already set against your hire (on
+    bookings over £100). Your voucher code is K7QM-4XWP-C9TR, valid until {date}. Any questions, just reply to this
+    email. Jon". Once (`welcome_email_sent_at`, un-stamped if the send fails); "Email them the code" on the job sends
+    it by hand. "Over £100" is staff's check, never OP's. **Taking the referral off (✕), or declining it, withdraws
+    an unused welcome voucher.** "Give the £20 voucher" stays on the job only for a referral linked before the offer
+    had an amount.
+  - **The referrer's thank-you voucher** is made when the friend's hire is **Completed** — at once on OP's Completed
+    (`routes/pipeline.ts` → `rewardReferralForJob()`); the 10:20 run (`runReferralRewardsDue()`) catches a completion
+    from HireHop or a missed one. `rewardReferral()` claims the referral first (→ `rewarded`), makes the voucher for
+    the referrer person (`reward_credit_id`), and — while the emails are on — sends email 3 with its code; the timeline
+    says whether it was emailed. If the voucher can't be made the claim is undone and the next run tries again. No To
+    Do, no thank-you window; a manager **Declines** a referral that shouldn't count (Marketing › Referrals). Before then
+    a referral reads its stage off the job (Enquired / Booked / Didn't book) — never stored.
 - **Emails**, from "Jon at Ooosh Tours", replies to jon@, never naming the friend:
-  - the review email's referral line becomes their own link + the offer: "Know a band who needs vans, backline
-    or rehearsal space? Send them your link - go.oooshtours.co.uk/r/sam-7k2p - and they'll get £20 off their
-    first hire. If they book, we'll send you a Tour Store voucher to say thanks." (no person → "mention your name");
+  - the review email's referral line becomes their own link + the offer (jon, 18 Nov 2026): "Know a band who needs
+    vans, backline or rehearsal space? Send them your unique link - go.oooshtours.co.uk/r/sam-7k2p - and they'll get
+    a £20 discount voucher off their first hire worth over £100. If they book, we'll send *you* a £20 discount voucher
+    for shop sales or hires too, to say thanks." ("you" in italics; no person → "mention your name");
   - **email 2** `referral_enquiry_thanks` — "someone you recommended has just been in touch with us!", once per
     referral, only while the friend's job is still an enquiry, **OFF until Marketing › Referrals turns it on**
     (`referral_emails_enabled`). It promises "We'll keep you updated if they confirm and complete a booking";
   - **email 2b** `referral_booked` — "Good news - the person you recommended has booked with us! Once their hire is
     done, we'll send you {reward} as promised." Daily 10:20, once per referral (`booked_email_sent_at`, mig 348),
     while the job is booked and not finished; same switch as email 2;
-  - **email 3** `referral_reward_thanks` — the thank-you itself, only when a person marks it given, ending with
+  - **email 3** `referral_reward_thanks` — the thank-you itself, sent automatically when the friend's hire is Completed, ending with
     their referral link and "You can use the same link as many times as you like!". "Here's a little thank-you:
     {what they got}", then, with a voucher: "Your voucher code is H3MU-ZXCB-86TU - £20 off a hire with us or in
     our shop, valid until 17th Nov 2027. It's single use, so just quote the code when you book or pay."

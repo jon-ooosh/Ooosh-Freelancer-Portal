@@ -43,13 +43,14 @@ describe('links', () => {
 describe('wording', () => {
   it('the review email line carries both offers, with plain dashes', () => {
     const l = reviewReferralLine({ referrerReward: 'a Tour Store voucher', friendOffer: '£20 off their first hire' });
-    expect(l.before).toBe('Know a band who needs vans, backline or rehearsal space? Send them your link - ');
-    expect(l.after).toBe(" - and they'll get £20 off their first hire. If they book, we'll send you a Tour Store voucher to say thanks.");
-    expect(l.before + l.after).not.toMatch(/—/);
+    expect(l.before).toBe('Know a band who needs vans, backline or rehearsal space? Send them your unique link - ');
+    expect(l.after).toBe(" - and they'll get £20 off their first hire. If they book, we'll send ");
+    expect(l.tail).toBe(' a Tour Store voucher too, to say thanks.');
+    expect(l.before + l.after + l.tail).not.toMatch(/—/);
   });
   it('reads naturally with no offer set', () => {
     const l = reviewReferralLine({ referrerReward: null, friendOffer: '  ' });
-    expect(l.after).toBe(". If they book, we'll send you a thank-you.");
+    expect(l.after + 'you' + l.tail).toBe(". If they book, we'll send you a thank-you.");
     expect(enquiryThanksRewardLine({ referrerReward: null, friendOffer: null })).toBe("If they end up booking, we'll send you a thank-you.");
     expect(bookedRewardLine({ referrerReward: 'a hoodie', friendOffer: null })).toBe("Once their hire is done, we'll send you a hoodie as promised.");
     expect(bookedRewardLine({ referrerReward: '', friendOffer: null })).toBe("Once their hire is done, we'll send you a thank-you as promised.");

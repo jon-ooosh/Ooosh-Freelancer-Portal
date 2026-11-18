@@ -57,16 +57,19 @@ export function codeFromLinkCode(linkCode: string | null | undefined): string | 
 export interface OfferText { referrerReward: string | null; friendOffer: string | null }
 
 /**
- * The review email's referral line, split round the link so the link can be a real
- * <a>. Jon's wording, 16 Nov 2026 (plain dashes, not long ones).
+ * The review email's referral line, split round the link (a real <a>) and round "you"
+ * (in italics) — the template puts `<a>` between `before` and `after`, and `<em>you</em>`
+ * between `after` and `tail`. Jon's wording, 18 Nov 2026 (plain dashes, not long ones):
+ * "Send them your unique link - LINK - and they'll get X. If they book, we'll send *you* Y
+ * too, to say thanks."
  */
-export function reviewReferralLine(offer: OfferText): { before: string; after: string } {
+export function reviewReferralLine(offer: OfferText): { before: string; after: string; tail: string } {
   const friend = offer.friendOffer?.trim();
   const reward = offer.referrerReward?.trim();
   return {
-    before: 'Know a band who needs vans, backline or rehearsal space? Send them your link - ',
-    after: (friend ? ` - and they'll get ${friend}.` : '.')
-      + (reward ? ` If they book, we'll send you ${reward} to say thanks.` : " If they book, we'll send you a thank-you."),
+    before: 'Know a band who needs vans, backline or rehearsal space? Send them your unique link - ',
+    after: (friend ? ` - and they'll get ${friend}.` : '.') + " If they book, we'll send ",
+    tail: reward ? ` ${reward} too, to say thanks.` : ' a thank-you.',
   };
 }
 

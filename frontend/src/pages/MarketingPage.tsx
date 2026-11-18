@@ -486,11 +486,6 @@ function ReferralsPanel() {
   const [busy, setBusy] = useState(false);
   const [offer, setOffer] = useState({ referrerReward: '', friendOffer: '', friendVoucher: '', referrerVoucher: '' });
   const [editingOffer, setEditingOffer] = useState(false);
-  const [thanking, setThanking] = useState<ReferralOverview['referrals'][number] | null>(null);
-  const [detail, setDetail] = useState('');
-  const [sendEmail, setSendEmail] = useState(true);
-  const [giveVoucher, setGiveVoucher] = useState(true);
-  const [voucherAmount, setVoucherAmount] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -538,9 +533,9 @@ function ReferralsPanel() {
                 <dt className="inline text-gray-500">Friend's welcome voucher: </dt>
                 <dd className="inline text-gray-900">{data.offer.friendVoucherIncVat ? `${pounds(data.offer.friendVoucherIncVat)} inc VAT` : <em className="text-gray-400">none</em>}</dd>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  The money behind the words. Each is a voucher with its own code, single use, for a hire or the shop.
-                  The friend's is given by a manager from "Referred by" on their job (held for that hire, and emailed to them);
-                  the referrer's when you mark the thank-you given (its code goes in Jon's thank-you email).
+                  The money behind the words. Each is a voucher with its own code, single use, for a hire or the shop, valid 12 months.
+                  Both are automatic: the friend's is made when the referral is linked (held for their hire); the referrer's when the
+                  friend's hire is Completed. Each goes out in Jon's email while the referral emails are on.
                 </p>
               </div>
             </dl>
@@ -584,7 +579,7 @@ function ReferralsPanel() {
                 className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50">Send me a test</button>
               <button type="button" disabled={busy}
                 onClick={() => {
-                  if (!data.emailsEnabled && !window.confirm('Turn on the "someone you recommended has been in touch" email? It goes to the referrer for real, from you.')) return;
+                  if (!data.emailsEnabled && !window.confirm('Turn on the referral emails? All four go for real, from you: "someone you recommended got in touch", "they\'ve booked", the friend\'s welcome voucher and the referrer\'s thank-you voucher.')) return;
                   run(() => api.put('/referrals/settings', { emailsEnabled: !data.emailsEnabled }));
                 }}
                 className={`px-3 py-1.5 text-sm rounded-lg disabled:opacity-50 ${data.emailsEnabled ? 'border border-gray-300 hover:bg-gray-50' : 'bg-ooosh-600 text-white hover:bg-ooosh-700'}`}>
@@ -596,7 +591,8 @@ function ReferralsPanel() {
           <ul className="text-xs text-gray-600 space-y-1 list-disc pl-5">
             <li>Every client in Jon's review email gets their own link (go.oooshtours.co.uk/r/…); anyone else from "Make a referral link" on their page.</li>
             <li>A friend who enquires through a link is linked automatically. A name they mention, or a card, is linked with "Referred by" on the job.</li>
-            <li>Only a new client counts, once. When their hire is Completed a To Do asks for the thank-you — nothing is sent or given by itself.</li>
+            <li>Only a new client counts, once. The friend's welcome voucher is made when they're linked; the referrer's thank-you voucher when the friend's hire is Completed — both automatic.</li>
+            <li>The four emails (in touch, booked, the friend's welcome, the thank-you) only go while this is on. The vouchers are made either way.</li>
           </ul>
           {note && <p className="text-xs text-green-700">{note}</p>}
           {error && <p className="text-xs text-red-600">{error}</p>}
@@ -634,21 +630,13 @@ function ReferralsPanel() {
                       <td className="px-3 py-2">
                         <span className={`text-[11px] font-semibold rounded-full px-2 py-0.5 ${STAGE_CLS[r.stage] || 'bg-blue-50 text-blue-700'}`}>{r.stage}</span>
                         {r.rewardDetail && <span className="text-xs text-gray-500"> {r.rewardDetail}</span>}
-                        {r.rewardVoucherCode && <span className="text-xs text-gray-500"> · voucher <span className="font-mono">{r.rewardVoucherCode}</span> ({r.rewardVoucherRef})</span>}
+                        {r.rewardVoucherCode && <span className="text-xs text-gray-500"> · voucher <span className="font-mono">{r.rewardVoucherCode}</span></span>}
                         {r.declinedReason && <span className="text-xs text-gray-500"> {r.declinedReason}</span>}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap text-right text-xs">
                         {(r.status === 'open' || r.status === 'reward_due') && (
-                          <>
-                            <button type="button" className="text-ooosh-700 hover:underline mr-3"
-                              onClick={() => {
-                                const v = r.offer.referrerVoucherIncVat ?? data.offer.referrerVoucherIncVat;
-                                setThanking(r); setDetail(r.offer.referrerReward || ''); setSendEmail(r.referrerHasEmail);
-                                setGiveVoucher(!!v || !!r.rewardVoucherRef); setVoucherAmount(v ? String(v) : '');
-                              }}>Thank-you given…</button>
-                            <button type="button" className="text-gray-500 hover:underline"
-                              onClick={() => { const why = window.prompt('Why is this referral declined?'); if (why && why.trim()) run(() => api.post(`/referrals/${r.id}/decline`, { reason: why.trim() })); }}>Decline</button>
-                          </>
+                          <button type="button" className="text-gray-500 hover:underline" title="It doesn't count (their own band, say) — no thank-you, and an unused welcome voucher is withdrawn"
+                            onClick={() => { const why = window.prompt('Why is this referral declined? (No thank-you, and an unused welcome voucher is withdrawn.)'); if (why && why.trim()) run(() => api.post(`/referrals/${r.id}/decline`, { reason: why.trim() })); }}>Decline</button>
                         )}
                       </td>
                     </tr>
@@ -659,44 +647,6 @@ function ReferralsPanel() {
           </div>
         )}
 
-      {thanking && (
-        <ModalShell title={`Thank ${thanking.referrerName}`} subtitle="Mark the thank-you as given" onClose={() => setThanking(null)} width="max-w-md">
-          <div className="space-y-3 text-sm">
-            {thanking.rewardVoucherRef ? (
-              <p className="rounded border border-green-200 bg-green-50 px-2 py-1.5 text-xs text-green-900">
-                Their voucher is already made: <span className="font-mono">{thanking.rewardVoucherCode}</span> ({thanking.rewardVoucherRef}). Saving uses it — no second one.
-              </p>
-            ) : (
-              <label className="flex items-start gap-2">
-                <input type="checkbox" className="mt-1" checked={giveVoucher} onChange={(e) => setGiveVoucher(e.target.checked)} />
-                <span>
-                  Give them a voucher of £
-                  <input className="mx-1 w-16 border border-gray-300 rounded px-1.5 py-0.5" inputMode="decimal" value={voucherAmount} disabled={!giveVoucher}
-                    onChange={(e) => setVoucherAmount(e.target.value)} placeholder="20" />
-                  inc VAT
-                  <span className="block text-xs text-gray-500">Its own code, single use, a hire or the shop, for 12 months. The code goes in the email.</span>
-                </span>
-              </label>
-            )}
-            <label className="block"><span className="text-gray-600">What did they get? (the email says “here's a little thank-you: …”)</span>
-              <input autoFocus className="mt-0.5 w-full border border-gray-300 rounded px-2 py-1.5" value={detail} placeholder={giveVoucher ? `a ${voucherAmount ? pounds(Number(voucherAmount) || 0) : '£20'} voucher for a hire or our shop` : 'your Tour Store code is THANKS20'} onChange={(e) => setDetail(e.target.value)} /></label>
-            <label className={`flex items-start gap-2 ${thanking.referrerHasEmail ? '' : 'opacity-50'}`}>
-              <input type="checkbox" className="mt-0.5" disabled={!thanking.referrerHasEmail} checked={sendEmail && thanking.referrerHasEmail} onChange={(e) => setSendEmail(e.target.checked)} />
-              <span>Email them Jon's thank-you with this in it{giveVoucher || thanking.rewardVoucherRef ? ', the voucher code' : ''}, and their link to share again{thanking.referrerHasEmail ? '' : ' (no email address on file)'}</span>
-            </label>
-            <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setThanking(null)} className="px-3 py-1.5 rounded-lg border border-gray-300 hover:bg-gray-50">Cancel</button>
-              <button type="button" disabled={busy} className="px-3 py-1.5 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50"
-                onClick={() => run(async () => {
-                  const voucherIncVat = !thanking.rewardVoucherRef && giveVoucher ? amountOrNull(voucherAmount, 'The voucher') : null;
-                  if (!thanking.rewardVoucherRef && giveVoucher && !voucherIncVat) throw new Error('Say how much the voucher is for, or untick it');
-                  await api.post(`/referrals/${thanking.id}/thanked`, { detail, sendEmail: sendEmail && thanking.referrerHasEmail, voucherIncVat });
-                  setThanking(null);
-                }, 'Thank-you recorded.')}>Save</button>
-            </div>
-          </div>
-        </ModalShell>
-      )}
     </div>
   );
 }

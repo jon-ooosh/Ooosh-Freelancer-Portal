@@ -5,15 +5,16 @@ import { useAuthStore } from '../../hooks/useAuthStore';
 import { hasManagerRole } from '../../lib/roles';
 import { ukToday } from '../../lib/ukDate';
 import {
-  type GoodwillCredit, type GoodwillOwner, STATUS_LABEL, STATUS_PILL, money, plusVat, gwDay, creditHeadline,
+  type GoodwillCredit, type GoodwillOwner, STATUS_LABEL, STATUS_PILL, money, gwDay, creditHeadline, creditCode, voucherMoney, incVatOf,
 } from '../../lib/goodwillCopy';
 import OfferGoodwillModal from './OfferGoodwillModal';
 import EmailPointsModal from './EmailPointsModal';
 
 /**
- * An org's or person's Goodwill tab (docs/GOODWILL-CREDIT-SPEC.md §4.4): every
- * credit they've been offered, kept forever. Managers can change the amount or
- * use-by date, take it off a job, or withdraw it; anyone can copy the email points.
+ * An org's or person's Vouchers tab (once "Goodwill", docs/GOODWILL-CREDIT-SPEC.md §4.4,
+ * §17): every voucher they've been given, kept forever. Managers can change the use-by
+ * date (never the value — the client was told it), take it off a job, or withdraw it;
+ * anyone can see the email points.
  */
 export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
   const user = useAuthStore((s) => s.user);
@@ -28,7 +29,7 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
   const load = useCallback(() => {
     api.get<{ data: GoodwillCredit[] }>(`/goodwill?${param}=${owner.id}`)
       .then((r) => setRows(r.data))
-      .catch(() => setError('Could not load goodwill credits'));
+      .catch(() => setError('Could not load the vouchers'));
   }, [param, owner.id]);
   useEffect(() => { load(); }, [load]);
 
@@ -40,48 +41,44 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
     } finally { setBusy(null); }
   }
 
+  // A voucher's value is what the client was told, so only its use-by date changes.
   const edit = (g: GoodwillCredit) => {
-    // A voucher's value is what the client was told, so only its use-by date changes.
-    const amt = g.voucher_code ? String(g.amount_ex_vat) : prompt(`Amount for ${g.ref}, ex VAT (£)`, String(g.amount_ex_vat));
-    if (amt === null) return;
     const until = prompt(`Use by (YYYY-MM-DD) — today or later`, g.expires_on);
     if (until === null) return;
-    const n = Number(amt);
-    if (!Number.isFinite(n) || n <= 0) { setError('That amount isn\'t a number above £0'); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(until.trim()) || until.trim() < ukToday()) { setError('Use-by must be a date, today or later'); return; }
-    void run(g, () => api.patch(`/goodwill/${g.id}`, { amount_ex_vat: Math.round(n * 100) / 100, expires_on: until.trim() }));
+    void run(g, () => api.patch(`/goodwill/${g.id}`, { expires_on: until.trim() }));
   };
   const withdraw = (g: GoodwillCredit) => {
-    const why = prompt(`Withdraw ${g.ref}? Say why (staff only):`);
+    const why = prompt(`Withdraw ${creditCode(g)}? It stops working. Say why (staff only):`);
     if (!why || !why.trim()) return;
     void run(g, () => api.post(`/goodwill/${g.id}/withdraw`, { reason: why.trim() }));
   };
   const takeOff = (g: GoodwillCredit) => {
-    if (!confirm(`Take ${g.ref} off job ${g.reserved_job_number ?? ''}? It goes back to being free to use.`)) return;
+    if (!confirm(`Take ${creditCode(g)} off job ${g.reserved_job_number ?? ''}? It goes back to being free to use.`)) return;
     void run(g, () => api.post(`/goodwill/${g.id}/unreserve`, {}));
   };
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-gray-600">Money off a future hire or off what they owe — a promise, not money. Applied by hand in HireHop with the GW code.</p>
+        <p className="text-sm text-gray-600">Money off a future hire, the shop or what they owe — each with its own code, used once.</p>
         {isManager && (
           <button type="button" onClick={() => setOffering(true)}
-            className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 whitespace-nowrap">+ Offer goodwill credit</button>
+            className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 whitespace-nowrap">+ Give a voucher</button>
         )}
       </div>
       {error && <div className="text-sm text-red-600">{error}</div>}
       {rows === null ? (
         <div className="text-sm text-gray-400">Loading…</div>
       ) : rows.length === 0 ? (
-        <div className="text-sm text-gray-500">No goodwill credits.</div>
+        <div className="text-sm text-gray-500">No vouchers.</div>
       ) : (
         <div className="bg-white border border-gray-200 rounded-xl overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
               <tr>
-                <th className="text-left px-3 py-2">Amount</th>
-                <th className="text-left px-3 py-2">Offered</th>
+                <th className="text-left px-3 py-2">Value</th>
+                <th className="text-left px-3 py-2">Given</th>
                 <th className="text-left px-3 py-2">Why</th>
                 <th className="text-left px-3 py-2">Use by</th>
                 <th className="text-left px-3 py-2">Status</th>
@@ -94,9 +91,8 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
                 return (
                   <tr key={g.id} className={`border-t border-gray-100 align-top ${live ? '' : 'text-gray-500'}`}>
                     <td className="px-3 py-2">
-                      <b>{g.voucher_code ? creditHeadline(g) : `${money(g.amount_ex_vat)}+VAT`}</b>
-                      <div className="text-xs text-gray-500 font-mono">{g.ref}</div>
-                      {g.voucher_code && <div className="text-xs text-gray-700 font-mono" title="The voucher code the client was given">🎟️ {g.voucher_code}</div>}
+                      <b>{creditHeadline(g)}</b>
+                      <div className="text-xs text-gray-700 font-mono" title="The voucher code the client was given">{creditCode(g)}</div>
                     </td>
                     <td className="px-3 py-2">
                       {gwDay(g.offered_at)}
@@ -117,7 +113,7 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
                       )}
                       {(g.status === 'reserved' || g.status === 'used') && g.reserved_job_id && (
                         <div className="text-xs mt-1">
-                          {g.status === 'used' ? `${money(g.used_amount_ex_vat ?? 0)}+VAT on ` : 'on '}
+                          {g.status === 'used' ? `${money(g.used_amount_ex_vat ?? 0)} + VAT on ` : 'held for '}
                           <Link to={`/jobs/${g.reserved_job_id}`} className="text-ooosh-600 hover:underline">job {g.reserved_job_number}</Link>
                           {g.reserved_for === 'invoice' && g.reserved_invoice_number ? ` (${g.reserved_invoice_number})` : ''}
                         </div>
@@ -138,7 +134,7 @@ export default function GoodwillTab({ owner }: { owner: GoodwillOwner }) {
         </div>
       )}
       {rows && rows.some((g) => g.status === 'offered') && (
-        <p className="text-xs text-gray-500">To use one, open the job it's for — it shows in the Client History panel with “Use on this job”. Total still to use: {plusVat(rows.filter((g) => g.status === 'offered').reduce((s, g) => s + g.amount_ex_vat, 0))}.</p>
+        <p className="text-xs text-gray-500">To use one, open the job it's for — it shows in the Client History panel with “Use on this job”, or take its code at the till. Still to use: {voucherMoney(rows.filter((g) => g.status === 'offered').reduce((s, g) => s + incVatOf(g), 0))} inc VAT.</p>
       )}
       {pointsFor && <EmailPointsModal credit={pointsFor} onClose={() => setPointsFor(null)} />}
       {offering && (

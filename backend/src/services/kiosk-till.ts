@@ -48,6 +48,8 @@ export const KIOSK_TILL_ALLOW: Rule[] = [
   { method: 'GET',  pattern: /^\/sellers$/ },
   { method: 'GET',  pattern: /^\/discount-cap$/ },
   { method: 'POST', pattern: /^\/quote$/ },
+  // A voucher at the front desk (jon, 18 Nov 2026) — checked and spread; used with the sale.
+  { method: 'POST', pattern: /^\/voucher$/ },
   { method: 'POST', pattern: /^\/sales$/ },
   { method: 'GET',  pattern: /^\/sales$/ },                       // its own last few only (routes/shop.ts)
   { method: 'POST', pattern: /^\/sales\/[^/]+\/receipt$/ },

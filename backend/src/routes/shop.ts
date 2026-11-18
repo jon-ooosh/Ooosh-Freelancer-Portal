@@ -240,15 +240,16 @@ router.post('/quote', async (req: AuthRequest, res: Response) => {
 });
 
 /**
- * A voucher at the till (GOODWILL-CREDIT-SPEC §16): check the code and spread its value
+ * A voucher at the till (GOODWILL-CREDIT-SPEC §16–17): check the code and spread its value
  * across the basket as lowered line prices — the till's only kind of discount, so it
- * reaches HireHop as the price charged. Staff only: not on KIOSK_TILL_ALLOW, so the kiosk
- * never reaches it, and the sitter till is a different app. Nothing is written — the
- * voucher is used up when the sale is saved (createShopSale, with `voucherCode`).
+ * reaches HireHop as the price charged. The staff till and the kiosk (front desk, on
+ * KIOSK_TILL_ALLOW since 18 Nov 2026); the sitter till is a different app and never offers
+ * it. Nothing is written — the voucher is used up when the sale is saved (createShopSale,
+ * with `voucherCode`).
  */
 router.post('/voucher', async (req: AuthRequest, res: Response) => {
   try {
-    if (req.kiosk || !req.user) { res.status(403).json({ error: 'Vouchers are taken on the staff till only.' }); return; }
+    if (!req.kiosk && !req.user) { res.status(403).json({ error: 'Sign in to take a voucher.' }); return; }
     const credit = await findVoucher(String(req.body?.code || ''));
     const problem = voucherProblem(credit);
     if (problem) { res.status(credit ? 409 : 404).json({ error: `${problem}.` }); return; }
@@ -261,7 +262,7 @@ router.post('/voucher', async (req: AuthRequest, res: Response) => {
     res.json({
       data: {
         voucher: {
-          code: credit!.voucher_code, ref: credit!.ref, valueIncVat: credit!.voucher_value_inc_vat,
+          code: credit!.voucher_code, ref: credit!.ref, valueIncVat: credit!.voucher_value_inc_vat, exVat: credit!.amount_ex_vat,
           ownerName: credit!.owner_name, expiresOn: credit!.expires_on,
         },
         lines: spread.lines.map((l) => ({ hhStockId: l.hhStockId, unitPriceCharged: l.unitPrice })),

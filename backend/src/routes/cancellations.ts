@@ -180,10 +180,11 @@ const processSchema = z.object({
   // The modal's "Watch this band" tick: the band to watch for its next tour
   // (TOUR-FINDER-SPEC §21; band-watch.ts).
   watch_band_org_id: z.string().guid().optional().nullable(),
-  // The modal's "Offer goodwill credit" tick (docs/GOODWILL-CREDIT-SPEC.md §4.1):
+  // The modal's "Give a voucher" tick (docs/GOODWILL-CREDIT-SPEC.md §4.1, §17):
   // money off their next hire, held by the band / client / a contact.
   goodwill: z.object({
     amount_ex_vat: z.number().positive().max(100000),
+    value_inc_vat: z.number().positive().max(120000).optional().nullable(),
     reason: z.string().trim().max(2000).optional().nullable(),
     organisation_id: z.string().guid().optional().nullable(),
     person_id: z.string().guid().optional().nullable(),
@@ -539,13 +540,14 @@ router.post(
         await startWatchFromCloseOut({ jobId, organisationId: watch_band_org_id, userId });
       }
 
-      // 14. Goodwill credit — never fails the cancellation (it's done by now).
+      // 14. A voucher (once "goodwill credit") — never fails the cancellation (it's done by now).
       if (goodwill) {
         try {
           await offerGoodwill({
             organisation_id: goodwill.organisation_id ?? null,
             person_id: goodwill.person_id ?? null,
             amount_ex_vat: goodwill.amount_ex_vat,
+            voucher_value_inc_vat: goodwill.value_inc_vat ?? null,
             reason: goodwill.reason?.trim() || `Cancelled: ${cancellation_reason}`,
             source_kind: 'cancellation',
             source_job_id: jobId,

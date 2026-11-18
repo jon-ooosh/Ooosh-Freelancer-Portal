@@ -15,7 +15,7 @@
  * push hold (Window A). A sale that has reached HireHop is refunded from the
  * Recent Sales list (Window B, spec §8) — it is never deleted.
  *
- * A VOUCHER (staff till only — GOODWILL-CREDIT-SPEC §16) is applied as lowered line
+ * A VOUCHER (staff till and the front-desk kiosk — GOODWILL-CREDIT-SPEC §16–17) is applied as lowered line
  * prices, like any discount here, so HireHop sees what was charged. The server spreads
  * it (`POST /shop/voucher`); the code goes with the sale, which uses the voucher up.
  */
@@ -272,7 +272,7 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
   const [readerActive, setReaderActive] = useState(false);
   const [maxDiscountPct, setMaxDiscountPct] = useState(0);
   // A voucher on this basket: the server's spread, and each line's price before it so
-  // Remove puts them back. Never on the kiosk (the server refuses it there too).
+  // Remove puts them back. On the staff till and the kiosk; the sitter till never offers it.
   const [voucher, setVoucher] = useState<{
     code: string; ref: string; valueIncVat: number; ownerName: string; expiresOn: string;
     before: Record<number, string>;
@@ -1325,14 +1325,14 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
                 </p>
               )}
 
-              {/* Voucher (staff till only). Applied as lower line prices — see the file header. */}
-              {!kiosk && (
+              {/* Voucher (staff till and kiosk). Applied as lower line prices — see the file header. */}
+              {(
                 <div className="mb-3">
                   {voucher ? (
                     <div className="rounded border border-green-300 bg-green-50 px-3 py-2 text-xs text-green-900">
                       <div className="flex items-start justify-between gap-2">
                         <span>
-                          🎟️ Voucher <span className="font-mono">{voucher.code}</span> ({voucher.ref}) — {money(voucherTakesOff)} off
+                          🎟️ Voucher <span className="font-mono">{voucher.code}</span> — {money(voucherTakesOff)} off
                           {voucherTakesOff < voucher.valueIncVat - 0.045 && <> of {money(voucher.valueIncVat)}; the other {money(voucher.valueIncVat - voucherTakesOff)} lapses (single use)</>}.
                         </span>
                         <button type="button" onClick={removeVoucher} className="shrink-0 text-green-800 underline">Remove</button>
