@@ -23,7 +23,14 @@ import { createMobileUploadToken } from '../services/mobile-upload-token';
 import { attachExcessReceipt } from '../services/excess-receipt';
 import { syncSavedRowToXero, sendXeroSyncFailedAlert, type XeroSyncResult } from '../services/hh-xero-sync';
 import { ukToday } from '../services/uk-date';
-import { recordPreauthHold, PreauthRecordError } from '../services/excess-preauth';
+import {
+  recordPreauthHold,
+  PreauthRecordError,
+  hasLiveHold,
+  HOLD_PLUS_PAYMENT_MESSAGE,
+  STATUS_AFTER_RELEASE_SQL,
+  releaseKeptMoneyNote,
+} from '../services/excess-preauth';
 import { newPaymentMethodAllowed, ADMIN_ONLY_METHOD_MESSAGE } from '../services/payment-methods';
 import { stripeClientForPaymentIntent } from '../services/stripe-terminal';
 import { findDepositAvailability } from '../services/hh-deposit-release';
@@ -2069,7 +2076,9 @@ router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, re
 // past Stripe's 7-day window before we got here), the cancel call succeeds
 // quietly and we proceed.
 //
-// Status transitions: pre_auth → released (terminal).
+// Status transitions: pre_auth → released (terminal) — or, when money was taken
+// on the record separately, to taken / partially_paid so that money stays visible
+// and reimbursable (STATUS_AFTER_RELEASE_SQL, job 17022).
 
 router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, res: Response) => {
   try {
@@ -2126,7 +2135,7 @@ router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, re
 
     // ── Update OP record ──
     const dateStr = ukToday();
-    const releaseNote = `[${dateStr}] Released £${amountHeld.toFixed(2)} hold${reason ? ` — ${reason}` : ''}${notes ? `. ${notes}` : ''}. ${stripeOutcome}`;
+    const releaseNote = `[${dateStr}] Released £${amountHeld.toFixed(2)} hold${reason ? ` — ${reason}` : ''}${notes ? `. ${notes}` : ''}. ${stripeOutcome}${releaseKeptMoneyNote(current.excess_amount_taken)}`;
     const newNotes = current.notes
       ? `${current.notes}\n${releaseNote}`
       : releaseNote;
@@ -2135,7 +2144,8 @@ router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, re
       `UPDATE job_excess SET
         amount_released = COALESCE(amount_released, 0) + amount_held,
         amount_held     = 0,
-        excess_status   = 'released',
+        -- 'released' only when no money was taken on the record (job 17022)
+        excess_status   = ${STATUS_AFTER_RELEASE_SQL},
         released_at     = NOW(),
         notes           = $1,
         updated_at      = NOW()
@@ -3196,6 +3206,13 @@ router.post('/:id/link-deposit', validate(linkDepositSchema), async (req: AuthRe
     }
 
     const current = currentResult.rows[0];
+
+    // A live pre-auth hold and money can't share a record (job 17022) — see
+    // services/excess-preauth.ts HOLD_PLUS_PAYMENT_MESSAGE.
+    if (hasLiveHold(current)) {
+      res.status(409).json({ error: HOLD_PLUS_PAYMENT_MESSAGE });
+      return;
+    }
 
     // Check this HH deposit isn't already linked to another excess record
     const dupeCheck = await query(
