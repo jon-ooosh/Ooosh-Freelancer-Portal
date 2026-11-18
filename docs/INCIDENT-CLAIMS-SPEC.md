@@ -893,3 +893,31 @@ timeline (`money` events). A line is never deleted, only stamped `deleted_at`. A
 **Not built:** money charged after completion (`completed-charges.ts` invoices) is not read
 automatically — add it as an "on an invoice" line; no broker "update" email (the pack is re-sent when
 everything is in; earlier contact is by email or phone).
+
+### 23.1 Follow-up (Nov 2026, after the first week's use)
+
+**Linking a cost that is already in Money › Costs.** The cost form only linked a Problem when the cost
+was CREATED from it, so a bill entered in Costs first (the usual way) could never reach its Problem.
+The Money card now has **"Link one from Costs"** beside "+ Add cost": it lists costs on the same hire
+(whole or split), the same van, or another Problem of either; a search finds anything else by supplier,
+invoice number or amount (net or gross). A cost on another Problem is listed with its name and moves
+when linked; each linked cost has **unlink** (it stays in Costs). `GET /damage-money/linkable-costs`,
+`POST /damage-money/costs/:id/link|unlink` — these change `costs.job_issue_id` ONLY, never through
+`PATCH /costs`, which fires a Xero push for any cost not yet in Xero. Logged on the Problem's timeline
+and its claim's.
+
+**"Written off" is a reason, not a status** (migration 350). Production had one Problem with the status;
+it moved to Resolved + reason "Written off" (a reason a person had already chosen is kept), logged on its
+timeline. The status stays valid in the data and in every "is it closed?" test; `PATCH /problems/:id` no
+longer accepts it and the status list no longer offers it.
+
+**The van sale page tells a buyer the truth about damage.** `vehicle-sale-links.ts` `buyerDamageStatus()`:
+"Repaired" only for Repaired / Replaced; Written off, No action needed, Found and Other are "Closed";
+Problems resolved before reasons were asked (no reason) keep the "Repaired" they always showed.
+
+**Older resolved Problems** (209 at the time, resolved before reasons were asked) show "How it was
+resolved: not recorded" in grey, not amber — a note, not a warning. Nothing was backfilled: an invented
+reason would be worse than none.
+
+**Checked and left alone:** "Awaiting quote" (5), "Quoted" (2) and "Actioned" (1) are in use, as is
+"Surface again on" (8); `job_issues.excess_id` is unused (0 rows) but has no screen, so it costs nothing.

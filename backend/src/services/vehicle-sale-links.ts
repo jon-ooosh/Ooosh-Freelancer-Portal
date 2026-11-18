@@ -201,6 +201,22 @@ const SERVICE_TYPE_LABELS: Record<string, string> = {
 /** Problems that are about the van's body or mechanics — not "wifi down". */
 const DAMAGE_CATEGORIES = ['damaged', 'broken', 'breakdown'];
 
+/**
+ * What a BUYER is told about one piece of damage. Only a repair or a
+ * replacement is "Repaired"; anything else that closed it (written off, no
+ * action needed, found, other) is "Closed" — telling a buyer a dent was
+ * repaired when it was written off would be untrue. A Problem resolved before
+ * reasons were asked (INCIDENT-CLAIMS-SPEC.md §23, Nov 2026) has none, and keeps
+ * the "Repaired" it always showed. The old money answers (claim excess /
+ * charge client) said who paid, not what happened, so they keep it too.
+ */
+export function buyerDamageStatus(status: string, resolutionPath: string | null): 'Repaired' | 'Closed' | 'Outstanding' {
+  if (status === 'written_off') return 'Closed';
+  if (status !== 'resolved') return 'Outstanding';
+  if (['write_off', 'no_action', 'found', 'other'].includes(resolutionPath || '')) return 'Closed';
+  return 'Repaired';
+}
+
 function isoDate(v: unknown): string | null {
   if (!v) return null;
   if (typeof v === 'string') return /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : null;
@@ -247,7 +263,7 @@ export async function loadFullSaleData(saleId: string): Promise<FullSaleData | n
       [vehicleId],
     ),
     query(
-      `SELECT created_at, summary, status FROM job_issues
+      `SELECT created_at, summary, status, resolution_path FROM job_issues
         WHERE vehicle_id = $1 AND category = ANY($2::text[]) AND status <> 'cancelled'
         ORDER BY created_at DESC LIMIT 50`,
       [vehicleId, DAMAGE_CATEGORIES],
@@ -307,7 +323,7 @@ export async function loadFullSaleData(saleId: string): Promise<FullSaleData | n
     damage: damage.rows.map((d) => ({
       date: isoDate(d.created_at) ?? '',
       summary: String(d.summary ?? ''),
-      status: d.status === 'resolved' ? 'Repaired' : d.status === 'written_off' ? 'Closed' : 'Outstanding',
+      status: buyerDamageStatus(String(d.status ?? ''), d.resolution_path ?? null),
     })),
     contact: contact?.trim() || null,
   };

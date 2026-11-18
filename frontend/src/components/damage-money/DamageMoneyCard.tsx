@@ -99,7 +99,10 @@ export default function DamageMoneyCard({ problemId, claimId, jobId, vehicleId, 
   const [data, setData] = useState<Summary | null>(null);
   const [error, setError] = useState('');
   const [addingCostFor, setAddingCostFor] = useState<string | null>(null);
-  const [pickingProblem, setPickingProblem] = useState(false);
+  // On a claim with several Problems, which one a new or linked cost is for.
+  const [pickingProblemFor, setPickingProblemFor] = useState<'add' | 'link' | null>(null);
+  // "Link one from Costs" — open for this Problem (§23.1).
+  const [linkingFor, setLinkingFor] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ kind: Kind; line: MoneyLine | null } | null>(null);
   const [editingEstimate, setEditingEstimate] = useState(false);
   // "Offer goodwill credit" — a Problem's ⋯ menu, managers only (docs/GOODWILL-CREDIT-SPEC.md §4.1).
@@ -136,11 +139,24 @@ export default function DamageMoneyCard({ problemId, claimId, jobId, vehicleId, 
     }
   };
 
-  const startAddCost = () => {
+  // A new cost, or one already in Money › Costs: on a claim with several
+  // Problems, ask which one it is for first.
+  const startCost = (mode: 'add' | 'link') => {
     if (!data) return;
-    if (problemId) { setAddingCostFor(problemId); return; }
-    if (data.problems.length === 1) { setAddingCostFor(data.problems[0].id); return; }
-    setPickingProblem(true);
+    const open = (id: string) => (mode === 'add' ? setAddingCostFor(id) : setLinkingFor(id));
+    if (problemId) { open(problemId); return; }
+    if (data.problems.length === 1) { open(data.problems[0].id); return; }
+    setPickingProblemFor(mode);
+  };
+
+  const unlinkCost = async (c: CostRow) => {
+    if (!confirm(`Take ${c.supplier_name || 'this cost'} off ${data?.scope === 'claim' ? 'this claim' : 'this Problem'}? It stays in Money › Costs.`)) return;
+    try {
+      await api.post(`/damage-money/costs/${c.id}/unlink`, { issue_id: c.job_issue_id });
+      await saved();
+    } catch (e) {
+      setError(errMsg(e, 'Could not unlink that cost'));
+    }
   };
 
   if (!data) {
@@ -210,19 +226,34 @@ export default function DamageMoneyCard({ problemId, claimId, jobId, vehicleId, 
       {/* Costs */}
       <Section
         title={`Our costs (${data.costs.length})`}
-        action={<button type="button" onClick={startAddCost} className="text-xs text-ooosh-600 hover:underline">+ Add cost</button>}
+        action={
+          <span className="flex gap-3">
+            <button type="button" onClick={() => startCost('link')} className="text-xs text-ooosh-600 hover:underline"
+              title="A bill or receipt that is already in Money › Costs">Link one from Costs</button>
+            <button type="button" onClick={() => startCost('add')} className="text-xs text-ooosh-600 hover:underline">+ Add cost</button>
+          </span>
+        }
       >
-        {pickingProblem && (
+        {pickingProblemFor && (
           <div className="mb-2 p-2 rounded border bg-slate-50 text-xs space-y-1">
             <div className="text-slate-600">Which Problem is this cost for?</div>
             {data.problems.map((p) => (
-              <button key={p.id} type="button" onClick={() => { setPickingProblem(false); setAddingCostFor(p.id); }}
+              <button key={p.id} type="button"
+                onClick={() => { const m = pickingProblemFor; setPickingProblemFor(null); if (m === 'add') setAddingCostFor(p.id); else setLinkingFor(p.id); }}
                 className="block text-left text-ooosh-700 hover:underline">
                 {p.summary}
               </button>
             ))}
-            <button type="button" onClick={() => setPickingProblem(false)} className="text-slate-500">Cancel</button>
+            <button type="button" onClick={() => setPickingProblemFor(null)} className="text-slate-500">Cancel</button>
           </div>
+        )}
+        {linkingFor && (
+          <LinkCostPanel
+            issueId={linkingFor}
+            scope={claimId ? { claim_id: claimId } : { issue_id: linkingFor }}
+            onCancel={() => setLinkingFor(null)}
+            onLinked={async () => { setLinkingFor(null); await saved(); }}
+          />
         )}
         {data.costs.length === 0 ? (
           <p className="text-xs text-slate-400">No bills or receipts yet. Anything added here is saved in Money › Costs like any other cost.</p>
@@ -234,6 +265,9 @@ export default function DamageMoneyCard({ problemId, claimId, jobId, vehicleId, 
                   <div className="text-slate-800 truncate">{c.supplier_name || 'Cost'}{c.description ? ` — ${c.description}` : ''}</div>
                   <div className="text-[11px] text-slate-400">
                     {[ukDate(c.cost_date), manyProblems ? c.problem_summary : null, PAYMENT_STATUS_LABEL[c.payment_status]].filter(Boolean).join(' · ')}
+                    {' '}
+                    <button type="button" onClick={() => unlinkCost(c)} className="hover:text-red-600"
+                      title="Take it off here — it stays in Money › Costs">unlink</button>
                   </div>
                 </div>
                 <div className="text-right shrink-0">
@@ -360,6 +394,105 @@ export default function DamageMoneyCard({ problemId, claimId, jobId, vehicleId, 
         />
       )}
     </Shell>
+  );
+}
+
+interface LinkableCost {
+  id: string;
+  supplier_name: string | null;
+  description: string | null;
+  invoice_number: string | null;
+  cost_date: string | null;
+  amount_gross: number | null;
+  job_issue_id: string | null;
+  linked_problem_summary: string | null;
+}
+
+/**
+ * "Link one from Costs" (spec §23.1): a bill already in Money › Costs, filed
+ * against this Problem. Lists what is on the same hire or van first; the
+ * search finds anything else by supplier, invoice number or amount. Linking
+ * changes nothing in Xero — it only says which Problem the cost belongs to.
+ */
+function LinkCostPanel({ issueId, scope, onCancel, onLinked }: {
+  issueId: string;
+  scope: { issue_id: string } | { claim_id: string };
+  onCancel: () => void;
+  onLinked: () => void;
+}) {
+  const [search, setSearch] = useState('');
+  const [rows, setRows] = useState<LinkableCost[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const scopeParam = 'claim_id' in scope ? `claim_id=${scope.claim_id}` : `issue_id=${scope.issue_id}`;
+
+  // Read as the search settles; a slow answer for an older search is dropped.
+  useEffect(() => {
+    let alive = true;
+    const q = search.trim();
+    const t = setTimeout(() => {
+      api.get<{ data: LinkableCost[] }>(`/damage-money/linkable-costs?${scopeParam}${q.length >= 2 ? `&search=${encodeURIComponent(q)}` : ''}`)
+        .then((r) => { if (alive) { setRows(r.data); setError(''); } })
+        .catch((e) => { if (alive) setError(errMsg(e, 'Could not look up costs')); });
+    }, q ? 300 : 0);
+    return () => { alive = false; clearTimeout(t); };
+  }, [search, scopeParam]);
+
+  const link = async (c: LinkableCost) => {
+    setBusy(c.id);
+    setError('');
+    try {
+      await api.post(`/damage-money/costs/${c.id}/link`, { issue_id: issueId });
+      onLinked();
+    } catch (e) {
+      setError(errMsg(e, 'Could not link that cost'));
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mb-2 p-2.5 rounded border border-ooosh-200 bg-ooosh-50/30 space-y-2">
+      <input
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder="Supplier, invoice no. or amount"
+        className="w-full border border-slate-300 rounded px-2 py-1 text-sm"
+      />
+      <div className="text-[11px] text-slate-500">
+        {search.trim().length >= 2 ? 'Matching costs' : 'On this hire or van'} — linking only files it here; nothing changes in Xero.
+      </div>
+      {rows === null && !error && <div className="text-xs text-slate-400">Loading…</div>}
+      {rows && rows.length === 0 && (
+        <div className="text-xs text-slate-400">
+          {search.trim().length >= 2 ? 'Nothing matches.' : 'Nothing on this hire or van — search for it.'}
+        </div>
+      )}
+      {rows && rows.length > 0 && (
+        <ul className="max-h-64 overflow-y-auto divide-y border rounded bg-white">
+          {rows.map((c) => (
+            <li key={c.id} className="flex items-start justify-between gap-2 px-2 py-1.5 text-sm">
+              <div className="min-w-0">
+                <div className="text-slate-800 truncate">{c.supplier_name || 'Cost'}{c.description ? ` — ${c.description}` : ''}</div>
+                <div className="text-[11px] text-slate-400">
+                  {[ukDate(c.cost_date), c.invoice_number, c.amount_gross !== null ? `${money(c.amount_gross)} inc VAT` : null].filter(Boolean).join(' · ')}
+                </div>
+                {c.job_issue_id && (
+                  <div className="text-[11px] text-amber-700">On Problem: {c.linked_problem_summary || 'another'} — linking moves it here.</div>
+                )}
+              </div>
+              <button type="button" onClick={() => link(c)} disabled={busy !== null}
+                className="px-2 py-0.5 text-xs rounded bg-ooosh-600 text-white disabled:opacity-50 shrink-0">
+                {busy === c.id ? 'Linking…' : 'Link'}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && <div className="text-xs text-red-600">{error}</div>}
+      <div className="flex justify-end">
+        <button type="button" onClick={onCancel} className="px-3 py-1 text-xs border rounded">Close</button>
+      </div>
+    </div>
   );
 }
 

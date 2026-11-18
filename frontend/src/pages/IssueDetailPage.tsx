@@ -565,7 +565,9 @@ function IssueDetailContent() {
                 }}
                 className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
               >
-                {(Object.keys(STATUS_LABELS) as IssueStatus[]).map(s => (
+                {/* "Written Off" is a reason now, not a status (spec §23.1, migration 350) —
+                    only listed for a row that somehow still has it, so the select isn't blank. */}
+                {(Object.keys(STATUS_LABELS) as IssueStatus[]).filter(s => s !== 'written_off' || issue.status === 'written_off').map(s => (
                   <option key={s} value={s}>{STATUS_LABELS[s]}</option>
                 ))}
               </select>
@@ -583,7 +585,8 @@ function IssueDetailContent() {
                   <span className="text-[11px] font-medium text-gray-600">How it was resolved: </span>
                   {issue.resolution_path
                     ? RESOLUTION_LABELS[issue.resolution_path] || issue.resolution_path
-                    : <span className="text-amber-700">not recorded</span>}
+                    // Resolved before reasons were asked (Nov 2026) — 209 of them. A note, not a warning.
+                    : <span className="text-gray-400">not recorded</span>}
                   {issue.resolution_note && <span className="text-gray-500"> — {issue.resolution_note}</span>}
                   {' '}
                   <button type="button" onClick={() => setResolving(true)} className="text-ooosh-600 hover:underline">change</button>

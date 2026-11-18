@@ -145,7 +145,7 @@ Phase 5 (linking a to-do to a person/org) was skipped; its shape is in `BACKLOG.
 **CLOSED, Oct 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
 (Vehicles › Claims, replacing the broker's Word claim form). Always opened from a Problem
 (`job_issues.claim_id`); the broker is never contacted automatically — only a manager's "Send to
-broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built), §22 troubleshooting, **§23 the Money card** (Nov 2026 — shared with the Problem page; resolving a Problem now needs a reason). Claim files live under the
+broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built), §22 troubleshooting, **§23 the Money card** (Nov 2026 — shared with the Problem page; resolving a Problem now needs a reason; §23.1: "Link one from Costs", and "Written off" is a reason, not a status — mig 350). Claim files live under the
 `claims/` R2 prefix, which `GET /api/files/download` gates to staff — never file them under `files/`.
 
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
