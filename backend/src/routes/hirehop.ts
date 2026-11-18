@@ -203,9 +203,31 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
           SELECT 1 FROM job_requirements jr
           WHERE jr.job_id = jobs.id
             AND jr.status = 'blocked'
-            AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended: Van & Driver]%')
+            -- ANY suspension marker, not just Van & Driver (Nov 2026): Internal
+            -- and No-vehicle suspensions also sit at 'blocked' and made every
+            -- internal job read as "has issues".
+            AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended:%')
         )
       )`;
+    }
+
+    // Pre-OP cut-off — the Returns page hides jobs from before OP went live
+    // (they were never closed out in OP and are clutter). Keeps a job whose
+    // dates are all missing rather than guess. Date checked so it can't be
+    // anything but a plain YYYY-MM-DD.
+    const { exclude_before, internal } = req.query;
+    if (typeof exclude_before === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(exclude_before)) {
+      params.push(exclude_before);
+      whereClause += ` AND (COALESCE(return_date, job_end, job_date) IS NULL
+        OR COALESCE(return_date, job_end, job_date)::date >= $${params.length})`;
+    }
+
+    // Internal jobs (Ooosh's own use) — 'exclude' hides them, 'only' shows
+    // just them; anything else leaves them in.
+    if (internal === 'exclude') {
+      whereClause += ` AND COALESCE(jobs.is_internal, false) = false`;
+    } else if (internal === 'only') {
+      whereClause += ` AND COALESCE(jobs.is_internal, false) = true`;
     }
 
     // Overdue filter — return_date in the past AND not completed. Server-side
@@ -333,7 +355,30 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
       // jobs naturally fall in line with the rest. NULL last.
       overdue:        'return_date ASC NULLS LAST',
     };
-    const orderBy = allowedSorts[(sort as string) || 'job_date_desc'] || 'job_date DESC NULLS LAST';
+    // Column sorts for the Returns page's clickable headers (Nov 2026). Every
+    // column qualified with its table — the list query joins job_financials and
+    // organisations. Client sorts by the name the row SHOWS (★ lead org, else
+    // the client org, else HireHop's strings — lib/jobOrgName.ts).
+    const clientNameSql = `lower(COALESCE(
+      NULLIF(trim((SELECT lo.name FROM job_organisations jo
+                     JOIN organisations lo ON lo.id = jo.organisation_id
+                    WHERE jo.job_id = jobs.id AND jo.is_primary = true LIMIT 1)), ''),
+      NULLIF(trim(o.name), ''), NULLIF(trim(jobs.company_name), ''), NULLIF(trim(jobs.client_name), '')))`;
+    const columnSorts: Record<string, string> = {
+      job:     'jobs.hh_job_number',
+      name:    'lower(jobs.job_name)',
+      client:  clientNameSql,
+      status:  'jobs.status %DIR% NULLS LAST, jobs.pipeline_status',
+      value:   'COALESCE(jf.hire_value_inc_vat, jobs.job_value)',
+      manager: 'lower(jobs.manager1_name)',
+    };
+    for (const [key, expr] of Object.entries(columnSorts)) {
+      for (const dir of ['asc', 'desc'] as const) {
+        allowedSorts[`${key}_${dir}`] = `${expr.split('%DIR%').join(dir.toUpperCase())} ${dir.toUpperCase()} NULLS LAST`;
+      }
+    }
+    // jobs.id last so rows with equal values keep a fixed order between pages.
+    const orderBy = (allowedSorts[(sort as string) || 'job_date_desc'] || 'job_date DESC NULLS LAST') + ', jobs.id';
 
     params.push(parseInt(limit as string));
     params.push(offset);
