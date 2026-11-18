@@ -14,13 +14,19 @@
 import type { PoolClient } from 'pg';
 import { query } from '../config/database';
 import {
-  FREE_TO_RESERVE_SQL, GoodwillCredit, GoodwillError, creditValueText, day, getGoodwillCredit, getGoodwillByVoucherCode,
-  listVoucherCredits, noteGoodwill, offerGoodwill, reserveGoodwill,
+  FREE_TO_RESERVE_SQL, GoodwillCredit, GoodwillError, creditCode, creditValueText, day, getGoodwillCredit,
+  getGoodwillByRef, getGoodwillByVoucherCode, listVoucherCredits, noteGoodwill, offerGoodwill, reserveGoodwill,
 } from './goodwill-credits';
 import { normaliseVoucherCode } from './voucher-rules';
 
-/** By the code staff typed (any case, spaces or dashes). Null when there is no such voucher. */
+/**
+ * By the code staff typed (any case, spaces or dashes) — or an old GW ref, which still works
+ * for a credit made before §17 (staff only ever type these, so a guessable GW number is no
+ * risk here). Null when there is no such voucher.
+ */
 export async function findVoucher(code: string): Promise<GoodwillCredit | null> {
+  const gw = String(code || '').trim().toUpperCase();
+  if (/^GW-?\d{4,}$/.test(gw)) return getGoodwillByRef(gw.replace(/^GW-?/, 'GW-'));
   const norm = normaliseVoucherCode(code);
   if (!norm) return null;
   return getGoodwillByVoucherCode(norm);
@@ -28,20 +34,22 @@ export async function findVoucher(code: string): Promise<GoodwillCredit | null> 
 
 /** Why this voucher can't be used now, or null. Plain words for the till / job page. */
 export function voucherProblem(g: GoodwillCredit | null, forJobId?: string | null): string | null {
-  if (!g || !g.voucher_code) return "That isn't a voucher code we know — check it with the client";
-  if (g.status === 'used') return `That voucher (${g.ref}) has already been used`;
-  if (g.status === 'withdrawn') return `That voucher (${g.ref}) was withdrawn${g.withdrawn_reason ? `: ${g.withdrawn_reason}` : ''}`;
-  if (g.status === 'expired') return `That voucher (${g.ref}) ran out on ${day(g.expires_on)}`;
+  if (!g) return "That isn't a voucher code we know — check it with the client";
+  if (g.status === 'used') return 'That voucher has already been used';
+  if (g.status === 'withdrawn') return `That voucher was withdrawn${g.withdrawn_reason ? `: ${g.withdrawn_reason}` : ''}`;
+  if (g.status === 'expired') return `That voucher ran out on ${day(g.expires_on)}`;
   if (g.status === 'reserved') {
     return g.reserved_job_id && g.reserved_job_id === forJobId
-      ? `That voucher (${g.ref}) is already held for this job`
-      : `That voucher (${g.ref}) is held for job ${g.reserved_job_number ?? ''} — a manager can take it off that job first`.replace('  ', ' ');
+      ? 'That voucher is already held for this job'
+      : `That voucher is held for ${g.reserved_job_number ? `job ${g.reserved_job_number}` : 'another job'} — a manager can take it off that job first`;
   }
   return null;
 }
 
 export interface MakeVouchersInput {
   valueIncVat: number;
+  /** The net / VAT / gross input's net; left out, worked out from the inc-VAT value. */
+  amountExVat?: number | null;
   reason: string;
   expiresOn?: string | null;
   personId?: string | null;
@@ -60,7 +68,7 @@ export async function makeVouchers(input: MakeVouchersInput, userId: string): Pr
     made.push(await offerGoodwill({
       organisation_id: input.organisationId || null,
       person_id: input.personId || null,
-      amount_ex_vat: 0,               // worked out from the inc-VAT value
+      amount_ex_vat: input.amountExVat ?? 0,   // 0 = worked out from the inc-VAT value
       voucher_value_inc_vat: input.valueIncVat,
       reason: input.reason,
       source_kind: 'voucher',
@@ -101,7 +109,7 @@ export async function useVoucherOnSale(client: PoolClient, g: GoodwillCredit, sa
       RETURNING g.id`,
     [g.id, Math.max(usedExVat, 0.01), userId, sale.id, sale.ref],
   );
-  if (!r.rows.length) throw new Error(`Voucher ${g.ref} has just been used or held somewhere else — take it off and ring the sale again.`);
+  if (!r.rows.length) throw new Error(`Voucher ${creditCode(g)} has just been used or held somewhere else — take it off and ring the sale again.`);
 }
 
 /** A timeline line once the sale is in. Never throws. */
@@ -111,7 +119,7 @@ export async function noteVoucherUsedOnSale(creditId: string, saleRef: string | 
     if (!g) return;
     const value = g.voucher_value_inc_vat || 0;
     const lapsed = Math.round((value - takenOffIncVat) * 100) / 100;
-    await noteGoodwill(g, `🎟️ Voucher ${g.ref} used at the shop till${saleRef ? ` (${saleRef})` : ''}: £${takenOffIncVat.toFixed(2)} off.${lapsed >= 0.01 ? ` The other £${lapsed.toFixed(2)} lapses.` : ''}`,
+    await noteGoodwill(g, `🎟️ Voucher ${creditCode(g)} used at the shop till${saleRef ? ` (${saleRef})` : ''}: £${takenOffIncVat.toFixed(2)} off.${lapsed >= 0.01 ? ` The other £${lapsed.toFixed(2)} lapses.` : ''}`,
       userId || '00000000-0000-0000-0000-000000000000', []);
   } catch (err) {
     console.warn('[vouchers] sale note failed:', err);
@@ -132,7 +140,7 @@ export async function giveVoucherBack(saleId: string, why: string, userId: strin
     );
     for (const row of r.rows) {
       const g = await getGoodwillCredit(row.id);
-      if (g) await noteGoodwill(g, `🎟️ Voucher ${g.ref} is usable again — the sale it was used on was ${why}. ${creditValueText(g)}, use by ${day(g.expires_on)}.`,
+      if (g) await noteGoodwill(g, `🎟️ Voucher ${creditCode(g)} is usable again — the sale it was used on was ${why}. ${creditValueText(g)}, use by ${day(g.expires_on)}.`,
         userId || '00000000-0000-0000-0000-000000000000', []);
     }
   } catch (err) {

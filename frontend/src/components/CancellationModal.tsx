@@ -77,7 +77,7 @@ interface Props {
     keep_requirement_ids?: string[];
     /** "Watch this band for their next tour" — TOUR-FINDER-SPEC §21. */
     watch_band_org_id?: string;
-    /** "Offer goodwill credit" — docs/GOODWILL-CREDIT-SPEC.md §4.1. */
+    /** "Give them a voucher" (once "Offer goodwill credit") — docs/GOODWILL-CREDIT-SPEC.md §4.1, §17. */
     goodwill?: GoodwillTickValue;
   }) => void;
   onCancel: () => void;

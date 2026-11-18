@@ -407,7 +407,7 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
         )}
         {isManager && (
           <div className={notBack ? '' : 'ml-auto'}>
-            <RecordActionsMenu actions={[{ label: 'Offer goodwill credit…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setOfferingGoodwill(true) }]} />
+            <RecordActionsMenu actions={[{ label: 'Give a voucher…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setOfferingGoodwill(true) }]} />
           </div>
         )}
       </div>
@@ -541,15 +541,15 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
           {goodwillHere.map(g => (
             <div key={g.id} className="flex justify-between gap-3 py-1.5 border-b border-gray-100" title={g.check_problem || undefined}>
               <span className={g.status === 'used' && !g.check_problem ? 'text-gray-800' : 'text-amber-800'}>
-                Goodwill {g.ref}{' '}
+                Voucher {g.voucher_code || g.ref}{' '}
                 <span className="text-xs text-gray-500">
                   {g.status === 'used'
                     ? (g.used_how === 'credit_note' ? `credit note ${g.used_hh_ref ?? ''}` : 'off the hire') + ' — already in the figures'
-                    : 'reserved — not in HireHop yet'}
+                    : 'held — not in HireHop yet'}
                 </span>
                 {g.check_problem && <span className="block text-xs">⚠ {g.check_problem}</span>}
               </span>
-              <span className="tabular-nums text-gray-600">{money(g.used_amount_ex_vat ?? g.reserved_amount_ex_vat ?? g.amount_ex_vat)}+VAT</span>
+              <span className="tabular-nums text-gray-600">{money(g.used_amount_ex_vat ?? g.reserved_amount_ex_vat ?? g.amount_ex_vat)} + VAT</span>
             </div>
           ))}
           {paidSoFar >= PENNY && (

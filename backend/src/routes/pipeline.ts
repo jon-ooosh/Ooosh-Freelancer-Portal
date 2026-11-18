@@ -43,6 +43,7 @@ import {
 import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
 import { forClientContext } from '../services/endorsements';
 import { retireDoneBells } from '../services/notification-resolve';
+import { rewardReferralForJob } from '../services/referrals';
 import { startWatchFromCloseOut } from '../services/leads/band-watch';
 import { HEARD_ABOUT_VALUES, getMarketingSource, saveMarketingSource, setHeardAbout } from '../services/marketing-source';
 import { isReturningClient } from '../services/returning-client';
@@ -781,6 +782,12 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     if (pipeline_status === 'completed' && typeof send_review_email === 'boolean') {
       await setJobReviewSkip(jobId, !send_review_email, req.user!.id)
         .catch((err) => console.error('[pipeline] review email tick not saved (non-fatal):', err));
+    }
+
+    // A referral on this job: thank the referrer now — their voucher and Jon's email
+    // (docs/BUSINESS-FIGURES-SPEC.md §8d). In the background; never fails the status change.
+    if (pipeline_status === 'completed' && fromStatus !== 'completed') {
+      void rewardReferralForJob(jobId);
     }
 
     // Log completion retro as a separate interaction (so it's visible on timeline)

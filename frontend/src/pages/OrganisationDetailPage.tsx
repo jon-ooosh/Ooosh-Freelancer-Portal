@@ -602,7 +602,7 @@ function OrganisationDetailContent() {
             {/* Do Not Hire is set in Edit → Working Terms; Merge and Delete are rare, so they live in ⋯ */}
             <RecordActionsMenu
               actions={[
-                ...(isAdmin ? [{ label: 'Offer goodwill credit…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setShowGoodwill(true) }] : []),
+                ...(isAdmin ? [{ label: 'Give a voucher…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setShowGoodwill(true) }] : []),
                 ...(isAdmin ? [{ label: 'Merge into another…', title: 'Merge this organisation into another', onClick: () => setShowMergeModal(true) }] : []),
                 { label: 'Delete', danger: true, onClick: () => { if (confirm(`Delete ${org.name}?`)) handleDelete(); } },
               ]}
@@ -753,7 +753,7 @@ function OrganisationDetailContent() {
               { key: 'rehearsal', label: 'Rehearsals', secondary: true, hasContent: tabPresence.rehearsal },
               { key: 'pcns', label: pcnCount ? `PCNs (${pcnCount})` : 'PCNs', secondary: true, hasContent: tabPresence.pcns },
               { key: 'ooh', label: 'OOH', secondary: true, hasContent: tabPresence.ooh },
-              { key: 'goodwill', label: 'Goodwill', secondary: true, hasContent: tabPresence.goodwill },
+              { key: 'goodwill', label: 'Vouchers', secondary: true, hasContent: tabPresence.goodwill },
             ]}
           />
         );

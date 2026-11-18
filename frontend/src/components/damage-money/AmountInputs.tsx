@@ -2,7 +2,8 @@
  * Net / VAT / gross, entered like the Costs form: "20% VAT" works the other
  * two out from whichever you type, "No VAT" keeps net = gross, "Manual" lets
  * you type all three (the save refuses three that don't add up).
- * Used by the damage Money card (docs/INCIDENT-CLAIMS-SPEC.md §23).
+ * Used by the damage Money card (docs/INCIDENT-CLAIMS-SPEC.md §23) and, 20% only
+ * (`only20`), by every voucher form (docs/GOODWILL-CREDIT-SPEC.md §17).
  */
 
 export type VatMode = 'vat20' | 'none' | 'manual';
@@ -66,11 +67,13 @@ function recalc(mode: VatMode, field: keyof AmountStrings, value: string, prev: 
   return next;
 }
 
-export function AmountInputs({ value, mode, onChange, onModeChange }: {
+export function AmountInputs({ value, mode, onChange, onModeChange, only20 = false }: {
   value: AmountStrings;
   mode: VatMode;
   onChange: (v: AmountStrings) => void;
   onModeChange: (m: VatMode) => void;
+  /** Always 20% VAT, no mode buttons — a voucher: type either side, the other follows. */
+  only20?: boolean;
 }) {
   const box = 'w-full border border-slate-300 rounded px-2 py-1 text-sm';
   const setMode = (m: VatMode) => {
@@ -92,7 +95,7 @@ export function AmountInputs({ value, mode, onChange, onModeChange }: {
   );
   return (
     <div className="space-y-1.5">
-      <div className="flex gap-1">
+      {!only20 && <div className="flex gap-1">
         {([['vat20', '20% VAT'], ['none', 'No VAT'], ['manual', 'Manual']] as const).map(([m, label]) => (
           <button
             key={m}
@@ -103,7 +106,7 @@ export function AmountInputs({ value, mode, onChange, onModeChange }: {
             {label}
           </button>
         ))}
-      </div>
+      </div>}
       <div className="grid grid-cols-3 gap-2">
         {field('net', 'Net (ex VAT)')}
         {field('vat', 'VAT', mode !== 'manual')}

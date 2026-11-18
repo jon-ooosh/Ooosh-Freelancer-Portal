@@ -7,7 +7,7 @@ jest.mock('../job-issues', () => ({ logIssueEvent: jest.fn(async () => undefined
 
 import { query } from '../../config/database';
 import {
-  reserveGoodwill, markGoodwillApplied, withdrawGoodwill, offerGoodwill, EFFECTIVE_STATUS_SQL, GoodwillError,
+  reserveGoodwill, markGoodwillApplied, withdrawGoodwill, offerGoodwill, EFFECTIVE_STATUS_SQL, GoodwillError, voucherAmounts,
 } from '../goodwill-credits';
 
 const mockQuery = query as jest.MockedFunction<any>;
@@ -35,8 +35,10 @@ describe('effective status', () => {
 });
 
 describe('offerGoodwill', () => {
-  it('refuses a credit for nobody, or for an org AND a person', async () => {
-    await expect(offerGoodwill({ amount_ex_vat: 10, reason: 'x', source_kind: 'organisation' }, USER)).rejects.toBeInstanceOf(GoodwillError);
+  // Since §17 every credit is a voucher, which may be held by nobody ("anyone with the
+  // code" — only Money › Vouchers offers that; the goodwill route still insists on one).
+  it('refuses a voucher for an org AND a person, or with no value', async () => {
+    await expect(offerGoodwill({ amount_ex_vat: 0, reason: 'x', source_kind: 'voucher' }, USER)).rejects.toBeInstanceOf(GoodwillError);
     await expect(offerGoodwill({ organisation_id: 'o1', person_id: 'p1', amount_ex_vat: 10, reason: 'x', source_kind: 'organisation' }, USER))
       .rejects.toBeInstanceOf(GoodwillError);
     expect(mockQuery).not.toHaveBeenCalled();
@@ -68,7 +70,7 @@ describe('reserveGoodwill', () => {
 
   it('refuses more than the credit is worth', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [row()] });
-    await expect(reserveGoodwill('g1', { job_id: JOB, reserved_for: 'hire', amount_ex_vat: 100.5 }, USER)).rejects.toThrow(/only worth £100.00/);
+    await expect(reserveGoodwill('g1', { job_id: JOB, reserved_for: 'hire', amount_ex_vat: 100.5 }, USER)).rejects.toThrow(/only worth £100 \+ VAT = £120/);
   });
 
   it('loses the race cleanly when someone else reserved it first', async () => {
@@ -108,7 +110,7 @@ describe('markGoodwillApplied', () => {
     await markGoodwillApplied('g1', null, USER);
     expect(mockQuery.mock.calls[1][1][1]).toBe(80);
     const noteText = mockQuery.mock.calls.find((c: any[]) => String(c[0]).includes('INSERT INTO interactions (job_id'))![1][1];
-    expect(noteText).toContain('The other £20.00+VAT lapses');
+    expect(noteText).toContain('The other £20.00 + VAT lapses');
   });
 });
 
@@ -116,5 +118,18 @@ describe('withdrawGoodwill', () => {
   it('refuses a used credit', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [row({ status: 'used' })] });
     await expect(withdrawGoodwill('g1', 'oops', USER)).rejects.toThrow(/already used/);
+  });
+});
+
+describe('voucherAmounts (one code, inc and ex VAT — spec §17)', () => {
+  it('keeps both when the net / VAT / gross input sends both', () => {
+    expect(voucherAmounts(16.67, 20)).toEqual({ ex: 16.67, inc: 20 });
+  });
+  it('works the other out from one', () => {
+    expect(voucherAmounts(null, 20)).toEqual({ ex: 16.67, inc: 20 });
+    expect(voucherAmounts(250, null)).toEqual({ ex: 250, inc: 300 });
+  });
+  it('refuses no value at all', () => {
+    expect(() => voucherAmounts(0, null)).toThrow(GoodwillError);
   });
 });

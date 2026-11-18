@@ -329,7 +329,8 @@ lead and a can of Coke, that is a lot of risk for a rare convenience.
 operator who wants the total to land on £50 discounts one line until it does. Same
 outcome, no apportionment question, and the discount is visible on the line it came off.
 
-**Vouchers (17 Nov 2026, `GOODWILL-CREDIT-SPEC.md` §16) stay per-line.** "🎟️ Voucher code" (staff till only)
+**Vouchers (17 Nov 2026, `GOODWILL-CREDIT-SPEC.md` §16–17) stay per-line.** "🎟️ Voucher code" (staff till and,
+since 18 Nov, the front-desk kiosk; never the sitter till)
 has the server spread the voucher's inc-VAT value across the basket as lowered LINE prices, dearest line first
 (`voucher-rules.ts` `spreadVoucher()`) — each line keeps its own VAT rate, so there is no apportionment question
 and nothing here changes. The code rides with the sale (`voucherCode`), which uses the voucher up in the same

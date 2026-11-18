@@ -1,9 +1,9 @@
 /**
- * Vouchers (docs/GOODWILL-CREDIT-SPEC.md §16) — a goodwill credit with a code on it.
+ * Vouchers (docs/GOODWILL-CREDIT-SPEC.md §16–17) — every money-off credit, each with one code.
  * Logic in services/vouchers.ts; withdrawing one is the usual POST /goodwill/:id/withdraw.
  * Never a public route: only staff check a code.
  *
- *   GET  /                 manager — every voucher, newest first (Money › Vouchers)
+ *   GET  /                 manager — every voucher (goodwill ones included), newest first (Money › Vouchers)
  *   POST /                 manager — make one or more { value_inc_vat, reason, expires_on?, person_id?, organisation_id?, count? }
  *   GET  /lookup?code=     staff   — the voucher behind a code, and why it can't be used (if it can't)
  *   POST /hold-on-job      staff   — { code, job_id } hold the whole voucher for this hire
@@ -37,7 +37,9 @@ router.get('/', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Resp
 });
 
 const makeSchema = z.object({
-  value_inc_vat: z.number().positive().max(10000),
+  value_inc_vat: z.number().positive().max(120000),
+  /** The net / VAT / gross input's net (optional — worked out from the gross if left out). */
+  amount_ex_vat: z.number().positive().max(100000).nullable().optional(),
   reason: z.string().trim().min(1).max(2000),
   expires_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   person_id: z.string().guid().nullable().optional(),
@@ -49,7 +51,7 @@ const makeSchema = z.object({
 router.post('/', authorize(...MANAGER_ROLES), validate(makeSchema), async (req: AuthRequest, res: Response) => {
   try {
     const made = await makeVouchers({
-      valueIncVat: req.body.value_inc_vat, reason: req.body.reason, expiresOn: req.body.expires_on ?? null,
+      valueIncVat: req.body.value_inc_vat, amountExVat: req.body.amount_ex_vat ?? null, reason: req.body.reason, expiresOn: req.body.expires_on ?? null,
       personId: req.body.person_id ?? null, organisationId: req.body.organisation_id ?? null, count: req.body.count ?? 1,
     }, req.user!.id);
     for (const g of made) await logAudit(req.user!.id, 'goodwill_credits', g.id, 'create', null, { voucher: true, ...req.body });

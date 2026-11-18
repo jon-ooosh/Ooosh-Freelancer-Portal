@@ -11,7 +11,8 @@ import {
 } from '../services/goodwill-credits';
 import { checkReservedGoodwill } from '../services/goodwill-check';
 
-// Goodwill credit (docs/GOODWILL-CREDIT-SPEC.md). Managers offer, change, withdraw
+// Vouchers, once "goodwill credit" (docs/GOODWILL-CREDIT-SPEC.md, §17: every credit is a
+// voucher with one code). Managers offer, change, withdraw
 // and take a credit off a job; any staff role reserves it on a job and marks it
 // applied (jon, 16 Nov 2026). All logic lives in services/goodwill-credits.ts.
 const router = Router();
@@ -68,7 +69,7 @@ router.post('/:id/check', async (req: AuthRequest, res: Response) => {
     const id = String(req.params.id);
     if (!isUuid(id)) { res.status(400).json({ error: 'Bad id' }); return; }
     const g = await checkReservedGoodwill(id, 'live');  // the one place it reads HireHop live — a person asked
-    if (!g) { res.status(404).json({ error: 'Goodwill credit not found' }); return; }
+    if (!g) { res.status(404).json({ error: 'Voucher not found' }); return; }
     res.json({ data: g });
   } catch (err) { fail(res, err, 'check'); }
 });
@@ -85,6 +86,8 @@ const offerSchema = z.object({
   organisation_id: uuid.optional().nullable(),
   person_id: uuid.optional().nullable(),
   amount_ex_vat: amount,
+  /** The net / VAT / gross input's gross (§17); left out, it's the ex-VAT amount + 20%. */
+  value_inc_vat: z.number().positive().max(120000).optional().nullable(),
   reason: z.string().trim().min(1).max(2000),
   source_kind: z.enum(['close_out', 'problem', 'cancellation', 'organisation', 'person']),
   source_job_id: uuid.optional().nullable(),
@@ -98,7 +101,7 @@ const offerSchema = z.object({
 
 router.post('/', authorize(...MANAGER_ROLES), validate(offerSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const g = await offerGoodwill(req.body, req.user!.id);
+    const g = await offerGoodwill({ ...req.body, voucher_value_inc_vat: req.body.value_inc_vat ?? null }, req.user!.id);
     await logAudit(req.user!.id, 'goodwill_credits', g.id, 'create', null, req.body);
     res.status(201).json({ data: g });
   } catch (err) { fail(res, err, 'offer'); }

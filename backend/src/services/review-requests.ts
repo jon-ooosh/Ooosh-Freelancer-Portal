@@ -172,14 +172,14 @@ async function recipientFor(jobId: string): Promise<Recipient | null> {
  * Never fails the review email — on any error it falls back to "mention your name".
  */
 async function referralLineVars(personId: string | null, test: boolean): Promise<Record<string, string>> {
-  const none = { refLink: '', refLinkText: '', refBefore: '', refAfter: '', noRefLink: 'yes' };
+  const none = { refLink: '', refLinkText: '', refBefore: '', refAfter: '', refTail: '', noRefLink: 'yes' };
   try {
     if (!personId && !test) return none;
     const link = personId
       ? await getOrCreateReferralLink(personId, null)
       : { url: referralUrl('sam-7k2p'), urlText: referralUrlText('sam-7k2p') };
     const line = reviewReferralLine(await currentOffer());
-    return { refLink: link.url, refLinkText: link.urlText, refBefore: line.before, refAfter: line.after, noRefLink: '' };
+    return { refLink: link.url, refLinkText: link.urlText, refBefore: line.before, refAfter: line.after, refTail: line.tail, noRefLink: '' };
   } catch (err) {
     console.error('[review-requests] referral link not added (non-fatal):', err);
     return none;

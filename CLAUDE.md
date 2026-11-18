@@ -291,7 +291,7 @@ recovery codes are admins only, shown once. The banner's "Set up now" opens the 
 spec §9, 29 Oct 2026 — a one-time code from Settings, then the `op_kiosk_device` cookie; checked BEFORE the PIN;
 `system_settings.kiosk_allowed_ips` is optional since the yard's broadband address changed and locked the warehouse out), the
 till is held to `KIOSK_TILL_ALLOW` on `routes/shop.ts` (sales only, cash or reader, each naming a person
-from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), the reader behind
+from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`; vouchers too since 18 Nov 2026), the reader behind
 `stripe_terminal_kiosk`. **Spec §8 is what shipped and where it differs from the design.**
 
 **CLOSED, 11 Nov 2026:** `docs/FREELANCER-PORTAL-SPEC.md` — the freelancer portal programme. Done:
@@ -320,11 +320,14 @@ credit note) and OP never writes it to HireHop. Managers offer (⋯ on the close
 org / person pages; a tick on Cancel Job); any staff reserves it from the Client History note and marks it
 applied. Expired and "freed by a lost / cancelled job" are DERIVED on read (`EFFECTIVE_STATUS_SQL`), never swept.
 §13 is phase 1; **§14 phase 2**: `services/goodwill-check.ts` — the code in a line's Item Note / Item Memo (`ADDITIONAL` / `TECHNICAL`, kept on `jobs.line_items` with the prices) or an APPROVED credit note marks it used; job header chips + a close-out ledger line. **§15: it makes almost no HireHop calls of its own** — hourly (:50) from the lines the sync already stored, credit notes from the Money tab summary's own billing read (`applyGoodwillFromBilling()`) plus one billing read a day per waiting invoice credit (07:40); only "Check HireHop now" reads live.
-**§16 is VOUCHERS** (17 Nov 2026, mig 349): a goodwill credit with a random 12-character code
-(`voucher_code`, `K7QM-4XWP-C9TR`) and a face value INC VAT (`voucher_value_inc_vat`), single use, may be held by
-nobody. **The code is the secret, the GW ref stays internal** — only staff look a code up (the till, "Have a voucher
-code?" on a job), never a public route. Made on Money › Vouchers (admin + managers) and by referrals. At the shop
-till (**staff till only** — never kiosk or sitter) it is spread as lowered line prices and used up in the sale's own
+**§16 is VOUCHERS** (17 Nov 2026, mig 349): a random 12-character code (`voucher_code`, `K7QM-4XWP-C9TR`) and a face
+value INC VAT (`voucher_value_inc_vat`), single use, may be held by nobody. **§17 (18 Nov 2026, mig 350): there is ONE
+thing — every credit is a voucher with one code**, used everywhere (the client quotes it, staff type it into OP, it goes
+in HireHop's Item Note as "Voucher CODE"); screens say "voucher" (org / person tab **Vouchers**, menus "Give a voucher…"),
+values read "£16.67 + VAT = £20" and are entered with the Costs-style Net · VAT · Gross boxes. **The GW ref is internal
+only** — old GW refs still work (read-back + lookup). Only staff look a code up (the till, "Have a voucher code?" on a
+job), never a public route. Money › Vouchers (admin + managers) lists every voucher. At the shop till (**staff till and
+the front-desk kiosk — never the sitter till**) it is spread as lowered line prices and used up in the sale's own
 transaction; its own amount is outside the role's discount ceiling; a cancelled / refunded sale gives it back.
 
 **PHASES 1–3 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
@@ -358,11 +361,12 @@ Completed, not when completed >10 days after the return, once a year per client 
 the Completion modal, the button via `go.oooshtours.co.uk/google-review` (mig 346), a "Don't ask me again" page with a button (never acts on the click — mail scanners open links), Reply-To jon@.
 **§8d is the referral scheme** (mig 347, `services/referrals.ts` + pure `referral-rules.ts`,
 Marketing › Referrals): a referral belongs to a PERSON; personal links `go.oooshtours.co.uk/r/<code>` travel as
-`ol=ref-<code>`; "Referred by" on the job; only a new client, once; both rewards are VOUCHERS (goodwill credits with a
-code, source `referral`, amounts inc VAT): the friend's held for their hire and emailed in Jon's words
-(`referral_welcome_voucher`, never to info@), the referrer's made at "Thank-you given" with its code in email 3;
-thank-you due when the friend's hire is Completed — a To Do, never automatic; the referrer's
-"someone's been in touch" email is OFF until switched on (`referral_emails_enabled`). §8b is what's left.
+`ol=ref-<code>`; "Referred by" on the job; only a new client, once; both rewards are VOUCHERS (source `referral`,
+amounts inc VAT) and **both automatic** (18 Nov 2026): the friend's made when the referral is linked, held for their
+hire (`referral_welcome_voucher`, never to info@); the referrer's when the friend's hire is Completed
+(`rewardReferral()` — at once on OP's Completed, else the 10:20 run) with its code in email 3. Taking a referral off or
+declining it withdraws an unused welcome voucher. All four emails are OFF until switched on
+(`referral_emails_enabled`); the vouchers are made either way. §8b is what's left.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
@@ -548,7 +552,7 @@ existing definition:
 | The client's payment portal link (and its hash) | `services/payment-portal-link.ts` `getPaymentPortalLink()` — computed live from HireHop, never stored; the hash changes with the hire dates |
 | A card-reader (S700) payment — sending, waiting, recording, test mode, who may use it | `services/stripe-terminal.ts` — `terminal_sessions` is the record AND the once-only gate; recorded through `recordPayment()` as `stripe_gbp` + `source = 'stripe_terminal'`; gated by `system_settings.stripe_terminal_roles` |
 | Which jobs belong to the same festival? Its value, lead, default dates | `services/job-projects.ts` (`getProject()` roll-ups; quote options inside count once) |
-| A referral — who recommended this client, does it count, the personal link, the thank-you, the friend's welcome credit | `services/referrals.ts` — `referralBlockReason()` is every rule; wording / codes in `referral-rules.ts`; the welcome credit goes through `goodwill-credits.ts`, never its own money path |
+| A referral — who recommended this client, does it count, the personal link, the thank-you, the friend's welcome voucher | `services/referrals.ts` — `referralBlockReason()` is every rule; both vouchers are automatic (`autoWelcomeVoucher()` on linking, `rewardReferral()` on Completed); wording / codes in `referral-rules.ts`; vouchers go through `goodwill-credits.ts`, never their own money path |
 | Jon's review email — who, when, why not, the "don't send" tick, opt-outs | `services/review-requests.ts` — one `review_requests` row per job, written before the send; `reviewDecision()` is every rule |
 | Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
 | A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee. Record refuses (409) when the same money is already on the job by hand — "Link to that payment" or "Record anyway" |

@@ -1,7 +1,9 @@
 /**
- * Goodwill credit — "£X + VAT off your next hire (or what you owe), use by …".
- * docs/GOODWILL-CREDIT-SPEC.md. Every read and write of `goodwill_credits` goes
- * through here.
+ * Vouchers (once "goodwill credit") — "£X + VAT = £Y off your next hire, in the shop, or
+ * what you owe, use by …". docs/GOODWILL-CREDIT-SPEC.md; since §17 (18 Nov 2026) every
+ * credit is a voucher with ONE code (`voucher_code`), used everywhere: the client quotes
+ * it, staff type it into OP, it goes in HireHop's line note. The GW ref is an internal id
+ * only (old GW refs still work). Every read and write of `goodwill_credits` goes through here.
  *
  * A PROMISE, not money: nothing here touches HireHop or Xero. Staff apply it by
  * hand in HireHop with the GW code in the line's note / credit note's description.
@@ -104,10 +106,20 @@ const SELECT = `
     LEFT JOIN people op ON op.id = ou.person_id`;
 
 const money = (n: number) => `£${n.toFixed(2)}`;
-const plusVat = (n: number) => `${money(n)}+VAT (${money(Math.round(n * 120) / 100)})`;
-/** How a credit's value reads on a timeline: a voucher by its face value (inc VAT). */
+/** £20 → "£20", £16.67 → "£16.67". */
+const pounds = (n: number) => `£${n.toFixed(Math.round(n * 100) % 100 ? 2 : 0)}`;
+/** "£16.67 + VAT = £20" — how every voucher's value reads (jon, 18 Nov 2026). */
 export function creditValueText(g: { amount_ex_vat: number; voucher_value_inc_vat: number | null }): string {
-  return g.voucher_value_inc_vat != null ? `${money(g.voucher_value_inc_vat)} voucher (inc VAT)` : plusVat(g.amount_ex_vat);
+  const inc = g.voucher_value_inc_vat ?? Math.round(g.amount_ex_vat * 120) / 100;
+  return `${pounds(g.amount_ex_vat)} + VAT = ${pounds(inc)}`;
+}
+/** The one code a person sees and types (the GW ref only for a credit that somehow has none). */
+export function creditCode(g: { voucher_code: string | null; ref: string }): string {
+  return g.voucher_code || g.ref;
+}
+/** What staff put in a HireHop line's Item Note / a credit note's description. */
+export function hireHopNoteFor(g: { voucher_code: string | null; ref: string }): string {
+  return `Voucher ${creditCode(g)}`;
 }
 /** 1 → '1st', 2 → '2nd', 11 → '11th', 22 → '22nd'. */
 function ordinal(n: number): string {
@@ -144,9 +156,16 @@ export async function getGoodwillByVoucherCode(code: string): Promise<GoodwillCr
   return (r.rows[0] as GoodwillCredit) || null;
 }
 
-/** Every voucher, newest first (Money › Vouchers). */
+/** By any code a person might type: the voucher code (normalised) or an old GW ref. */
+export async function getGoodwillByAnyCode(code: string): Promise<GoodwillCredit | null> {
+  const c = code.trim().toUpperCase();
+  if (/^GW-\d{4,}$/.test(c)) return getGoodwillByRef(c);
+  return getGoodwillByVoucherCode(c);
+}
+
+/** Every voucher, newest first (Money › Vouchers) — goodwill ones included since §17. */
 export async function listVoucherCredits(limit = 300): Promise<GoodwillCredit[]> {
-  return (await query(`${SELECT} WHERE g.voucher_code IS NOT NULL ORDER BY g.offered_at DESC LIMIT $1`, [limit])).rows;
+  return (await query(`${SELECT} ORDER BY g.offered_at DESC LIMIT $1`, [limit])).rows;
 }
 
 /** Reserved or used on this job — the job's goodwill chip and the close-out ledger line. */
@@ -252,18 +271,30 @@ export interface OfferInput {
   source_issue_id?: string | null;
   expires_on?: string | null;
   /**
-   * Make it a VOUCHER (spec §16): a random code, this face value INC VAT (amount_ex_vat is
-   * then worked out from it and ignored if sent). A voucher may be held by nobody.
+   * The face value INC VAT. Sent with `amount_ex_vat` (the net / VAT / gross input) both
+   * are kept as typed; sent alone, the ex-VAT figure is worked out from it; left out, it is
+   * the ex-VAT amount + 20%.
    */
   voucher_value_inc_vat?: number | null;
 }
 
+/** The pair (ex VAT, inc VAT) a new credit is stored with. Exported for the tests. */
+export function voucherAmounts(exVat: number | null | undefined, incVat: number | null | undefined): { ex: number; inc: number } {
+  const ex = exVat != null && exVat > 0 ? Math.round(exVat * 100) / 100 : null;
+  const inc = incVat != null && incVat > 0 ? Math.round(incVat * 100) / 100 : null;
+  if (ex != null && inc != null) return { ex, inc };
+  if (inc != null) return { ex: exVatOf(inc), inc };
+  if (ex != null) return { ex, inc: Math.round(ex * 120) / 100 };
+  throw new GoodwillError('Say how much it is worth');
+}
+
+/**
+ * Make a voucher (every credit is one since §17): its own random code. Held by an org OR a
+ * person — or by nobody ("anyone with the code"), which only Money › Vouchers offers.
+ */
 export async function offerGoodwill(input: OfferInput, userId: string): Promise<GoodwillCredit> {
-  const voucher = input.voucher_value_inc_vat != null;
-  if (voucher && !(input.voucher_value_inc_vat! > 0)) throw new GoodwillError('A voucher needs a value');
-  if (input.organisation_id && input.person_id) throw new GoodwillError('A credit is for an organisation OR a person — pick one');
-  if (!voucher && !input.organisation_id && !input.person_id) throw new GoodwillError('A credit is for an organisation OR a person — pick one');
-  const amountExVat = voucher ? exVatOf(input.voucher_value_inc_vat!) : input.amount_ex_vat;
+  if (input.organisation_id && input.person_id) throw new GoodwillError('A voucher is for an organisation OR a person — pick one');
+  const { ex: amountExVat, inc } = voucherAmounts(input.amount_ex_vat, input.voucher_value_inc_vat);
   let id: string | null = null;
   // A fresh code each try — two the same is vanishingly unlikely, but the column is UNIQUE.
   for (let attempt = 0; attempt < 5 && !id; attempt++) {
@@ -277,28 +308,27 @@ export async function offerGoodwill(input: OfferInput, userId: string): Promise<
         [input.organisation_id || null, input.person_id || null, amountExVat, input.reason.trim(),
           input.source_kind, input.source_job_id || null, input.source_issue_id || null, userId,
           input.expires_on || ukDatePlus(365),
-          voucher ? makeVoucherCode() : null, voucher ? input.voucher_value_inc_vat : null],
+          makeVoucherCode(), inc],
       );
       id = r.rows[0].id;
     } catch (err) {
-      if (!(voucher && (err as { code?: string })?.code === '23505' && String((err as { constraint?: string }).constraint || '').includes('voucher_code'))) throw err;
+      if (!((err as { code?: string })?.code === '23505' && String((err as { constraint?: string }).constraint || '').includes('voucher_code'))) throw err;
     }
   }
   if (!id) throw new GoodwillError('Could not make a voucher code — please try again', 500);
   const g = (await getRow(id))!;
-  await noteGoodwill(g, voucher
-    ? `🎟️ Voucher ${g.ref} made${g.organisation_id || g.person_id ? ` for ${g.owner_name}` : ''}: ${creditValueText(g)}, single use, use by ${day(g.expires_on)}. Why: ${g.reason}`
-    : `🎁 Goodwill credit ${g.ref} offered to ${g.owner_name}: ${plusVat(g.amount_ex_vat)} off a future hire or money owed, use by ${day(g.expires_on)}. Why: ${g.reason}`,
-  userId, [g.source_job_id]);
+  await noteGoodwill(g,
+    `🎟️ Voucher ${creditCode(g)} made${g.organisation_id || g.person_id ? ` for ${g.owner_name}` : ''}: ${creditValueText(g)}, single use, use by ${day(g.expires_on)}. Why: ${g.reason}`,
+    userId, [g.source_job_id]);
   return g;
 }
 
 /** A manager's edit — amount, reason, use-by. Not once it's used or withdrawn. */
 export async function editGoodwill(id: string, patch: { amount_ex_vat?: number; reason?: string; expires_on?: string }, userId: string): Promise<GoodwillCredit> {
   const before = await getRow(id);
-  if (!before) throw new GoodwillError('Goodwill credit not found', 404);
+  if (!before) throw new GoodwillError('Voucher not found', 404);
   if (before.status === 'used' || before.status === 'withdrawn') throw new GoodwillError(`This credit is ${before.status} — it can't be changed`);
-  if (before.voucher_code && patch.amount_ex_vat !== undefined && Math.abs(patch.amount_ex_vat - before.amount_ex_vat) > 0.004) {
+  if (patch.amount_ex_vat !== undefined && Math.abs(patch.amount_ex_vat - before.amount_ex_vat) > 0.004) {
     throw new GoodwillError("A voucher's value is what the client was told — withdraw it and make a new one");
   }
   const sets: string[] = [];
@@ -314,7 +344,7 @@ export async function editGoodwill(id: string, patch: { amount_ex_vat?: number; 
     patch.amount_ex_vat !== undefined && g.amount_ex_vat !== before.amount_ex_vat ? `amount ${money(before.amount_ex_vat)} → ${money(g.amount_ex_vat)}+VAT` : '',
     patch.expires_on !== undefined && g.expires_on !== before.expires_on ? `use by ${day(before.expires_on)} → ${day(g.expires_on)}` : '',
   ].filter(Boolean).join(', ');
-  if (changes) await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} changed: ${changes}`, userId, []);
+  if (changes) await noteGoodwill(g, `🎟️ Voucher ${creditCode(g)} changed: ${changes}`, userId, []);
   return g;
 }
 
@@ -328,13 +358,13 @@ export interface ReserveInput {
 /** "Use on this job" — any staff. Holds it for one job so nobody uses it twice. */
 export async function reserveGoodwill(id: string, input: ReserveInput, userId: string): Promise<GoodwillCredit> {
   const before = await getRow(id);
-  if (!before) throw new GoodwillError('Goodwill credit not found', 404);
+  if (!before) throw new GoodwillError('Voucher not found', 404);
   if (before.status !== 'offered') {
     throw new GoodwillError(before.status === 'reserved'
       ? `It's already reserved on job ${before.reserved_job_number ?? ''}`.trim()
       : `This credit is ${before.status}`);
   }
-  if (input.amount_ex_vat > before.amount_ex_vat + 0.004) throw new GoodwillError(`It's only worth ${money(before.amount_ex_vat)}+VAT`);
+  if (input.amount_ex_vat > before.amount_ex_vat + 0.004) throw new GoodwillError(`It's only worth ${creditValueText(before)}`);
   const job = await query(`SELECT id FROM jobs WHERE id = $1 AND is_deleted = false`, [input.job_id]);
   if (job.rows.length === 0) throw new GoodwillError('Job not found', 404);
   // "Still free to use" is repeated in the WHERE, so two people reserving at once can't both win.
@@ -350,16 +380,16 @@ export async function reserveGoodwill(id: string, input: ReserveInput, userId: s
   if (r.rows.length === 0) throw new GoodwillError('Someone else has just used or reserved it — reload and check', 409);
   const g = (await getRow(id))!;
   const where = g.reserved_for === 'invoice'
-    ? `against ${g.reserved_invoice_number || 'an invoice'} (a credit note in HireHop with ${g.ref} in its description)`
-    : `off the hire (a discount in HireHop with "Goodwill credit ${g.ref}" in the line's note)`;
-  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} reserved on this job: ${money(input.amount_ex_vat)}+VAT ${where}.`, userId, [g.reserved_job_id]);
+    ? `against ${g.reserved_invoice_number || 'an invoice'} (a credit note in HireHop with "${hireHopNoteFor(g)}" in its description)`
+    : `off the hire (a discount in HireHop with "${hireHopNoteFor(g)}" in the line's Item Note)`;
+  await noteGoodwill(g, `🎟️ Voucher ${creditCode(g)} held on this job: ${money(input.amount_ex_vat)} + VAT ${where}.`, userId, [g.reserved_job_id]);
   return g;
 }
 
 /** Take a reservation off a job — a manager. Back to offered; the use-by date doesn't move. */
 export async function unreserveGoodwill(id: string, userId: string): Promise<GoodwillCredit> {
   const before = await getRow(id);
-  if (!before) throw new GoodwillError('Goodwill credit not found', 404);
+  if (!before) throw new GoodwillError('Voucher not found', 404);
   if (before.status !== 'reserved') throw new GoodwillError('It isn\'t reserved on a job');
   await query(
     `UPDATE goodwill_credits SET status = 'offered', reserved_job_id = NULL, reserved_for = NULL,
@@ -369,17 +399,17 @@ export async function unreserveGoodwill(id: string, userId: string): Promise<Goo
     [id],
   );
   const g = (await getRow(id))!;
-  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} taken off job ${before.reserved_job_number ?? ''} — it's free to use again.`, userId, [before.reserved_job_id]);
+  await noteGoodwill(g, `🎟️ Voucher ${creditCode(g)} taken off job ${before.reserved_job_number ?? ''} — it's free to use again.`, userId, [before.reserved_job_id]);
   return g;
 }
 
 /** "Mark as applied" — any staff, once it's in HireHop. Used; whatever it didn't take lapses. */
 export async function markGoodwillApplied(id: string, amountExVat: number | null, userId: string): Promise<GoodwillCredit> {
   const before = await getRow(id);
-  if (!before) throw new GoodwillError('Goodwill credit not found', 404);
+  if (!before) throw new GoodwillError('Voucher not found', 404);
   if (before.status !== 'reserved') throw new GoodwillError('Reserve it on a job first');
   const amount = amountExVat ?? before.reserved_amount_ex_vat ?? before.amount_ex_vat;
-  if (amount <= 0 || amount > before.amount_ex_vat + 0.004) throw new GoodwillError(`Between £0.01 and ${money(before.amount_ex_vat)}`);
+  if (amount <= 0 || amount > before.amount_ex_vat + 0.004) throw new GoodwillError(`Between £0.01 and ${money(before.amount_ex_vat)} + VAT`);
   await query(
     `UPDATE goodwill_credits SET status = 'used', used_amount_ex_vat = $2, used_at = NOW(), used_by = $3,
             used_how = 'manual', check_problem = NULL, updated_at = NOW()
@@ -388,7 +418,7 @@ export async function markGoodwillApplied(id: string, amountExVat: number | null
   );
   const g = (await getRow(id))!;
   const lapsed = before.amount_ex_vat - amount;
-  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} applied on this job: ${money(amount)}+VAT off.${lapsed > 0.004 ? ` The other ${money(lapsed)}+VAT lapses.` : ''}`,
+  await noteGoodwill(g, `🎟️ Voucher ${creditCode(g)} applied on this job: ${money(amount)} + VAT off.${lapsed > 0.004 ? ` The other ${money(lapsed)} + VAT lapses.` : ''}`,
     userId, [g.reserved_job_id]);
   return g;
 }
@@ -396,7 +426,7 @@ export async function markGoodwillApplied(id: string, amountExVat: number | null
 /** Withdraw — a manager, with a reason. Never deleted. */
 export async function withdrawGoodwill(id: string, reason: string, userId: string): Promise<GoodwillCredit> {
   const before = await getRow(id);
-  if (!before) throw new GoodwillError('Goodwill credit not found', 404);
+  if (!before) throw new GoodwillError('Voucher not found', 404);
   if (before.status === 'used' || before.status === 'withdrawn') throw new GoodwillError(`It's already ${before.status}`);
   await query(
     `UPDATE goodwill_credits SET status = 'withdrawn', withdrawn_by = $2, withdrawn_at = NOW(), withdrawn_reason = $3,
@@ -405,6 +435,6 @@ export async function withdrawGoodwill(id: string, reason: string, userId: strin
     [id, userId, reason.trim()],
   );
   const g = (await getRow(id))!;
-  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} withdrawn. Why: ${reason.trim()}`, userId, [before.reserved_job_id]);
+  await noteGoodwill(g, `🎟️ Voucher ${creditCode(g)} withdrawn. Why: ${reason.trim()}`, userId, [before.reserved_job_id]);
   return g;
 }
