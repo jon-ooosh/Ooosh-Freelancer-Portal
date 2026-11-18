@@ -41,11 +41,13 @@ router.post('/job-progress', async (req: AuthRequest, res: Response) => {
     // Exclude suspended requirements (hire_forms / excess auto-suspended when
     // every van slot is Van & Driver, or the job is marked Internal) —
     // they're "not required" on this job, not a problem, so they shouldn't
-    // render as a red prob pill.
+    // render as a red prob pill. Soft-cancelled cards are gone, not "to do"
+    // (a cancelled row used to map to a grey to-do pip and mask a done one).
     const result = await query(
       `SELECT job_id, requirement_type, status, phase
        FROM job_requirements
        WHERE job_id = ANY($1)
+         AND status <> 'cancelled'
          AND (notes IS NULL OR notes NOT LIKE '%[Suspended:%')`,
       [ids],
     );

@@ -6,7 +6,7 @@
 export type ProgressStripStatus = 'todo' | 'wip' | 'done' | 'prob';
 
 export type ProgressStripCategory =
-  | 'deprep' | 'client' | 'excess' | 'freelancer' | 'invoicing' | 'payment' | 'vehicle' | 'merch';
+  | 'deprep' | 'client' | 'excess' | 'freelancer' | 'invoicing' | 'payment' | 'vehicle' | 'merch' | 'recharges';
 
 /**
  * Partial map — a category is present iff the job has at least one matching
@@ -26,6 +26,7 @@ export const STRIP_LABELS: Record<StripPhase, Record<ProgressStripCategory, stri
     payment: 'Payment',
     vehicle: 'Vehicle',
     merch: 'Merch',
+    recharges: 'Recharges',
   },
   post_hire: {
     deprep: 'De-prep',
@@ -36,11 +37,12 @@ export const STRIP_LABELS: Record<StripPhase, Record<ProgressStripCategory, stri
     payment: 'Payment',
     vehicle: 'Vehicle',
     merch: 'Merch',
+    recharges: 'Recharges',
   },
 };
 
 export const STRIP_ORDER: ProgressStripCategory[] = [
-  'deprep', 'client', 'excess', 'freelancer', 'invoicing', 'payment', 'vehicle', 'merch',
+  'deprep', 'client', 'excess', 'freelancer', 'invoicing', 'recharges', 'payment', 'vehicle', 'merch',
 ];
 
 /** % completion based on the slots actually present on the strip. */

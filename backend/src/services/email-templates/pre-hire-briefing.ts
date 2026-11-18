@@ -28,6 +28,7 @@ const STRIP_CAT_LABELS: Record<ProgressStripCategory, string> = {
   payment: 'Payment',
   vehicle: 'Vehicle',
   merch: 'Merch',
+  recharges: 'Recharges', // post-hire only — never on a pre-hire briefing
 };
 
 const STRIP_CAT_ORDER: ProgressStripCategory[] = [

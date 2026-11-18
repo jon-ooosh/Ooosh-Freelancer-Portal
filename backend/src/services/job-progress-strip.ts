@@ -42,7 +42,8 @@ export type ProgressStripCategory =
   | 'invoicing'
   | 'payment'
   | 'vehicle'
-  | 'merch';
+  | 'merch'
+  | 'recharges';
 
 /**
  * Per-job strip is a partial map. A category is present iff the job has at
@@ -68,6 +69,7 @@ export const STRIP_CATEGORY_LABELS: Record<StripPhase, Record<ProgressStripCateg
     payment: 'Payment',
     vehicle: 'Vehicle',
     merch: 'Merch',
+    recharges: 'Recharges',
   },
   post_hire: {
     deprep: 'De-prep',
@@ -78,6 +80,7 @@ export const STRIP_CATEGORY_LABELS: Record<StripPhase, Record<ProgressStripCateg
     payment: 'Payment',
     vehicle: 'Vehicle',
     merch: 'Merch',
+    recharges: 'Recharges',
   },
 };
 
@@ -95,6 +98,7 @@ export const STRIP_MAPPING: Record<StripPhase, Record<ProgressStripCategory, str
     payment: [],                   // n/a pre-hire (deposit lives on Money tab)
     vehicle: ['vehicle'],          // van allocated + prepped
     merch: ['merch'],              // incoming packages to give the client (derived pip)
+    recharges: [],                 // n/a pre-hire (recharges are settled after the hire)
   },
   post_hire: {
     deprep: ['backline'],
@@ -103,47 +107,38 @@ export const STRIP_MAPPING: Record<StripPhase, Record<ProgressStripCategory, str
     freelancer: ['freelancer_followup'],
     invoicing: ['invoice'],
     payment: ['payment_reconcile'],
-    vehicle: ['vehicle'],
+    vehicle: ['vehicle', 'damage_review'],
     merch: ['merch'],              // anything still to hand back post-hire
+    // Client recharges (fuel, PCNs, running costs) — Nov 2026, so the strip
+    // (and the Returns page, which mirrors it) shows every close-out card.
+    recharges: ['cost_resolve', 'recharge_running_costs'],
   },
 };
+
+/**
+ * Which requirement statuses count as done / problem / in progress. Exported so
+ * SQL filters (the Returns page's "Waiting on" filter, routes/hirehop.ts) use
+ * the SAME sets as the pips and can never disagree with them. Everything else
+ * is "to do". 'cancelled' rows are not on the strip at all (callers exclude them).
+ */
+export const STRIP_DONE_STATUSES = ['done', 'reconciled', 'sent', 'resolved'];
+export const STRIP_PROB_STATUSES = ['blocked', 'problem', 'declined'];
+export const STRIP_WIP_STATUSES = ['in_progress', 'working_on_it', 'awaiting_quote', 'quoted', 'generated', 'chased'];
 
 /**
  * Map a job_requirements row.status string to a strip status pip.
  * Worst-status precedence applies when multiple requirements feed one slot.
  */
-function mapReqStatusToStrip(reqStatus: string | null | undefined): ProgressStripStatus {
+export function mapReqStatusToStrip(reqStatus: string | null | undefined): ProgressStripStatus {
   // A requirement row with no status string is unusual but treat as todo —
   // the requirement exists, it's just not done.
   if (!reqStatus) return 'todo';
-  switch (reqStatus) {
-    case 'done':
-    case 'reconciled':
-    case 'sent':
-    case 'resolved':
-      return 'done';
-    case 'blocked':
-    case 'problem':
-    case 'declined':
-      return 'prob';
-    case 'not_started':
-    case 'open':
-    case 'pending':
-    case 'needed':
-    case 'not_invoiced':
-    case 'outstanding':
-    case 'not_contacted':
-      return 'todo';
-    case 'in_progress':
-    case 'working_on_it':
-    case 'awaiting_quote':
-    case 'quoted':
-    case 'generated':
-    case 'chased':
-      return 'wip';
-    default:
-      return 'todo';
-  }
+  if (STRIP_DONE_STATUSES.includes(reqStatus)) return 'done';
+  if (STRIP_PROB_STATUSES.includes(reqStatus)) return 'prob';
+  if (STRIP_WIP_STATUSES.includes(reqStatus)) return 'wip';
+  // not_started / open / pending / needed / not_invoiced / outstanding /
+  // not_contacted, and anything unrecognised.
+  return 'todo';
 }
 
 const STATUS_RANK: Record<ProgressStripStatus, number> = {
@@ -193,7 +188,7 @@ export function buildProgressStrips(
   }
 
   const allCats: ProgressStripCategory[] = [
-    'deprep', 'client', 'excess', 'freelancer', 'invoicing', 'payment', 'vehicle', 'merch',
+    'deprep', 'client', 'excess', 'freelancer', 'invoicing', 'payment', 'vehicle', 'merch', 'recharges',
   ];
 
   for (const [jobId, phase] of Object.entries(phases)) {
