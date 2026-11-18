@@ -26,6 +26,7 @@ import WorkingTermsSummary from '../components/WorkingTermsSummary';
 import EndorsementsPanel from '../components/EndorsementsPanel';
 import WatchBandButton from '../components/leads/WatchBandButton';
 import GoodwillTab from '../components/goodwill/GoodwillTab';
+import AccountCreditOrgList from '../components/account-credit/AccountCreditOrgList';
 import OfferGoodwillModal from '../components/goodwill/OfferGoodwillModal';
 
 interface OrgDetail {
@@ -1627,7 +1628,11 @@ function OrganisationDetailContent() {
 
       {/* Goodwill Tab — credits offered to this org (docs/GOODWILL-CREDIT-SPEC.md §4.4) */}
       {activeTab === 'goodwill' && id && (
-        <GoodwillTab key={goodwillBump} owner={{ kind: 'organisation', id, name: org.name }} />
+        <>
+          {/* Their own money held from an earlier job — sits with vouchers, but is not one */}
+          <AccountCreditOrgList organisationId={id} />
+          <GoodwillTab key={goodwillBump} owner={{ kind: 'organisation', id, name: org.name }} />
+        </>
       )}
       {showGoodwill && id && (
         <OfferGoodwillModal owner={{ kind: 'organisation', id, name: org.name }} sourceKind="organisation"

@@ -693,7 +693,7 @@ Money tab read Billing, so the client was asked for the lower figure.
 
 **Next — parked on purpose until a quiet time (jon, 14 Oct 2026):**
 
-- §10.3 hold-on-account — a To Do to keep a surplus on account instead of refunding it;
+- §10.3 hold-on-account — BUILT 18 Nov 2026 as its own module, not a To Do: `docs/CREDIT-ON-ACCOUNT-SPEC.md`;
 - whether the `/complete` route stays (§4.4) — the panel completes through the status modal,
   so nothing in the UI calls it;
 - a "record as overpayment" button for a client who paid too much;

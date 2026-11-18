@@ -35,6 +35,8 @@ jest.mock('../xero-broker', () => ({
   default: { getInvoice: jest.fn(), getInvoices: jest.fn().mockResolvedValue([]), getOverpayment: jest.fn(), allocateOverpayment: jest.fn() },
 }));
 jest.mock('../eu-vat-split', () => ({ splitEuDraft: jest.fn() }));
+// The plan asks whether its job's spare money is held on account (CREDIT-ON-ACCOUNT-SPEC.md).
+jest.mock('../account-credit', () => ({ holdForPlan: jest.fn(async () => null) }));
 
 import { query } from '../../config/database';
 import hhBroker from '../hirehop-broker';
@@ -47,6 +49,8 @@ import { handleJobStatusChange } from '../../routes/webhooks';
 import { allocateOnArrival, fireArrivalHook } from '../close-out-arrival';
 import { splitEuDraft } from '../eu-vat-split';
 import { Stop } from '../hh-invoice-close';
+import { holdForPlan } from '../account-credit';
+const mockHold = holdForPlan as jest.Mock;
 const mockSplit = splitEuDraft as jest.Mock;
 const mockStatus = handleJobStatusChange as jest.Mock;
 const mockSync = syncSavedRowToXero as jest.Mock;
@@ -556,6 +560,34 @@ describe('completeHireJob', () => {
     expect(r.done).toBe(false);
     expect(r.message).toContain('£886.80 of the client\'s money is unallocated');
     expect(r.message).toContain('held on account');
+  });
+
+  it('money held on account is a decision made: it no longer stops Complete, and the hold follows HireHop', async () => {
+    await runHireAllocation(JOB.id, 'u1');
+    mockPost.mockClear();
+    mockHold.mockResolvedValue({ id: 'ac1', amount: 886.8, clientName: 'Headsend Ltd', heldByName: 'Jon', heldAt: 'now', reservedJobId: null, reservedJobNumber: null });
+    try {
+      const plan = await planHireCloseOut(JOB.id);
+      // The stored figure is refreshed from what HireHop has unallocated right now.
+      expect(mockHold).toHaveBeenLastCalledWith(JOB.id, 886.8);
+      expect(plan.surplus).toEqual([{ depositId: 8661, amount: 886.8 }]);
+      expect(plan.readyToComplete).toBe(true);
+      expect(plan.sentences.join(' ')).toContain('held on account for Headsend Ltd');
+      const r = await completeHireJob(JOB.id, 'u1');
+      expect(r.done).toBe(true);
+      // Nothing was allocated, refunded or moved to make that so.
+      expect(posts('/php_functions/billing_payments_save.php')).toEqual([]);
+    } finally {
+      mockHold.mockResolvedValue(null);
+    }
+  });
+
+  it('a plan with something blocking it never refreshes a hold from its figures', async () => {
+    opPayments.length = 0;   // OP has no record of the payments → blockers
+    mockHold.mockClear();
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.blockers.length).toBeGreaterThan(0);
+    expect(mockHold).toHaveBeenLastCalledWith(JOB.id, null);
   });
 
   it('completes once everything is settled in HireHop and Xero, and mirrors it into OP at once', async () => {

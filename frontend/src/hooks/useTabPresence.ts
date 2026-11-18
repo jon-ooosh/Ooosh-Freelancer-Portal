@@ -29,6 +29,8 @@ function probesFor(entity: 'person' | 'organisation', id: string, opts: { pcn?: 
       ['pcns', `/pcns/by-org/${id}`, rows],
       ['ooh', `/ooh-return/by-organisation/${id}`, (r) => (r?.data?.totalIncidents || 0) > 0],
       ['goodwill', `/goodwill?organisation_id=${id}`, rows],
+      // Money on account sits on the Vouchers tab too — either one brings the tab into the row.
+      ['goodwill', `/account-credit?organisation_id=${id}`, rows],
     ];
   }
   return [
@@ -49,7 +51,8 @@ export function useTabPresence(entity: 'person' | 'organisation', id: string | u
     let cancelled = false;
     for (const [tab, url, has] of probesFor(entity, id, { pcn })) {
       api.get<any>(url)
-        .then((r) => { if (!cancelled) setPresence((cur) => ({ ...cur, [tab]: has(r) })); })
+        // Two probes can feed one tab: content from either is enough, and a later empty answer never unsets it.
+        .then((r) => { if (!cancelled) setPresence((cur) => ({ ...cur, [tab]: !!cur[tab] || has(r) })); })
         .catch(() => { /* unknown → the tab stays under More, still reachable */ });
     }
     return () => { cancelled = true; };
