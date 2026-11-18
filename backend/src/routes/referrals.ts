@@ -9,7 +9,7 @@
  *   POST   /:id/welcome-email        manager — email the friend their voucher code (if it didn't go first time)
  *   GET    /person/:personId         staff   — their personal link + counts
  *   POST   /person/:personId/link    staff   — make their personal link
- *   GET    /overview                 admin   — the offer, the email switch, totals, the list
+ *   GET    /overview                 manager — the offer, the email switch, totals, the list
  *   PUT    /offer                    admin   — a new offer (the old one stays on its referrals)
  *   PUT    /settings                 admin   — { emailsEnabled }
  *   POST   /test                     admin   — emails 2, 2b, 3 and the friend's welcome to yourself
@@ -113,7 +113,8 @@ router.post('/:id/decline', authorize(...MANAGER_ROLES), validate(id, 'params'),
 
 // ── Admin: Marketing › Referrals ─────────────────────────────────────────────
 
-router.get('/overview', authorize('admin'), async (_req: AuthRequest, res: Response) => {
+// Managers see it (jon, 18 Nov 2026); the offer, the email switch and the test stay admin.
+router.get('/overview', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
   try {
     const [offer, emailsEnabled, totals, referrals] = await Promise.all([currentOffer(), referralEmailsEnabled(), referralTotals(), listReferrals()]);
     res.json({ data: { offer, emailsEnabled, totals, referrals } });

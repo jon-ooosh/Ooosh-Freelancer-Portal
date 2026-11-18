@@ -75,6 +75,7 @@ import freelancersRouter from './freelancers';
 import enquiryIntakeRouter from './enquiry-intake';
 import goRouter from './go';
 import marketingRouter from './marketing';
+import marketingContentRouter from './marketing-content';
 import reviewRequestsRouter from './review-requests';
 import referralsRouter from './referrals';
 import vouchersRouter from './vouchers';
@@ -158,6 +159,7 @@ router.use('/driver-verification', driverVerificationRouter);  // Public-facing 
 router.use('/enquiry-intake', enquiryIntakeRouter);  // Website enquiry form → OP enquiry (API-key auth, service='enquiry_form')
 router.use('/go', goRouter);  // Tracked links — PUBLIC redirect, counts the scan (go.oooshtours.co.uk/<code>)
 router.use('/marketing', marketingRouter);
+router.use('/marketing-content', marketingContentRouter);  // the social media planner — every staff login (BUSINESS-FIGURES-SPEC §8e)
 router.use('/review-requests', reviewRequestsRouter);  // Jon's review email — public "don't ask me again" + staff/admin (docs/BUSINESS-FIGURES-SPEC.md §8c)  // Marketing page — admin only (docs/BUSINESS-FIGURES-SPEC.md §8)
 router.use('/referrals', referralsRouter);  // the referral scheme — staff / managers / admin (docs/BUSINESS-FIGURES-SPEC.md §8d)
 router.use('/vouchers', vouchersRouter);  // vouchers — a goodwill credit with a code (docs/GOODWILL-CREDIT-SPEC.md §16)

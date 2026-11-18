@@ -167,7 +167,10 @@ optional dropdown, and the Worker passing `attribution`, `attribution_last`, `he
 
 ### 8a. Marketing page — step 2 (BUILT Nov 2026, migration 342)
 
-Jobs › Marketing (`/jobs/marketing`), **admin only** (page, nav item and every `/api/marketing` route).
+Jobs › Marketing (`/jobs/marketing`). Built admin-only; **since 18 Nov 2026 (jon) the page is open to every
+staff login for the Content tab (§8e), and Adverts, Tracked links, Review emails and Referrals are manager-tier**
+(`/api/marketing` and the two `/overview` routes take `MANAGER_ROLES`). Turning the review / referral emails on or
+off, "Send me a test" and the referral offer stay admin-only.
 
 - **Adverts** (`marketing_placements`): name, type (print / online / social / search ads / event /
   sponsorship / other), who with, cost, runs from–until, status (planned / live / ended / cancelled —
@@ -211,9 +214,8 @@ Jobs › Marketing (`/jobs/marketing`), **admin only** (page, nav item and every
   destination is the review box counts the scans) and postcards.
 - **Referrals** — BUILT, §8d below, with real vouchers since 17 Nov (GOODWILL-CREDIT-SPEC §16). Still to do:
   the van / kit-case postcards (§8d, "Cards") — parked, in `docs/reference/BACKLOG.md`.
-- **Content library (later, jon):** a register of the photos / videos used on Instagram etc. — the
-  files stay in the shared Google Drive; OP holds the link, description, where and when each was used,
-  and who to credit. On the Marketing page.
+- **Content library** — BUILT with the social media planner, §8e. Still to do: the studio sitters sending
+  their photos / videos in from the portal (§8e "Next").
 
 ### 8c. Jon's review request email (BUILT 13 Nov 2026, migration 344)
 
@@ -319,3 +321,45 @@ Offers are plain text jon rotates; each referral keeps the offer that was live.
   "Recommended by: ______" line the client fills in; the friend's form "Who recommended us?" catches the name and
   staff link it with "Referred by" → "Referral card". Unique per-card codes were rejected (somebody would have to
   record which card went in which van).
+
+### 8e. The social media planner — Marketing › Content (BUILT 18 Nov 2026, migration 351)
+
+jon, 17–18 Nov 2026. **OP plans; Meta Business Suite schedules and posts** (OP can't post to Meta without an app
+review). Mostly Matt's; **every staff login** sees it (the other Marketing tabs are manager-tier, §8a). All logic in
+`services/marketing-content.ts`, routes `routes/marketing-content.ts` (`/api/marketing-content`, `STAFF_ROLES`),
+screens `frontend/src/components/marketing/` (`ContentPlanner.tsx`, `PostEditor.tsx`, words and colours
+`contentCopy.ts`).
+
+- **A post** (`marketing_posts`) is one entry with its channels ticked (Instagram, Facebook, Newsletter, Blog — IG + FB
+  are usually the same post): name, goes-out date and time (UK; stored as `publish_at`, default 18:00; **no date = an
+  idea**), format (Reel / carousel / image / story / video / text post / newsletter issue / blog article — the editor
+  offers the ones that fit the channels), caption with the call to action (Instagram's 2,200 counted), hashtags and
+  mentions (counted; Instagram allows 30), a theme (free text, suggestions from the themes used before), status, owner
+  (assignable staff, stored as their person), the band / job / credited person, a **tracked link** for the call to
+  action (picked from Marketing › Tracked links, `GET /marketing-content/links` — so staff can pick one without seeing
+  the Links tab), the live post link once it's up, notes, and its content. **Never deleted** — "Drop it" sets
+  `dropped` (off the calendar, board and ideas).
+- **Statuses:** Idea → In progress → Review → Approved → Scheduled (in Meta) → Published, plus Dropped. A new post with a
+  date starts In progress, without one Idea. Moving a card on the board is a status change.
+- **The owner's To Do:** two days before a post goes out (from `REMIND_DAYS_BEFORE` days ahead to the day itself), if it is
+  still Idea / In progress / Review, its owner gets ONE To Do — "Get it approved: "…" goes out Thu 19 Nov at 19:30", due
+  today, `source_type = 'marketing_post'`, linking to `/jobs/marketing?tab=content&post=<id>` (opens the post). It's
+  re-checked on every save and daily at **09:16** (`runPostReminders()`): cancelled once the post is approved /
+  scheduled / published / dropped, moved further out, made an idea, its owner changes (the new owner gets it), or its
+  day has gone by. Never fails a save.
+- **The content library** (`marketing_assets`): photos, videos and graphics as **Google Drive links** (the files stay in
+  the shared Drive; `https://` only), with a kind, notes, the band / job / who took it, who added it and how many posts
+  use it. Archived, never deleted. A post's content is `marketing_post_assets`; a Drive link added from a post carries
+  the post's band / job / credit. `source` is `staff` or `sitter` (the sitter intake, below; shown as "from a sitter").
+- **Saved hashtag sets** (`marketing_hashtag_sets`, a name + the tags; same name replaces) — "Add a saved set" appends
+  one to the post, "Save these as a set" saves the post's.
+- **Views:** a month calendar (Monday first, UK days, click a day to plan a post on it), a board by status (published
+  posts leave it after 30 days), the ideas (no date) and the content library. "Copy for Meta" puts the caption and
+  hashtags on the clipboard. The view is remembered per browser.
+- **Not built, on purpose:** reach / likes typed in (jon: the tracked links show the enquiries, which is what counts),
+  posting or scheduling from OP, file uploads (Drive holds the files).
+
+**Next (agreed in outline, jon 18 Nov 2026):** the studio sitters make a lot of the content — let them send photos /
+videos in from the portal (a Drive link or an upload, with a line on what it is), landing in the library as
+`source = 'sitter'` with `added_by_person_id`. The table already carries both columns.
+

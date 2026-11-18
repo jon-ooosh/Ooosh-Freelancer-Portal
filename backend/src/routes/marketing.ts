@@ -1,5 +1,7 @@
 /**
- * The Marketing page — admin only (docs/BUSINESS-FIGURES-SPEC.md §8, step 2).
+ * The Marketing page's adverts and tracked links — managers and admin (docs/BUSINESS-FIGURES-SPEC.md §8;
+ * admin-only until 18 Nov 2026, when jon opened them to managers. The Content tab is every
+ * staff login: routes/marketing-content.ts).
  *
  *   GET   /placements            adverts, with scans / enquiries / bookings
  *   POST  /placements            add an advert
@@ -13,7 +15,7 @@
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, MANAGER_ROLES } from '../middleware/auth';
 import { validate, partialForUpdate } from '../middleware/validate';
 import { query } from '../config/database';
 import { CHANNELS, PLACEMENT_STATUSES, linkQr, listLinks, listPlacements, syncDueReminder } from '../services/marketing';
@@ -21,7 +23,7 @@ import { checkDestination, isValidCode, normaliseCode } from '../services/market
 
 const router = Router();
 router.use(authenticate);
-router.use(authorize('admin'));
+router.use(authorize(...MANAGER_ROLES));
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date (YYYY-MM-DD)');
 const idParam = z.object({ id: z.string().guid() });
