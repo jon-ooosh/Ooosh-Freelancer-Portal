@@ -28,17 +28,9 @@ Future enhancements. Nothing here is committed work; treat as a menu, not a queu
   - **Cash forecast phase 4 — the Monday email** to jon (the four tiles, the low point, the fix-it list) and the
     "last week we said X, it was Y" line. `docs/CASHFLOW-FORECAST-SPEC.md` §11 / §13 "Next".
 
-- **Social media planner — Marketing › Content (jon, 17–18 Nov 2026: "all looks good, park it for now")** — plan
-  posts across Instagram, Facebook, the newsletter and the website blog in one place; scheduling and posting stay in
-  Meta Business Suite (OP can't post to Meta without an app review). Agreed shape: one entry per post with channels
-  ticked (IG + FB usually the same post); publish date and time, format (Reel / carousel / image / Story / video /
-  text; newsletter issue; blog article), caption and call to action, hashtags and mentions (saved hashtag sets),
-  creative assets as Google Drive links (the start of the content library), status (Idea → In progress → Review →
-  Approved → Scheduled → Published, plus Dropped), owner (`assignable-staff.ts`), a theme / pillar, an optional linked
-  job / band / person, the live post link once up, and a tracked link for the call to action (Marketing › Tracked
-  links — the measure of what brings enquiries). Views: month calendar, a board by status, the ideas list. Open
-  questions when it's picked up: who uses it (Marketing is admin-only), a To Do for the owner two days before a post
-  that isn't approved, typed-in reach / likes or not (suggested: not — tracked links show the enquiries).
+- **Social media planner — BUILT 18 Nov 2026** (`docs/BUSINESS-FIGURES-SPEC.md` §8e). Next: **studio sitters send
+  content in from the portal** (photos / videos as a Drive link or an upload, landing in the content library as
+  `source = 'sitter'`) — the sitters make a lot of it (jon). §8e "Next".
 
 - **A multi-use promo code (raised 17 Nov 2026, not asked for yet)** — one code printed for anyone to use (a
   magazine ad, a festival programme), as opposed to the single-use vouchers built in `GOODWILL-CREDIT-SPEC.md` §16.

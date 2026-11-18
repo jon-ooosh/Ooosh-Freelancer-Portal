@@ -1,5 +1,10 @@
 /**
- * Jobs › Marketing — admin only (docs/BUSINESS-FIGURES-SPEC.md §8, step 2).
+ * Jobs › Marketing (docs/BUSINESS-FIGURES-SPEC.md §8).
+ *
+ * Content (the social media planner, §8e) is for every staff login; Adverts, Tracked
+ * links, Review emails and Referrals are manager-tier (jon, 18 Nov 2026). Turning an
+ * email on or off, "Send me a test" and the referral offer stay admin-only — the
+ * backend refuses them for anyone else.
  *
  * Adverts: where we advertise, what it costs, what's due next (a To Do for whoever
  * set it), whether the proof has come in — and what each one produced.
@@ -10,6 +15,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { hasManagerRole } from '../lib/roles';
+import ContentPlanner from '../components/marketing/ContentPlanner';
 import ModalShell from '../components/ModalShell';
 import { ukDatePlus, ukToday } from '../lib/ukDate';
 
@@ -334,6 +341,8 @@ const REVIEW_STATUS: Record<string, { label: string; cls: string }> = {
 };
 
 function ReviewEmailsPanel() {
+  // Turning it on/off and the test are admin-only (the backend refuses anyone else).
+  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
   const [data, setData] = useState<ReviewOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -388,6 +397,7 @@ function ReviewEmailsPanel() {
               {data.sent30} sent in the last 30 days · {data.optOuts} asked not to be asked again
             </p>
           </div>
+          {isAdmin && (
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={sendTest} disabled={busy}
               className="px-3 py-2 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50">Send me a test</button>
@@ -396,6 +406,7 @@ function ReviewEmailsPanel() {
               {data.enabled ? 'Turn off' : 'Turn on'}
             </button>
           </div>
+          )}
         </div>
         <ul className="text-xs text-gray-600 space-y-1 list-disc pl-5">
           <li>From "Jon at Ooosh Tours", replies to jon@oooshtours.co.uk, at 10:15 the day after a hire is Completed.</li>
@@ -480,6 +491,8 @@ function amountOrNull(text: string, what: string): number | null {
 }
 
 function ReferralsPanel() {
+  // The offer, the email switch and the test are admin-only (the backend refuses anyone else).
+  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
   const [data, setData] = useState<ReferralOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -518,7 +531,7 @@ function ReferralsPanel() {
         <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-2">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-gray-900">This month's offer</h2>
-            {!editingOffer && <button type="button" onClick={() => setEditingOffer(true)} className="text-sm text-ooosh-700 hover:underline">Change</button>}
+            {isAdmin && !editingOffer && <button type="button" onClick={() => setEditingOffer(true)} className="text-sm text-ooosh-700 hover:underline">Change</button>}
           </div>
           {!editingOffer ? (
             <dl className="text-sm space-y-1">
@@ -574,6 +587,7 @@ function ReferralsPanel() {
               Referral emails{' '}
               <span className={`ml-1 align-middle text-[11px] font-semibold rounded-full px-2 py-0.5 ${data.emailsEnabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-600'}`}>{data.emailsEnabled ? 'On' : 'Off'}</span>
             </h2>
+            {isAdmin && (
             <div className="flex gap-2">
               <button type="button" disabled={busy} onClick={() => run(async () => { await api.post('/referrals/test', {}); }, 'The test emails are on their way to you (four: in touch, booked, thank-you, the friend’s welcome).')}
                 className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50">Send me a test</button>
@@ -586,6 +600,7 @@ function ReferralsPanel() {
                 {data.emailsEnabled ? 'Turn off' : 'Turn on'}
               </button>
             </div>
+            )}
           </div>
           <p className="text-sm text-gray-600">{t.links} personal links · {t.scans} visits · {t.referrals} referrals · {t.booked} booked · {t.due} thank-you{t.due === 1 ? '' : 's'} due</p>
           <ul className="text-xs text-gray-600 space-y-1 list-disc pl-5">
@@ -653,13 +668,19 @@ function ReferralsPanel() {
 
 // ── Page ────────────────────────────────────────────────────────────────────
 
+type MarketingTab = 'content' | 'adverts' | 'links' | 'reviews' | 'referrals';
+const MANAGER_TABS: MarketingTab[] = ['adverts', 'links', 'reviews', 'referrals'];
+
 export default function MarketingPage() {
   const role = useAuthStore((s) => s.user?.role);
-  // ?tab=referrals opens a tab directly (a referral To Do links here).
+  const isManager = hasManagerRole(role);
+  // ?tab=referrals opens a tab directly (a referral To Do links here);
+  // ?tab=content&post=<id> opens a social post (the owner's To Do links there).
   const [params] = useSearchParams();
-  const startTab = params.get('tab');
-  const [tab, setTab] = useState<'adverts' | 'links' | 'reviews' | 'referrals'>(
-    startTab === 'links' || startTab === 'reviews' || startTab === 'referrals' ? startTab : 'adverts',
+  const startTab = params.get('tab') as MarketingTab | null;
+  const openPostId = params.get('post');
+  const [tab, setTab] = useState<MarketingTab>(
+    startTab && isManager && MANAGER_TABS.includes(startTab) ? startTab : 'content',
   );
   const [adverts, setAdverts] = useState<Placement[] | null>(null);
   const [links, setLinks] = useState<TrackedLink[] | null>(null);
@@ -682,9 +703,7 @@ export default function MarketingPage() {
       setError((e as Error).message || 'Could not load.');
     }
   }, []);
-  useEffect(() => { if (role === 'admin') load(); }, [role, load]);
-
-  if (role !== 'admin') return <div className="p-6 text-sm text-gray-600">Marketing is for admins only.</div>;
+  useEffect(() => { if (isManager) load(); }, [isManager, load]);
 
   const copy = async (text: string) => {
     try { await navigator.clipboard.writeText(text); setCopied(text); setTimeout(() => setCopied(null), 1500); } catch { /* clipboard blocked — the address is on screen */ }
@@ -700,10 +719,11 @@ export default function MarketingPage() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">
-            Marketing <span className="ml-1 align-middle text-[11px] font-semibold text-violet-800 bg-violet-100 rounded-full px-2 py-0.5">Admin</span>
+            Marketing
           </h1>
           <p className="text-sm text-gray-600 mt-0.5">
-            Where we advertise and what it brings in · <Link to="/money/business" className="text-ooosh-700 hover:underline">Business figures</Link>
+            {isManager ? <>Social posts, where we advertise and what it brings in{role === 'admin' && <> · <Link to="/money/business" className="text-ooosh-700 hover:underline">Business figures</Link></>}</>
+              : 'Social posts: what goes out when, and the photos and videos for them'}
           </p>
         </div>
         {(tab === 'adverts' || tab === 'links') && (
@@ -714,20 +734,24 @@ export default function MarketingPage() {
         )}
       </div>
 
+      {isManager && (
       <div className="inline-flex rounded-lg border border-gray-300 p-0.5 text-sm">
-        {(['adverts', 'links', 'reviews', 'referrals'] as const).map((t) => (
+        {(['content', ...MANAGER_TABS] as MarketingTab[]).map((t) => (
           <button key={t} type="button" onClick={() => setTab(t)}
             className={`px-3 py-1.5 rounded-md ${tab === t ? 'bg-ooosh-600 text-white' : 'text-gray-700 hover:bg-gray-50'}`}>
-            {t === 'adverts' ? `Adverts${adverts ? ` (${adverts.length})` : ''}`
+            {t === 'content' ? 'Content'
+              : t === 'adverts' ? `Adverts${adverts ? ` (${adverts.length})` : ''}`
               : t === 'links' ? `Tracked links${links ? ` (${links.length})` : ''}`
               : t === 'reviews' ? 'Review emails' : 'Referrals'}
           </button>
         ))}
       </div>
+      )}
 
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
       {(!adverts || !links) && !error && (tab === 'adverts' || tab === 'links') && <p className="text-sm text-gray-500">Loading…</p>}
 
+      {tab === 'content' && <ContentPlanner openPostId={openPostId} />}
       {tab === 'reviews' && <ReviewEmailsPanel />}
       {tab === 'referrals' && <ReferralsPanel />}
 

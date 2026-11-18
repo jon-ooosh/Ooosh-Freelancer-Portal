@@ -390,6 +390,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '348_referral_booked_email.sql',
         '349_vouchers.sql',
         '350_one_voucher_system.sql',
+        '351_marketing_content.sql',
       ];
 
       for (const migration of migrations) {
