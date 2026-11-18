@@ -294,3 +294,60 @@ export async function listForOrganisation(organisationId: string): Promise<Accou
 export async function getAccountCredit(id: string): Promise<AccountCredit | null> {
   return getRow(id);
 }
+
+// ── What a job has put aside for it (PR 2 — "the next job knows") ────────
+
+/**
+ * Money on account put aside for a job, as a SQL sum keyed on that job's id — for the
+ * reads that work out what a job still has to PAY (the Money tab, the pre-hire
+ * briefing, the Wise matcher, the cash forecast). It is NOT in HireHop's balance: it
+ * still sits on the job it was paid on until this job is invoiced. Never subtract it
+ * from a figure that is stored or sent back to HireHop.
+ */
+export const reservedForJobSql = (jobIdExpr: string) => `COALESCE((
+    SELECT SUM(a.amount) FROM account_credits a
+     WHERE a.reserved_job_id = ${jobIdExpr} AND a.status = 'held' AND a.amount >= 0.005), 0)`;
+
+export interface ReservedCredit { id: string; amount: number; source_job_id: string; source_job_number: number | null }
+
+/** What is put aside for this job, oldest first. Never throws — a balance read must not fail over it. */
+export async function listReservedForJob(jobId: string): Promise<ReservedCredit[]> {
+  try {
+    const r = await query(
+      `SELECT x.id, x.amount, x.source_job_id, x.source_job_number
+         FROM (${SELECT} WHERE a.reserved_job_id = $1 AND a.status = 'held') x
+        WHERE x.status = 'reserved' ORDER BY x.reserved_at`,
+      [jobId],
+    );
+    return r.rows as ReservedCredit[];
+  } catch (e) {
+    console.warn('[account-credit] could not read what is put aside for the job:', e);
+    return [];
+  }
+}
+
+/**
+ * How a balance reads with money on account put aside for the job: what of it the
+ * credit will cover (never more than is owed) and what is left to ask the client for.
+ */
+export function withCreditOnAccount(balance: number, reserved: ReservedCredit[]): { total: number; covers: number; toPay: number } {
+  const total = round2(reserved.reduce((s, c) => s + c.amount, 0));
+  const covers = round2(Math.max(0, Math.min(total, balance)));
+  return { total, covers, toPay: round2(Math.max(0, balance - covers)) };
+}
+
+/** "£68.40 on account from job 16489" / "… from jobs 16489 and 16502". */
+export function creditOnAccountPhrase(reserved: ReservedCredit[]): string {
+  const jobs = reserved.map((c) => c.source_job_number).filter((n): n is number => n != null);
+  const from = jobs.length === 0 ? 'an earlier job' : jobs.length === 1 ? `job ${jobs[0]}` : `jobs ${jobs.slice(0, -1).join(', ')} and ${jobs[jobs.length - 1]}`;
+  return `${gbp(round2(reserved.reduce((s, c) => s + c.amount, 0)))} on account from ${from}`;
+}
+
+/** Is this job's spare money held on account right now? (cheap — no HireHop read) */
+export async function hasLiveHold(jobId: string): Promise<boolean> {
+  try {
+    return (await query(`SELECT 1 FROM account_credits WHERE source_job_id = $1 AND status = 'held' AND amount >= 0.005 LIMIT 1`, [jobId])).rows.length > 0;
+  } catch {
+    return false;
+  }
+}

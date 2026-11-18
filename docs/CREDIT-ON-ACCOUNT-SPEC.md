@@ -1,6 +1,6 @@
 # Credit on account — a client's overpayment kept for their next hire
 
-**Status:** PR 1 built (18 Nov 2026). PRs 2–4 not built — §6.
+**Status:** PRs 1–2 built (18 Nov 2026). PRs 3–4 not built — §6.
 
 Born from job 16489 (Gently Tender): the hire finished £68.40 overpaid and the client asked
 us to keep it for a hire they were about to confirm. "Apply to another job" only works
@@ -97,19 +97,42 @@ vouchers). `spent` is only STORED when the same job is held again later.
 - **The client's page:** Vouchers tab, "Money on account" above the vouchers.
 - Each step writes a line on the timelines of the jobs it touches.
 
-## 5. Known gaps after PR 1 (closed by PRs 2–4)
+## 5. PR 2 — the next job knows (built 18 Nov 2026)
 
-Money put aside for a job is visible to staff, but the job's balance, the payment portal
-and HireHop still show the full amount — the note says so and tells staff to ask the
-client for that much less. On a phone the Client History panel is hidden (as it is for
-vouchers), so the note is a laptop view.
+**The rule: money put aside for a job is NOT in HireHop's balance until that job is
+invoiced, so no stored or HireHop-facing figure is changed.** `balance_outstanding`,
+`job_financials` and everything sent to HireHop stay as they were; each read that works out
+what the client still has to PAY subtracts it through one definition:
+
+- `account-credit.ts` `listReservedForJob()` + `withCreditOnAccount(balance, reserved)`
+  (covers at most what is owed; the rest stays on account), `creditOnAccountPhrase()`, and
+  `reservedForJobSql(jobIdExpr)` for SQL reads. Never a second sum.
+- **Money tab** (`GET /money/:jobId/summary` → `financial.on_account`): a blue line under
+  the balance, "£68.40 on account from job 16489 comes off at invoicing. To pay now:
+  £1,131.60". It counts towards the deposit (`deposit_paid`, "Minimum deposit … less
+  what's on account").
+- **Confirming:** the status modals (Job Detail and the pipeline board) offer **Credit on
+  account** as a confirmation method only when money is put aside for the job
+  (`useReservedCreditNote()`), and pre-fill the note "£68.40 held on account from job
+  16489". `jobs.confirmed_method = 'credit_on_account'`. Nothing confirms by itself.
+- **Pre-hire briefing** (`pre-hire-briefing.ts` `BriefingMoney.on_account / to_pay /
+  on_account_label`): the staff email and discussion point say what to ask the client for;
+  the client draft says "we're holding £68.40 from your last hire towards this one".
+- **Wise matcher** (`wise-incoming.ts` `expected.remainingLessCredit`): a transfer for the
+  balance less the credit is recognised as the balance.
+- **Cash forecast** (`cashflow-sources.ts` `loadJobBalances()`): the job's expected
+  receipt is the balance less the credit — that money is already in the bank.
+- **Keeping the figure true:** after a Refund or Apply to another job on a job whose money
+  is held, the route re-reads HireHop at once (`refreshHoldAfterMoneyMoved()`), so the job
+  it was put aside for never counts money that has gone.
+
+Still not known: the payment portal and HireHop's own documents (PR 4 / never). The Money
+tab line and the staff briefing both say so. On a phone the Client History panel is hidden
+(as it is for vouchers), so "Use on this job" is a laptop action; the Money tab line shows
+on a phone.
 
 ## 6. Still to build
 
-- **PR 2 — the next job knows.** Money tab line "Credit from job 16489" and a reduced
-  balance; confirmation method "Credit on account" (a person presses it, the note is
-  pre-filled); the pre-hire briefing email, the Wise matcher's "remaining balance" and the
-  cash forecast read it.
 - **PR 3 — close-out applies it.** The plan gains "This will also apply £68.40 from job
   16489 to this invoice"; the one button applies it in HireHop and Xero on the existing
   cross-job mechanism (`/money/:jobId/apply-credit`, `sourceJobRows()`), each write read

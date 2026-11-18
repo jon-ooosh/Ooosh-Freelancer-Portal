@@ -14,6 +14,7 @@
  * Staff edit the draft and send it from their own inbox.
  */
 import { query } from '../config/database';
+import { listReservedForJob, withCreditOnAccount, creditOnAccountPhrase } from './account-credit';
 import { hhBroker } from './hirehop-broker';
 import { buildProgressStrips, JobProgressStrip, RequirementRow } from './job-progress-strip';
 import { emailService } from './email-service';
@@ -87,6 +88,15 @@ export interface BriefingMoney {
   deposits_paid: number;
   /** hire_value − deposits_paid, floored at 0. */
   balance_outstanding: number;
+  /**
+   * Money on account put aside for this job (CREDIT-ON-ACCOUNT-SPEC.md): the client's own
+   * overpayment from an earlier job, NOT in HireHop's balance until this job is invoiced.
+   * `on_account` is what of the balance it covers, `to_pay` what is left to ask for, and
+   * `on_account_label` the words ("£68.40 on account from job 16489"). 0 / null when none.
+   */
+  on_account: number;
+  on_account_label: string | null;
+  to_pay: number;
   /** True if balance/deposits came from a successful HH fetch (vs cached). */
   hh_billing_loaded: boolean;
   excess_required: number;
@@ -563,11 +573,16 @@ export async function buildBriefing(
     ? (hireValueIncVat || cachedHireValue)
     : cachedHireValue;
   const balanceOutstanding = Math.max(0, moneyHireValue - hireDepositsTotal);
+  const reservedOnAccount = await listReservedForJob(jobId);
+  const onAccount = withCreditOnAccount(balanceOutstanding, reservedOnAccount);
 
   const money: BriefingMoney = {
     hire_value: moneyHireValue,
     deposits_paid: hireDepositsTotal,
     balance_outstanding: balanceOutstanding,
+    on_account: onAccount.covers,
+    on_account_label: reservedOnAccount.length ? creditOnAccountPhrase(reservedOnAccount) : null,
+    to_pay: onAccount.toPay,
     hh_billing_loaded,
     excess_required,
     excess_taken,
@@ -730,6 +745,10 @@ export async function buildBriefing(
         : 'no deposit yet';
       discussion_points.push(
         `Hire fee balance: £${money.balance_outstanding.toFixed(2)} due (${depositLabel} of £${money.hire_value.toFixed(2)})`
+        + (money.on_account_label
+          ? ` — ${money.on_account_label} comes off it at invoicing, so ask the client for £${money.to_pay.toFixed(2)}`
+            + ' (HireHop and the payment link still show the full balance)'
+          : '')
       );
     } else if (money.hire_value > 0) {
       discussion_points.push(`Hire fee £${money.hire_value.toFixed(2)} paid in full ✓`);
