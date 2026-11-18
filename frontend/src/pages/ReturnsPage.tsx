@@ -61,21 +61,43 @@ interface Job {
   job_value: number | null;
   // Cached inc-VAT hire value (job_financials) — preferred, as on JobsPage.
   hire_value_inc_vat?: number | null;
+  is_internal?: boolean | null;
 }
 
 interface RetroSnippet { rating: string; notes: string; created_at: string }
 
 type StatusFilter = 'all' | 'returned' | 'completed';
 type TypeFilter = 'vehicle' | 'backline' | 'rehearsal';
-type SortKey = 'overdue' | 'return_desc' | 'return_asc' | 'job_date_desc';
+// Sortable columns (Nov 2026) — click a header to sort, click again to flip.
+// Each maps to a server sort key per direction (routes/hirehop.ts
+// `allowedSorts`); Dates sorts by the due-back date, so its "ascending" is the
+// long-standing 'overdue' (oldest due back first).
+type SortColumn = 'job' | 'name' | 'client' | 'status' | 'dates' | 'value' | 'manager';
+const COLUMN_SORTS: Record<SortColumn, { asc: string; desc: string; label: string; ascLabel: string; descLabel: string }> = {
+  job:     { asc: 'job_asc',     desc: 'job_desc',     label: 'Job #',   ascLabel: 'lowest first',       descLabel: 'highest first' },
+  name:    { asc: 'name_asc',    desc: 'name_desc',    label: 'Name',    ascLabel: 'A–Z',                descLabel: 'Z–A' },
+  client:  { asc: 'client_asc',  desc: 'client_desc',  label: 'Client',  ascLabel: 'A–Z',                descLabel: 'Z–A' },
+  status:  { asc: 'status_asc',  desc: 'status_desc',  label: 'Status',  ascLabel: 'returned first',     descLabel: 'completed first' },
+  dates:   { asc: 'overdue',     desc: 'return_desc',  label: 'Due back', ascLabel: 'oldest first',      descLabel: 'newest first' },
+  value:   { asc: 'value_asc',   desc: 'value_desc',   label: 'Value',   ascLabel: 'lowest first',       descLabel: 'highest first' },
+  manager: { asc: 'manager_asc', desc: 'manager_desc', label: 'Manager', ascLabel: 'A–Z',                descLabel: 'Z–A' },
+};
+type SortKey = string;
 type RetroFilter = 'all' | 'has_retro' | 'no_retro';
 
+// Every sort, for the phone's Sort select (no headers to click there) and for
+// checking a sort read from the URL. 'job_date_desc' is an older key a saved
+// link may still carry ('return_asc' is read as 'overdue' — the same order).
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
-  { key: 'overdue',       label: 'Most overdue first' },
-  { key: 'return_desc',   label: 'Return date — newest' },
-  { key: 'return_asc',    label: 'Return date — oldest' },
+  ...Object.values(COLUMN_SORTS).flatMap(c => [
+    { key: c.asc, label: `${c.label} — ${c.ascLabel}` },
+    { key: c.desc, label: `${c.label} — ${c.descLabel}` },
+  ]),
   { key: 'job_date_desc', label: 'Job date — newest' },
 ];
+
+/** Jobs before this were never closed out in OP — hidden unless "Include pre-OP" is ticked. */
+const PRE_OP_CUTOFF = '2026-03-01';
 
 // Tab order — "Returned (needs completing)" first because that's where staff
 // spend their time working through close-outs. Completed second (recent
@@ -196,12 +218,18 @@ export default function ReturnsPage() {
   // finished jobs at the top). All tab defaults to overdue too.
   // A sort read from the URL is checked against the list — an unknown value
   // would leave the select blank (frontend rules: validate stored values).
-  const initialSort = searchParams.get('sort');
+  const initialSortParam = searchParams.get('sort');
+  const initialSort = initialSortParam === 'return_asc' ? 'overdue' : initialSortParam;
   const [sort, setSort] = useState<SortKey>(
     SORT_OPTIONS.some(o => o.key === initialSort)
       ? (initialSort as SortKey)
       : (initialStatus === 'completed' ? 'return_desc' : 'overdue')
   );
+  // Pre-OP and internal jobs are hidden unless asked for (Nov 2026): almost all
+  // are clutter — pre-OP ones were never closed out here, internal ones rarely
+  // have anything to do after the hire.
+  const [includePreOp, setIncludePreOp] = useState(searchParams.get('pre_op') === '1');
+  const [includeInternal, setIncludeInternal] = useState(searchParams.get('internal') === '1');
   const [page, setPage] = useState(parseInt(searchParams.get('page') || '1', 10));
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
@@ -245,6 +273,8 @@ export default function ReturnsPage() {
       // when the first page filled with completed jobs (which then got
       // filtered out, yielding an empty page).
       if (overdueOnly) params.set('overdue', '1');
+      if (!includePreOp) params.set('exclude_before', PRE_OP_CUTOFF);
+      if (!includeInternal) params.set('internal', 'exclude');
       params.set('sort', sort);
 
       const res = await api.get<{ data: Job[]; pagination: { totalPages: number; total: number } }>(
@@ -273,7 +303,7 @@ export default function ReturnsPage() {
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [statusFilter, typeFilter, dateFrom, dateTo, overdueOnly, hasIssuesOnly, waitingOn, retroFilter, sort, page, limit, search]);
+  }, [statusFilter, typeFilter, dateFrom, dateTo, overdueOnly, hasIssuesOnly, waitingOn, retroFilter, includePreOp, includeInternal, sort, page, limit, search]);
 
   useEffect(() => { loadJobs(); }, [loadJobs]);
 
@@ -288,10 +318,12 @@ export default function ReturnsPage() {
     if (hasIssuesOnly) next.set('has_issues', '1');
     if (waitingOn) next.set('waiting', waitingOn);
     if (retroFilter !== 'all') next.set('retro', retroFilter);
+    if (includePreOp) next.set('pre_op', '1');
+    if (includeInternal) next.set('internal', '1');
     if (sort !== 'overdue') next.set('sort', sort);
     if (page > 1) next.set('page', String(page));
     setSearchParams(next, { replace: true });
-  }, [statusFilter, search, dateFrom, dateTo, overdueOnly, hasIssuesOnly, waitingOn, retroFilter, sort, page, setSearchParams]);
+  }, [statusFilter, search, dateFrom, dateTo, overdueOnly, hasIssuesOnly, waitingOn, retroFilter, includePreOp, includeInternal, sort, page, setSearchParams]);
 
   // Retros load after the list — a pill, not something the layout depends on.
   useEffect(() => {
@@ -302,12 +334,19 @@ export default function ReturnsPage() {
   }, [jobs]);
 
   // Reset page when filters change so the user sees results from the start.
-  useEffect(() => { setPage(1); }, [statusFilter, search, typeFilter, dateFrom, dateTo, overdueOnly, hasIssuesOnly, waitingOn, retroFilter, sort]);
+  useEffect(() => { setPage(1); }, [statusFilter, search, typeFilter, dateFrom, dateTo, overdueOnly, hasIssuesOnly, waitingOn, retroFilter, includePreOp, includeInternal, sort]);
 
   function clearFilters() {
     setSearch(''); setTypeFilter([]); setDateFrom(''); setDateTo('');
     setOverdueOnly(false); setHasIssuesOnly(false); setWaitingOn(''); setRetroFilter('all');
+    setIncludePreOp(false); setIncludeInternal(false);
     setSort('overdue'); setStatusFilter('returned'); setPage(1);
+  }
+
+  /** Click a header: sort by it ascending, or flip it if it's already the sort. */
+  function sortBy(col: SortColumn) {
+    const c = COLUMN_SORTS[col];
+    setSort(sort === c.asc ? c.desc : c.asc);
   }
 
   function jumpToPage() {
@@ -426,6 +465,11 @@ export default function ReturnsPage() {
                 Requires attention
               </span>
             )}
+            {job.is_internal && (
+              <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600 whitespace-nowrap">
+                Internal
+              </span>
+            )}
             <RetroPill job={job} />
           </div>
         </td>
@@ -484,19 +528,38 @@ export default function ReturnsPage() {
 
   // Fixed column widths (table-fixed) so the columns line up from one
   // section's table to the next.
+  // Every header but Close-out sorts the list (server-side, so it holds across
+  // pages); the arrow shows the current column and direction.
   function renderTableHeader() {
     const th = 'px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider';
+    const sortTh = (col: SortColumn, label: string, width: string) => {
+      const c = COLUMN_SORTS[col];
+      const dir = sort === c.asc ? 'asc' : sort === c.desc ? 'desc' : null;
+      return (
+        <th className={`${th} ${width}`} aria-sort={dir === 'asc' ? 'ascending' : dir === 'desc' ? 'descending' : 'none'}>
+          <button
+            type="button"
+            onClick={() => sortBy(col)}
+            className={`inline-flex items-center gap-1 uppercase tracking-wider hover:text-gray-800 ${dir ? 'text-gray-900' : ''}`}
+            title={`Sort by ${c.label.toLowerCase()} — ${dir === 'asc' ? c.descLabel : c.ascLabel}`}
+          >
+            {label}
+            <span className={dir ? '' : 'text-gray-300'}>{dir === 'desc' ? '▼' : '▲'}</span>
+          </button>
+        </th>
+      );
+    };
     return (
       <thead className="bg-gray-50">
         <tr>
-          <th className={`${th} w-24`}>Job #</th>
-          <th className={`${th} w-[17%]`}>Name</th>
-          <th className={`${th} w-[12%]`}>Client</th>
-          <th className={`${th} w-32`}>Status</th>
-          <th className={`${th} w-36`}>Dates</th>
-          <th className={`${th} w-24`}>Value</th>
+          {sortTh('job', 'Job #', 'w-24')}
+          {sortTh('name', 'Name', 'w-[17%]')}
+          {sortTh('client', 'Client', 'w-[12%]')}
+          {sortTh('status', 'Status', 'w-32')}
+          {sortTh('dates', 'Dates', 'w-36')}
+          {sortTh('value', 'Value', 'w-24')}
           <th className={`${th} w-[28%]`}>Close-out</th>
-          <th className={`${th} w-36`}>Manager</th>
+          {sortTh('manager', 'Manager', 'w-36')}
         </tr>
       </thead>
     );
@@ -527,7 +590,7 @@ export default function ReturnsPage() {
     { key: 'rehearsal', label: 'Rehearsals' },
   ];
 
-  const hasFilters = search.trim() !== '' || typeFilter.length > 0 || dateFrom !== '' || dateTo !== '' || overdueOnly || hasIssuesOnly || waitingOn !== '' || retroFilter !== 'all' || sort !== 'overdue' || statusFilter !== 'returned';
+  const hasFilters = search.trim() !== '' || typeFilter.length > 0 || dateFrom !== '' || dateTo !== '' || overdueOnly || hasIssuesOnly || waitingOn !== '' || retroFilter !== 'all' || includePreOp || includeInternal || sort !== 'overdue' || statusFilter !== 'returned';
 
   const headline =
     statusFilter === 'returned' ? `${total} waiting to be completed`
@@ -607,20 +670,11 @@ export default function ReturnsPage() {
               {WAITING_ON_OPTIONS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
             </select>
           </label>
-          <select
-            value={sort}
-            onChange={e => setSort(e.target.value as SortKey)}
-            className={`${selectClass} ml-auto`}
-            title="Sort"
-          >
-            {SORT_OPTIONS.map(opt => (
-              <option key={opt.key} value={opt.key}>{opt.label}</option>
-            ))}
-          </select>
+          {/* Sorting is the column headers on desktop (the phone keeps a Sort select). */}
           {hasFilters && (
             <button
               onClick={clearFilters}
-              className="text-xs text-gray-500 hover:text-gray-700 underline whitespace-nowrap"
+              className="ml-auto text-xs text-gray-500 hover:text-gray-700 underline whitespace-nowrap"
             >
               Clear filters
             </button>
@@ -683,7 +737,7 @@ export default function ReturnsPage() {
 
           <label
             className="inline-flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer"
-            title="Only jobs with at least one open problem in the issues register"
+            title="Only jobs with an open Problem, or a card marked as a problem"
           >
             <input
               type="checkbox"
@@ -692,6 +746,32 @@ export default function ReturnsPage() {
               className="rounded border-gray-300"
             />
             Has issues
+          </label>
+
+          <label
+            className="inline-flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer"
+            title="Show jobs that came back before 1 March 2026, before OP was in use — never closed out here"
+          >
+            <input
+              type="checkbox"
+              checked={includePreOp}
+              onChange={e => setIncludePreOp(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            Include pre-OP
+          </label>
+
+          <label
+            className="inline-flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer"
+            title="Show internal jobs (Ooosh's own use)"
+          >
+            <input
+              type="checkbox"
+              checked={includeInternal}
+              onChange={e => setIncludeInternal(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            Include internal
           </label>
 
           {/* Retro filter — three states (any / filed / not yet). Useful for
@@ -881,6 +961,24 @@ export default function ReturnsPage() {
                   className="rounded border-gray-300 w-4 h-4"
                 />
                 Has issues
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includePreOp}
+                  onChange={(e) => setIncludePreOp(e.target.checked)}
+                  className="rounded border-gray-300 w-4 h-4"
+                />
+                Include pre-OP (before 1 Mar 2026)
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includeInternal}
+                  onChange={(e) => setIncludeInternal(e.target.checked)}
+                  className="rounded border-gray-300 w-4 h-4"
+                />
+                Include internal
               </label>
             </div>
           </div>
