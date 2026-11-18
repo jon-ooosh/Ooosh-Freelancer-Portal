@@ -11,6 +11,7 @@ import { api } from '../../services/api';
 import ModalShell from '../ModalShell';
 import SearchPicker, { type PickerOption } from '../SearchPicker';
 import { ukToday } from '../../lib/ukDate';
+import { useIsPhone } from '../../hooks/useIsPhone';
 import {
   type Asset, type Channel, type Post, CHANNELS, FORMATS, STATUSES, IG_CAPTION_MAX, IG_HASHTAG_MAX, countHashtags,
   assetKindOf, ASSET_KINDS,
@@ -45,6 +46,9 @@ export default function PostEditor({ postId, startDate, onClose, onSaved }: {
   onClose: () => void;
   onSaved: (p: Post) => void;
 }) {
+  // On a phone: full screen, the main fields first, the rest under "More details" (jon, 18 Nov 2026).
+  const isPhone = useIsPhone();
+  const [moreOpen, setMoreOpen] = useState(false);
   const [loading, setLoading] = useState(!!postId);
   const [id, setId] = useState<string | null>(postId);
   const [title, setTitle] = useState('');
@@ -166,13 +170,42 @@ export default function PostEditor({ postId, startDate, onClose, onSaved }: {
     .filter((a) => !assets.some((x) => x.id === a.id))
     .map((a) => ({ value: a.id, label: `${assetKindOf(a.kind).icon} ${a.title}`, hint: [a.organisation_name, a.job_number ? `#${a.job_number}` : null].filter(Boolean).join(' · ') || undefined }));
 
+  const ownerField = (
+    <div>
+      <label className={label} htmlFor="mp-owner">Owner</label>
+      <select id="mp-owner" className={box} value={owner} onChange={(e) => setOwner(e.target.value)}>
+        <option value="">Nobody yet</option>
+        {staff.filter((u) => u.person_id).map((u) => (
+          <option key={u.person_id!} value={u.person_id!}>{`${u.preferred_name || u.first_name} ${u.last_name}`.trim()}</option>
+        ))}
+        {owner && !staff.some((u) => u.person_id === owner) && <option value={owner}>Someone else</option>}
+      </select>
+      <p className="text-[11px] text-gray-500 mt-0.5">Gets a To Do two days before, if it isn't approved.</p>
+    </div>
+  );
+  const themeField = (
+    <div>
+      <label className={label} htmlFor="mp-theme">Theme</label>
+      <input id="mp-theme" className={box} list="mp-themes" value={theme} onChange={(e) => setTheme(e.target.value)} placeholder="Bands on the road / Kit spotlight / Behind the scenes / Tips / Offers" />
+      <datalist id="mp-themes">{themes.map((t) => <option key={t} value={t} />)}</datalist>
+    </div>
+  );
+  const dropButton = id && status !== 'dropped' ? (
+    <button type="button" disabled={saving} onClick={() => { if (window.confirm('Drop this post? It stays on record, off the calendar.')) void save({ status: 'dropped' }); }}
+      className="px-3 py-2 rounded-lg text-gray-500 hover:text-red-600">Drop it</button>
+  ) : null;
+  // What's filled in under "More details", so a closed section still says what it holds.
+  const moreSummary = [owner ? 'owner' : null, theme.trim() ? 'theme' : null, org ? 'band' : null, job ? 'job' : null,
+    credit ? 'credit' : null, linkId ? 'tracked link' : null, liveUrl.trim() ? 'live link' : null, notes.trim() ? 'notes' : null]
+    .filter(Boolean).join(', ');
+
   return (
-    <ModalShell title={id ? 'Social post' : 'New social post'} subtitle="Planned here; scheduled and posted in Meta Business Suite." onClose={() => { if (!saving) onClose(); }} width="max-w-3xl">
+    <ModalShell title={id ? 'Social post' : 'New social post'} subtitle="Planned here; scheduled and posted in Meta Business Suite." onClose={() => { if (!saving) onClose(); }} width="max-w-3xl" fullScreenOnPhone>
       {loading ? <p className="text-sm text-gray-500">Loading…</p> : (
         <div className="space-y-4 text-sm">
           <div>
             <label className={label} htmlFor="mp-title">Name (for us)</label>
-            <input id="mp-title" className={box} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ruby Road on tour - van shot" autoFocus />
+            <input id="mp-title" className={box} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ruby Road on tour - van shot" autoFocus={!postId && !isPhone} />
           </div>
 
           <div className="flex flex-wrap gap-4">
@@ -197,7 +230,7 @@ export default function PostEditor({ postId, startDate, onClose, onSaved }: {
             </div>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div>
               <label className={label} htmlFor="mp-date">Goes out on</label>
               <input id="mp-date" type="date" className={box} value={date} min={date && date < ukToday() ? undefined : ukToday()} onChange={(e) => setDate(e.target.value)} />
@@ -207,30 +240,16 @@ export default function PostEditor({ postId, startDate, onClose, onSaved }: {
               <label className={label} htmlFor="mp-time">At</label>
               <input id="mp-time" type="time" className={box} value={time} disabled={!date} onChange={(e) => setTime(e.target.value)} />
             </div>
-            <div>
+            <div className="col-span-2 sm:col-span-1">
               <label className={label} htmlFor="mp-status">Status</label>
               <select id="mp-status" className={box} value={status} onChange={(e) => setStatus(e.target.value)}>
                 {STATUSES.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
               </select>
             </div>
-            <div>
-              <label className={label} htmlFor="mp-owner">Owner</label>
-              <select id="mp-owner" className={box} value={owner} onChange={(e) => setOwner(e.target.value)}>
-                <option value="">Nobody yet</option>
-                {staff.filter((u) => u.person_id).map((u) => (
-                  <option key={u.person_id!} value={u.person_id!}>{`${u.preferred_name || u.first_name} ${u.last_name}`.trim()}</option>
-                ))}
-                {owner && !staff.some((u) => u.person_id === owner) && <option value={owner}>Someone else</option>}
-              </select>
-              <p className="text-[11px] text-gray-500 mt-0.5">Gets a To Do two days before, if it isn't approved.</p>
-            </div>
+            {!isPhone && ownerField}
           </div>
 
-          <div>
-            <label className={label} htmlFor="mp-theme">Theme</label>
-            <input id="mp-theme" className={box} list="mp-themes" value={theme} onChange={(e) => setTheme(e.target.value)} placeholder="Bands on the road / Kit spotlight / Behind the scenes / Tips / Offers" />
-            <datalist id="mp-themes">{themes.map((t) => <option key={t} value={t} />)}</datalist>
-          </div>
+          {!isPhone && themeField}
 
           <div>
             <div className="flex items-end justify-between">
@@ -299,6 +318,17 @@ export default function PostEditor({ postId, startDate, onClose, onSaved }: {
             )}
           </div>
 
+          {isPhone && (
+            <button type="button" onClick={() => setMoreOpen((o) => !o)} aria-expanded={moreOpen}
+              className="flex w-full items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-left">
+              <span><span className="font-semibold text-gray-800">More details</span>
+                <span className="block text-xs text-gray-500">{moreSummary ? `Filled in: ${moreSummary}` : 'Owner, theme, band, job, credit, tracked link, live link, notes'}</span></span>
+              <span className="text-gray-500">{moreOpen ? '▴' : '▾'}</span>
+            </button>
+          )}
+          {(!isPhone || moreOpen) && (<>
+          {isPhone && ownerField}
+          {isPhone && themeField}
           <div className="grid gap-3 sm:grid-cols-3">
             <div><span className={label}>The band</span><SearchPicker value={org} onChange={setOrg} loadOptions={searchOrgs} minChars={2} placeholder="Search bands…" /></div>
             <div><span className={label}>Their job</span><SearchPicker value={job} onChange={setJob} loadOptions={searchJobs} minChars={2} placeholder="Job number or name…" /></div>
@@ -325,23 +355,25 @@ export default function PostEditor({ postId, startDate, onClose, onSaved }: {
             <label className={label} htmlFor="mp-notes">Notes</label>
             <textarea id="mp-notes" rows={2} className={box} value={notes} onChange={(e) => setNotes(e.target.value)} />
           </div>
+          {isPhone && dropButton && <div>{dropButton}</div>}
+          </>)}
 
-          {error && <div className="text-red-600">{error}</div>}
-          {note && <div className="text-green-700">{note}</div>}
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 pt-3">
+          {/* Kept in view at the bottom of the screen, so Save never needs a scroll. */}
+          <div className="sticky bottom-0 -mx-5 -mb-4 border-t border-gray-100 bg-white px-5 py-3 space-y-2">
+            {error && <div className="text-red-600">{error}</div>}
+            {note && <div className="text-green-700">{note}</div>}
+            <div className="flex items-center justify-between gap-2">
             <div className="flex gap-2">
               <button type="button" onClick={copyForMeta} disabled={!caption.trim() && !hashtags.trim()}
-                className="px-3 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50">Copy for Meta</button>
-              {id && status !== 'dropped' && (
-                <button type="button" disabled={saving} onClick={() => { if (window.confirm('Drop this post? It stays on record, off the calendar.')) void save({ status: 'dropped' }); }}
-                  className="px-3 py-2 rounded-lg text-gray-500 hover:text-red-600">Drop it</button>
-              )}
+                className="px-3 py-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50 whitespace-nowrap">Copy for Meta</button>
+              {!isPhone && dropButton}
             </div>
             <div className="flex gap-2">
               <button type="button" onClick={onClose} disabled={saving} className="px-4 py-2 rounded-lg border border-gray-300 hover:bg-gray-50">Close</button>
               <button type="button" onClick={() => void save()} disabled={saving} className="px-4 py-2 rounded-lg bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-50">
                 {saving ? 'Saving…' : 'Save'}
               </button>
+            </div>
             </div>
           </div>
         </div>

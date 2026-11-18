@@ -721,7 +721,7 @@ export default function MarketingPage() {
           <h1 className="text-2xl font-bold text-gray-900">
             Marketing
           </h1>
-          <p className="text-sm text-gray-600 mt-0.5">
+          <p className="hidden sm:block text-sm text-gray-600 mt-0.5">
             {isManager ? <>Social posts, where we advertise and what it brings in{role === 'admin' && <> · <Link to="/money/business" className="text-ooosh-700 hover:underline">Business figures</Link></>}</>
               : 'Social posts: what goes out when, and the photos and videos for them'}
           </p>
@@ -735,10 +735,10 @@ export default function MarketingPage() {
       </div>
 
       {isManager && (
-      <div className="inline-flex rounded-lg border border-gray-300 p-0.5 text-sm">
+      <div className="flex max-w-full w-fit overflow-x-auto rounded-lg border border-gray-300 p-0.5 text-sm">
         {(['content', ...MANAGER_TABS] as MarketingTab[]).map((t) => (
           <button key={t} type="button" onClick={() => setTab(t)}
-            className={`px-3 py-1.5 rounded-md ${tab === t ? 'bg-ooosh-600 text-white' : 'text-gray-700 hover:bg-gray-50'}`}>
+            className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded-md ${tab === t ? 'bg-ooosh-600 text-white' : 'text-gray-700 hover:bg-gray-50'}`}>
             {t === 'content' ? 'Content'
               : t === 'adverts' ? `Adverts${adverts ? ` (${adverts.length})` : ''}`
               : t === 'links' ? `Tracked links${links ? ` (${links.length})` : ''}`

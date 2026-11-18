@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../../services/api';
 import { ukToday } from '../../lib/ukDate';
+import { useIsPhone } from '../../hooks/useIsPhone';
 import PostEditor, { searchJobs, searchOrgs, searchPeople } from './PostEditor';
 import SearchPicker, { type PickerOption } from '../SearchPicker';
 import {
@@ -46,6 +47,7 @@ function shiftMonth(month: string, n: number): string {
 function monthName(month: string): string {
   return parseYmd(`${month}-01`).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
+function mondayOf(ymd: string): string { return addDays(ymd, -((parseYmd(ymd).getUTCDay() + 6) % 7)); }
 function shortDay(ymd: string | null): string {
   if (!ymd) return '';
   return parseYmd(ymd).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
@@ -127,9 +129,137 @@ function CalendarView({ refreshKey, onOpen, onNew }: { refreshKey: number; onOpe
   );
 }
 
-// ── Board ─────────────────────────────────────────────────────────────────────
-function BoardView({ refreshKey, onOpen, onChanged }: { refreshKey: number; onOpen: (id: string) => void; onChanged: () => void }) {
+// ── Coming up — the calendar on a phone ──────────────────────────────────────
+/**
+ * A week at a time, a day per row (jon, 18 Nov 2026: "a week, then options for the
+ * following weeks"). ‹ › step a week; "Show the week after too" adds the next one below.
+ */
+function ComingUpView({ refreshKey, onOpen, onNew }: { refreshKey: number; onOpen: (id: string) => void; onNew: (date: string) => void }) {
+  const today = ukToday();
+  const thisMonday = mondayOf(today);
+  const [start, setStart] = useState(thisMonday);
+  const [weeks, setWeeks] = useState(1);
   const [posts, setPosts] = useState<Post[] | null>(null);
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState<string | null>(null);
+  const end = addDays(start, weeks * 7 - 1);
+
+  useEffect(() => {
+    setError('');
+    api.get<{ data: Post[] }>(`/marketing-content/posts?view=calendar&from=${start}&to=${end}`)
+      .then((r) => setPosts(r.data))
+      .catch((e) => setError(errMsg(e, 'Could not load the posts')));
+  }, [start, end, refreshKey]);
+
+  const byDay = useMemo(() => {
+    const m = new Map<string, Post[]>();
+    for (const p of posts ?? []) if (p.publish_date) m.set(p.publish_date, [...(m.get(p.publish_date) ?? []), p]);
+    return m;
+  }, [posts]);
+
+  const step = (n: number) => { setStart(addDays(start, n * 7)); setWeeks(1); };
+  const range = `${shortDay(start)} – ${shortDay(end)}`;
+
+  async function copy(p: Post) {
+    try {
+      await navigator.clipboard.writeText([p.caption?.trim(), p.hashtags?.trim()].filter(Boolean).join('\n\n'));
+      setCopied(p.id);
+      setTimeout(() => setCopied(null), 2000);
+    } catch { /* blocked — the editor's own button explains */ }
+  }
+
+  const weekStarts = Array.from({ length: weeks }, (_, i) => addDays(start, i * 7));
+  return (
+    <div className="space-y-3 pb-20">
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => step(-1)} className="rounded-lg border border-gray-300 px-3 py-1.5" aria-label="The week before">‹</button>
+        <div className="flex-1 text-center">
+          <div className="text-sm font-semibold text-gray-900">{start === thisMonday && weeks === 1 ? 'This week' : range}</div>
+          {start === thisMonday && weeks === 1 ? <div className="text-xs text-gray-500">{range}</div>
+            : <button type="button" onClick={() => { setStart(thisMonday); setWeeks(1); }} className="text-xs text-ooosh-700">Back to this week</button>}
+        </div>
+        <button type="button" onClick={() => step(1)} className="rounded-lg border border-gray-300 px-3 py-1.5" aria-label="The week after">›</button>
+      </div>
+      {error && <p className="text-sm text-red-600">{error}</p>}
+      {!posts && !error && <p className="text-sm text-gray-500">Loading…</p>}
+      {posts && weekStarts.map((ws, wi) => (
+        <div key={ws} className="space-y-1.5">
+          {wi > 0 && <h3 className="pt-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Week of {shortDay(ws)}</h3>}
+          {Array.from({ length: 7 }, (_, i) => addDays(ws, i)).map((d) => {
+            const list = byDay.get(d) ?? [];
+            const past = d < today;
+            return (
+              <div key={d} className={`rounded-lg border ${d === today ? 'border-ooosh-300 bg-ooosh-50' : 'border-gray-200 bg-white'} ${past ? 'opacity-60' : ''}`}>
+                <div className="flex items-center justify-between px-3 py-2">
+                  <span className="text-sm font-semibold text-gray-800">
+                    {shortDay(d)}{d === today && <span className="ml-2 rounded-full bg-ooosh-600 px-2 py-0.5 text-[11px] font-medium text-white">Today</span>}
+                    {list.length === 0 && <span className="ml-2 text-xs font-normal text-gray-400">nothing planned</span>}
+                  </span>
+                  <button type="button" onClick={() => onNew(d)} className="h-8 w-8 rounded-full border border-gray-300 text-lg leading-none text-gray-600" aria-label={`Plan a post on ${shortDay(d)}`}>+</button>
+                </div>
+                {list.length > 0 && (
+                  <ul className="space-y-1.5 px-2 pb-2">
+                    {list.map((p) => (
+                      <li key={p.id} className="rounded-lg border border-gray-200 bg-white">
+                        <button type="button" onClick={() => onOpen(p.id)} className="block w-full px-3 py-2 text-left">
+                          <span className="flex items-center gap-1.5 text-xs text-gray-600">
+                            <span className="tabular-nums font-medium">{p.publish_time}</span><ChannelChips channels={p.channels} />
+                            <span className="ml-auto"><StatusPill status={p.status} /></span>
+                          </span>
+                          <span className="mt-1 block text-sm font-medium text-gray-900">{p.title}</span>
+                          {(p.owner_name || p.format) && <span className="block text-xs text-gray-500">{[formatLabel(p.format), p.owner_name].filter(Boolean).join(' · ')}</span>}
+                        </button>
+                        {(p.caption || p.hashtags) && (
+                          <div className="border-t border-gray-100 px-3 py-1.5">
+                            <button type="button" onClick={() => void copy(p)} className="text-xs font-medium text-ooosh-700">
+                              {copied === p.id ? 'Copied ✓' : 'Copy for Meta'}
+                            </button>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+      {posts && (
+        <button type="button" onClick={() => setWeeks((w) => w + 1)} className="w-full rounded-lg border border-dashed border-gray-300 py-2.5 text-sm text-gray-700">
+          Show the week after too
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ── Board ─────────────────────────────────────────────────────────────────────
+function BoardCard({ p, onOpen, onMove }: { p: Post; onOpen: (id: string) => void; onMove: (p: Post, status: string) => void }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-2 text-xs shadow-sm">
+      <button type="button" onClick={() => onOpen(p.id)} className="block w-full text-left">
+        <span className="block font-medium text-gray-900 hover:text-ooosh-700">{p.title}</span>
+        <span className="mt-0.5 flex flex-wrap items-center gap-1 text-gray-500">
+          {p.publish_date ? `${shortDay(p.publish_date)} ${p.publish_time}` : 'No date'}
+          <ChannelChips channels={p.channels} />
+        </span>
+        <span className="mt-0.5 block text-gray-500">
+          {[formatLabel(p.format), p.owner_name, p.asset_count ? `${p.asset_count} file${p.asset_count === 1 ? '' : 's'}` : null].filter(Boolean).join(' · ')}
+        </span>
+      </button>
+      <select value={p.status} onChange={(e) => onMove(p, e.target.value)} aria-label="Move to"
+        className="mt-1 w-full rounded border border-gray-200 px-1 py-0.5 text-[11px] text-gray-600">
+        {STATUSES.map((s) => <option key={s.key} value={s.key}>{s.key === p.status ? s.label : `→ ${s.label}`}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function BoardView({ refreshKey, onOpen, onChanged, isPhone }: { refreshKey: number; onOpen: (id: string) => void; onChanged: () => void; isPhone: boolean }) {
+  const [posts, setPosts] = useState<Post[] | null>(null);
+  // On a phone, one status at a time (six columns don't fit).
+  const [phoneStatus, setPhoneStatus] = useState<string>('in_progress');
   const [error, setError] = useState('');
   useEffect(() => {
     api.get<{ data: Post[] }>('/marketing-content/posts?view=board')
@@ -150,7 +280,25 @@ function BoardView({ refreshKey, onOpen, onChanged }: { refreshKey: number; onOp
     <div className="space-y-2">
       {error && <p className="text-sm text-red-600">{error}</p>}
       {!posts && !error && <p className="text-sm text-gray-500">Loading…</p>}
-      {posts && (
+      {posts && isPhone && (
+        <div className="space-y-2">
+          <div className="-mx-4 flex gap-1.5 overflow-x-auto px-4 pb-1">
+            {columns.map((c) => {
+              const n = posts.filter((p) => p.status === c.key).length;
+              return (
+                <button key={c.key} type="button" onClick={() => setPhoneStatus(c.key)}
+                  className={`shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium ${phoneStatus === c.key ? 'bg-gray-800 text-white' : c.cls}`}>
+                  {c.label} {n}
+                </button>
+              );
+            })}
+          </div>
+          {posts.filter((p) => p.status === phoneStatus).length === 0
+            ? <p className="py-4 text-center text-sm text-gray-500">Nothing at {statusOf(phoneStatus).label}.</p>
+            : <div className="space-y-2">{posts.filter((p) => p.status === phoneStatus).map((p) => <BoardCard key={p.id} p={p} onOpen={onOpen} onMove={(x, st) => void move(x, st)} />)}</div>}
+        </div>
+      )}
+      {posts && !isPhone && (
         <div className="overflow-x-auto">
           <div className="grid min-w-[1000px] grid-cols-6 gap-2">
             {columns.map((c) => {
@@ -159,24 +307,7 @@ function BoardView({ refreshKey, onOpen, onChanged }: { refreshKey: number; onOp
                 <div key={c.key} className="rounded-lg bg-gray-50 p-2">
                   <div className="mb-2 flex items-center justify-between"><StatusPill status={c.key} /><span className="text-xs text-gray-500">{list.length}</span></div>
                   <div className="space-y-2">
-                    {list.map((p) => (
-                      <div key={p.id} className="rounded-lg border border-gray-200 bg-white p-2 text-xs shadow-sm">
-                        <button type="button" onClick={() => onOpen(p.id)} className="block w-full text-left">
-                          <span className="block font-medium text-gray-900 hover:text-ooosh-700">{p.title}</span>
-                          <span className="mt-0.5 flex flex-wrap items-center gap-1 text-gray-500">
-                            {p.publish_date ? `${shortDay(p.publish_date)} ${p.publish_time}` : 'No date'}
-                            <ChannelChips channels={p.channels} />
-                          </span>
-                          <span className="mt-0.5 block text-gray-500">
-                            {[formatLabel(p.format), p.owner_name, p.asset_count ? `${p.asset_count} file${p.asset_count === 1 ? '' : 's'}` : null].filter(Boolean).join(' · ')}
-                          </span>
-                        </button>
-                        <select value={p.status} onChange={(e) => void move(p, e.target.value)} aria-label="Move to"
-                          className="mt-1 w-full rounded border border-gray-200 px-1 py-0.5 text-[11px] text-gray-600">
-                          {STATUSES.map((s) => <option key={s.key} value={s.key}>{s.key === p.status ? s.label : `→ ${s.label}`}</option>)}
-                        </select>
-                      </div>
-                    ))}
+                    {list.map((p) => <BoardCard key={p.id} p={p} onOpen={onOpen} onMove={(x, st) => void move(x, st)} />)}
                   </div>
                 </div>
               );
@@ -223,7 +354,7 @@ function IdeasView({ refreshKey, onOpen }: { refreshKey: number; onOpen: (id: st
 }
 
 // ── Content library ───────────────────────────────────────────────────────────
-function LibraryView() {
+function LibraryView({ isPhone }: { isPhone: boolean }) {
   const [assets, setAssets] = useState<Asset[] | null>(null);
   const [search, setSearch] = useState('');
   const [archived, setArchived] = useState(false);
@@ -263,9 +394,9 @@ function LibraryView() {
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-gray-600">Photos, videos and graphics we could post — each one a Google Drive link. Tag the band and the job so they're easy to find.</p>
+      <p className="hidden text-sm text-gray-600 sm:block">Photos, videos and graphics we could post — each one a Google Drive link. Tag the band and the job so they're easy to find.</p>
       <div className="flex flex-wrap items-center gap-2">
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search (name, band, job number)…" className="w-64 rounded-lg border border-gray-300 px-3 py-1.5 text-sm" />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search (name, band, job number)…" className="w-full sm:w-64 rounded-lg border border-gray-300 px-3 py-1.5 text-sm" />
         <label className="flex items-center gap-1 text-sm text-gray-600"><input type="checkbox" checked={archived} onChange={(e) => setArchived(e.target.checked)} /> Show archived</label>
         {!adding && <button type="button" onClick={() => setAdding({ title: '', url: '', kind: 'photo', notes: '' })} className="ml-auto rounded-lg bg-ooosh-600 px-3 py-1.5 text-sm text-white hover:bg-ooosh-700">+ Add content</button>}
       </div>
@@ -291,7 +422,24 @@ function LibraryView() {
       {error && <p className="text-sm text-red-600">{error}</p>}
       {!assets && !error && <p className="text-sm text-gray-500">Loading…</p>}
       {assets && assets.length === 0 && <p className="text-sm text-gray-500">{archived ? 'Nothing archived.' : 'Nothing in the library yet.'}</p>}
-      {assets && assets.length > 0 && (
+      {assets && assets.length > 0 && isPhone && (
+        <ul className="divide-y rounded-lg border border-gray-200 bg-white">
+          {assets.map((a) => (
+            <li key={a.id} className="px-3 py-2.5">
+              <div className="flex items-start justify-between gap-2">
+                <a href={a.url} target="_blank" rel="noreferrer" className="text-sm font-medium text-ooosh-700">{assetKindOf(a.kind).icon} {a.title}</a>
+                <button type="button" onClick={() => void setArchivedFor(a, !a.archived_at)} className="shrink-0 text-xs text-gray-500">{a.archived_at ? 'Bring back' : 'Archive'}</button>
+              </div>
+              {a.source === 'sitter' && <span className="mt-0.5 inline-block rounded bg-amber-100 px-1.5 text-[11px] text-amber-800">from a sitter</span>}
+              <div className="mt-0.5 text-xs text-gray-500">
+                {[a.organisation_name, a.job_number ? `#${a.job_number}` : null, a.credit_name ? `by ${a.credit_name}` : null, a.used_in ? `in ${a.used_in} post${a.used_in === 1 ? '' : 's'}` : null].filter(Boolean).join(' · ')}
+              </div>
+              {a.notes && <div className="text-xs text-gray-500">{a.notes}</div>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {assets && assets.length > 0 && !isPhone && (
         <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
           <table className="min-w-full text-sm">
             <thead className="bg-gray-50 text-left text-xs text-gray-600">
@@ -324,6 +472,7 @@ function LibraryView() {
 
 // ── The tab ───────────────────────────────────────────────────────────────────
 export default function ContentPlanner({ openPostId }: { openPostId?: string | null }) {
+  const isPhone = useIsPhone();
   const [view, setViewState] = useState<View>(() => {
     try { const v = localStorage.getItem(VIEW_KEY); if (VIEWS.some((x) => x.key === v)) return v as View; } catch { /* storage blocked */ }
     return 'calendar';
@@ -343,24 +492,33 @@ export default function ContentPlanner({ openPostId }: { openPostId?: string | n
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="inline-flex rounded-lg border border-gray-300 p-0.5 text-sm">
+      <div className="flex items-center gap-2">
+        <div className="flex max-w-full overflow-x-auto rounded-lg border border-gray-300 p-0.5 text-sm">
           {VIEWS.map((v) => (
             <button key={v.key} type="button" onClick={() => setView(v.key)}
-              className={`px-3 py-1 rounded-md ${view === v.key ? 'bg-gray-800 text-white' : 'text-gray-700 hover:bg-gray-50'}`}>{v.label}</button>
+              className={`shrink-0 whitespace-nowrap px-3 py-1 rounded-md ${view === v.key ? 'bg-gray-800 text-white' : 'text-gray-700 hover:bg-gray-50'}`}>
+              {isPhone ? (v.key === 'calendar' ? 'Coming up' : v.key === 'library' ? 'Library' : v.label) : v.label}
+            </button>
           ))}
         </div>
-        {view !== 'library' && (
+        {view !== 'library' && !isPhone && (
           <button type="button" onClick={() => setEditor({ id: null, date: null })} className="ml-auto rounded-lg bg-ooosh-600 px-3 py-1.5 text-sm text-white hover:bg-ooosh-700">
             + New post or idea
           </button>
         )}
       </div>
 
-      {view === 'calendar' && <CalendarView refreshKey={refreshKey} onOpen={(id) => setEditor({ id })} onNew={(date) => setEditor({ id: null, date })} />}
-      {view === 'board' && <BoardView refreshKey={refreshKey} onOpen={(id) => setEditor({ id })} onChanged={() => { /* the board merged it in already */ }} />}
+      {view === 'calendar' && !isPhone && <CalendarView refreshKey={refreshKey} onOpen={(id) => setEditor({ id })} onNew={(date) => setEditor({ id: null, date })} />}
+      {view === 'calendar' && isPhone && <ComingUpView refreshKey={refreshKey} onOpen={(id) => setEditor({ id })} onNew={(date) => setEditor({ id: null, date })} />}
+      {view === 'board' && <BoardView isPhone={isPhone} refreshKey={refreshKey} onOpen={(id) => setEditor({ id })} onChanged={() => { /* the board merged it in already */ }} />}
       {view === 'ideas' && <IdeasView refreshKey={refreshKey} onOpen={(id) => setEditor({ id })} />}
-      {view === 'library' && <LibraryView />}
+      {view === 'library' && <LibraryView isPhone={isPhone} />}
+
+      {/* On a phone, "new" is a round button in the corner, always in reach. */}
+      {isPhone && view !== 'library' && !editor && (
+        <button type="button" onClick={() => setEditor({ id: null, date: null })} aria-label="New post or idea"
+          className="fixed bottom-5 right-5 z-40 h-14 w-14 rounded-full bg-ooosh-600 text-3xl leading-none text-white shadow-lg hover:bg-ooosh-700">+</button>
+      )}
 
       {editor && (
         <PostEditor key={editor.id ?? `new-${editor.date ?? ''}`} postId={editor.id} startDate={editor.date}

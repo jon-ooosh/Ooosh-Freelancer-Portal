@@ -356,6 +356,13 @@ screens `frontend/src/components/marketing/` (`ContentPlanner.tsx`, `PostEditor.
 - **Views:** a month calendar (Monday first, UK days, click a day to plan a post on it), a board by status (published
   posts leave it after 30 days), the ideas (no date) and the content library. "Copy for Meta" puts the caption and
   hashtags on the clipboard. The view is remembered per browser.
+- **On a phone** (under 640px, `hooks/useIsPhone.ts`; jon, 18 Nov 2026 — "it'll be used on a mobile a fair bit"): the
+  calendar is **Coming up** — a week at a time, a row per day (today marked, empty days one line with a "+"), ‹ › step
+  a week, "Show the week after too" adds the next week below, and each post card has its own "Copy for Meta". The board
+  is one status at a time (pills with counts). The library is a list. The post editor fills the screen with **Save,
+  Close and Copy for Meta pinned to the bottom** (pinned on a laptop too); owner, theme, band, job, credit, tracked
+  link, live link, notes and "Drop it" fold under **More details**, which says what's filled in while closed. "+ New"
+  is a round button in the corner. Same data and routes as the laptop — layout only.
 - **Not built, on purpose:** reach / likes typed in (jon: the tracked links show the enquiries, which is what counts),
   posting or scheduling from OP, file uploads (Drive holds the files).
 
