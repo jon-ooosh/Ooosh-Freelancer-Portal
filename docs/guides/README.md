@@ -17,7 +17,7 @@ The plan for the set is `docs/FREELANCER-PORTAL-SPEC.md` §8.
 | `fire-procedure/` | Fire: what to do (studio sitters and anyone in the building out of hours; the sitter guide points at it) | live, Nov 2026 |
 | `working-with-ooosh/` | Working with Ooosh: what we expect, and what freelancers can expect from us (text only; freelancers confirm they've read it) | live, Nov 2026 |
 | `shop-till/` | How to use the shop till (studio sitters); the till's **How to use** button opens Resources. Scanning with the phone camera added Nov 2026 (the screenshot run feeds the camera `sample-barcode.mjpeg`, and checks the real reader reads it) | live; rebuilt in the new look, Nov 2026 |
-| `staff-till/` | The shop till iPad and scanner (**STAFF only**: upload it as a Staff Document but do NOT share it with freelancers). Text only | new, Nov 2026 |
+| `staff-till/` | The shop till: staff guide (**STAFF only**: upload it as a Staff Document but do NOT share it with freelancers). Part 1 the till anywhere (selling, who / how they pay, discounts and vouchers, Used for Ooosh, after the sale), Part 2 the front desk iPad and its scanner. **A4** (`shared/guide-a4.css`), read on a laptop; screenshots from a local OP with made-up stock | Nov 2026; widened 18 Nov |
 
 ## How a guide is built
 
@@ -31,6 +31,7 @@ Oct 2026 look (DM Sans, plum, warm neutrals).
 | `<guide>/screenshots.js` | Renders the real portal pages on a phone-sized screen, every `/api` call answered from sample data at the top of the file. Nothing touches OP. |
 | `<guide>/<guide>-guide.pdf` | The PDF to upload. |
 | `shared/guide.css` | The look, shared by every guide. Each guide sets its footer with `:root { --footer: "…"; }`. |
+| `shared/guide-a4.css` | A4 pages for STAFF guides read on a laptop (load it after `guide.css`): bigger pages, wider screenshots, `.part` and `.cols`. Freelancer guides stay phone-width. |
 | `shared/build-pdf.js` | HTML to PDF. Refuses a missing image, an em or en dash, or a page whose content runs into its footer. |
 | `shared/shots.js` | Screenshot helpers: the phone (with `next dev`'s "N" badge hidden), the fake login cookie, the orange rings, clipping, hiding fixed bars, sample photos, a drawn signature. |
 | `shared/sample-photos/` | Made-up van photos (18, in the app's order) and a backline one, fed to the camera. |
