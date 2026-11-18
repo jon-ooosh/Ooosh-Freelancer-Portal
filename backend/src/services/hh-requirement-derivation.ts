@@ -310,11 +310,20 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
   // Load job with line items. Rehearsal date columns are extracted in
   // Europe/London so the finish-on-the-day rule (see rehearsal-plan.ts) keys off
   // the real local hour regardless of server timezone.
+  // End hour: OP's own date edit stores job_end as a bare date (midnight) with
+  // the time in the separate end_time column, so end_time wins when set (as it
+  // does in buildHHDateTime() on the HireHop push). Reading midnight from
+  // job_end made the rule drop the last evening (Nov 2026: an 18 Nov
+  // 09:00–22:00 rehearsal showed no sitter evening at all). return_time is NOT
+  // used for the job_end-less fallback — it defaults to 09:00 on every job.
   const jobResult = await query(
     `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes, is_internal, self_drive_van_override,
        (COALESCE(job_date, out_date) AT TIME ZONE 'Europe/London')::date::text AS reh_start_date,
        (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London')::date::text AS reh_end_date,
-       EXTRACT(HOUR FROM (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London'))::int AS reh_end_hour
+       COALESCE(
+         CASE WHEN job_end IS NOT NULL THEN EXTRACT(HOUR FROM end_time) END,
+         EXTRACT(HOUR FROM (COALESCE(job_end, return_date) AT TIME ZONE 'Europe/London'))
+       )::int AS reh_end_hour
      FROM jobs WHERE id = $1 AND is_deleted = false`,
     [jobId]
   );
