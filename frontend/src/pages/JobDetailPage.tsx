@@ -71,6 +71,7 @@ import { loadCloseOutPlan, subscribeCloseOutPlan, closeOutView, TONE, CloseOutPl
 import { cancellationBalance, cancellationFeeGross } from '../lib/money';
 import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
 import GoodwillNote from '../components/goodwill/GoodwillNote';
+import AccountCreditNote from '../components/account-credit/AccountCreditNote';
 import GoodwillJobChips from '../components/goodwill/GoodwillJobChips';
 
 
@@ -7029,6 +7030,9 @@ function JobDetailContent() {
                 )}
               </div>
             )}
+
+            {/* The client's own money held from an earlier job (docs/CREDIT-ON-ACCOUNT-SPEC.md) */}
+            <AccountCreditNote clientOrgId={job.client_id} jobId={job.id} />
 
             {/* Goodwill credit to use, or reserved on this job (docs/GOODWILL-CREDIT-SPEC.md §4.3) */}
             <GoodwillNote orgIds={[job.client_id, jobOrgs.find(jo => jo.role === 'band')?.organisation_id]} jobId={job.id} />

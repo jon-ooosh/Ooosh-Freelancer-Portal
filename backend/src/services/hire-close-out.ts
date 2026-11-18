@@ -40,6 +40,7 @@ import xeroBroker from './xero-broker';
 import { isXeroConfigured } from '../config/xero';
 import { DISPLAY_NAME_SQL } from './display-name';
 import { hasNonStandardVatItem } from './vat-adjustment';
+import { holdForPlan, PlanHold } from './account-credit';
 import { hhLocalNow } from './shop-stock';
 import { getMethodForBankId, PAYMENT_METHODS_LABELS } from './hh-deposit';
 import { handleJobStatusChange } from '../routes/webhooks';
@@ -164,6 +165,12 @@ export interface CloseOutPlan {
    * completed. Null on every other job.
    */
   cancellation: CancellationPlan | null;
+  /**
+   * This job's unallocated hire money is being HELD ON ACCOUNT for the client
+   * (docs/CREDIT-ON-ACCOUNT-SPEC.md) — a decision, like a refund would be, so the surplus
+   * no longer waits to be sorted. The money has not moved. Null when it isn't held.
+   */
+  onAccount: PlanHold | null;
 }
 
 export interface CloseOutResult {
@@ -648,6 +655,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     ...await jobFacts(job.id),
     paymentTarget: null as CloseOutPlan['paymentTarget'],
     cancellation: null as CancellationPlan | null,
+    onAccount: null as PlanHold | null,
   };
   if (!job.hh_job_number) { blockers.push('This job has no HireHop job number.'); return base; }
   if (job.is_internal) { blockers.push('Internal job — there is no client to invoice.'); return base; }
@@ -815,6 +823,12 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     warnings.push(`${gbp(base.excessHeld)} excess is still held on this job — claim, roll over or reimburse it from the Excess card. It is never allocated here.`);
   }
 
+  // Held on account? The stored figure follows what HireHop has unallocated right now —
+  // but only from a read nothing is blocking, so a half-read job never zeroes a hold.
+  const surplusNow = round2(surplus.reduce((s, x) => s + x.amount, 0));
+  base.onAccount = cancelled ? null : await holdForPlan(job.id, blockers.length === 0 ? surplusNow : null);
+  const held = base.onAccount;
+
   // Sentences.
   const sentences: string[] = [];
   for (const a of allocations) sentences.push(`Allocate ${gbp(a.amount)} of payment ${a.depositId} to ${a.invoiceNumber}.`);
@@ -824,7 +838,9 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   for (const s of surplus) {
     sentences.push(cancelled
       ? `Refund ${gbp(s.amount)} of payment ${s.depositId} to the client.`
-      : `Leave ${gbp(s.amount)} of payment ${s.depositId} unallocated — refund it, apply it to another job, or hold it on account.`);
+      : held
+        ? `Leave ${gbp(s.amount)} of payment ${s.depositId} unallocated — it is held on account for ${held.clientName}.`
+        : `Leave ${gbp(s.amount)} of payment ${s.depositId} unallocated — refund it, apply it to another job, or hold it on account.`);
   }
   if (base.paymentTarget) {
     for (const inv of open.filter((i) => i.invoiceId !== target!.invoiceId)) {
@@ -837,7 +853,9 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   }
   base.sentences = sentences;
   base.ready = blockers.length === 0 && allocations.length > 0;
-  base.readyToComplete = !cancelled && blockers.length === 0 && invoices.length > 0 && open.length === 0 && surplus.length === 0 && payments.length === 0;
+  // Money held on account is a decision made — it no longer stands in the way of completing.
+  const nothingSpare = held ? allocations.length === 0 : surplus.length === 0 && payments.length === 0;
+  base.readyToComplete = !cancelled && blockers.length === 0 && invoices.length > 0 && open.length === 0 && nothingSpare;
   if (base.cancellation) {
     base.cancellation.settled = blockers.length === 0 && feeInvoiced && open.length === 0 && payments.length === 0;
     if (base.cancellation.settled) await markCancellationReconciled(job.id);
@@ -881,6 +899,7 @@ export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: bo
         blockers: [], warnings: [],
         sentences: [`Completed in HireHop${completed.user_name ? ` by ${completed.user_name}` : ''} on ${String(completed.created_at).slice(0, 10)}.`],
         ready: false, readyToComplete: false, log: entries, ...await jobFacts(job.id), paymentTarget: null, cancellation: null,
+        onAccount: await holdForPlan(job.id, null),
       };
     }
   }
@@ -1039,7 +1058,9 @@ async function allocateSteps(job: JobRow, rep: CloseReporter, onlyFromDeposit?: 
     const note = await syncRefundReminder(job.id, left, rep.userId ?? null);
     if (note) parts.push(note);
   } else if (after.surplus.length) {
-    parts.push(`${gbp(left)} is unallocated — refund it, apply it to another job, or hold it on account.`);
+    parts.push(after.onAccount
+      ? `${gbp(left)} is held on account for ${after.onAccount.clientName}.`
+      : `${gbp(left)} is unallocated — refund it, apply it to another job, or hold it on account.`);
   }
   if (after.readyToComplete) parts.push('Ready to complete.');
   return parts.join(' ');
@@ -1065,7 +1086,7 @@ export async function completeHireJob(jobIdOrNumber: string, userId: string | nu
       const reasons = [...plan.blockers];
       const open = plan.invoices.filter((i) => i.owing >= PENNY);
       if (open.length) reasons.push(`${open.map((i) => `${i.number} still shows ${gbp(i.owing)} owing`).join('; ')} in HireHop.`);
-      if (plan.surplus.length) {
+      if (plan.surplus.length && !plan.onAccount) {
         reasons.push(`${gbp(round2(plan.surplus.reduce((s, x) => s + x.amount, 0)))} of the client's money is unallocated — `
           + 'refund it, apply it to another job, or record that it is held on account first.');
       }
