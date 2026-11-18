@@ -14,7 +14,11 @@ h2 { font-size: 23px; }
 .cover .sub { font-size: 18px; }
 .shot { border-radius: 10px; }
 .shot.half { width: 62%; }
-/* A part divider: "Part 1 · The till" */
-.part { margin: 0 0 14px; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--link); }
+/* A part divider: a plum band across the page, "Part 1: The till" (jon: make it obvious). */
+.part {
+  margin: 0 0 22px; padding: 12px 18px;
+  background: var(--accent); color: #fff; border-radius: 10px;
+  font-size: 26px; font-weight: 800; letter-spacing: -0.01em; line-height: 1.2;
+}
 .cols { display: flex; gap: 22px; align-items: flex-start; }
 .cols > * { flex: 1; min-width: 0; }
