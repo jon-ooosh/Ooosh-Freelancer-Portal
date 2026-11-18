@@ -5,17 +5,22 @@
  * Opens where you are looking, whatever you clicked on — the reason it exists
  * (a booking panel that opened at the top of a long calendar went unnoticed).
  * Content scrolls inside the backdrop on a short screen.
+ *
+ * `fullScreenOnPhone` makes it fill a phone screen edge to edge (no backdrop margin, no
+ * rounded corners) — for long forms used on a phone. Unchanged from `sm` up.
  */
 
 import { useEffect, type ReactNode } from 'react';
 
-export default function ModalShell({ title, subtitle, onClose, children, width = 'max-w-2xl' }: {
+export default function ModalShell({ title, subtitle, onClose, children, width = 'max-w-2xl', fullScreenOnPhone = false }: {
   title: ReactNode;
   subtitle?: ReactNode;
   onClose: () => void;
   children: ReactNode;
   /** Tailwind max-width class for the panel. */
   width?: string;
+  /** Fill the whole screen on a phone (under 640px). */
+  fullScreenOnPhone?: boolean;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -24,10 +29,12 @@ export default function ModalShell({ title, subtitle, onClose, children, width =
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-4 sm:p-8 overflow-y-auto"
+    <div className={`fixed inset-0 z-50 bg-black/40 flex items-start justify-center ${fullScreenOnPhone ? 'p-0' : 'p-4'} sm:p-8 overflow-y-auto`}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div role="dialog" aria-modal="true"
-        className={`w-full ${width} bg-white rounded-xl shadow-xl border border-gray-200`}>
+        className={`w-full ${width} bg-white shadow-xl ${fullScreenOnPhone
+          ? 'min-h-full rounded-none sm:min-h-0 sm:rounded-xl sm:border sm:border-gray-200'
+          : 'rounded-xl border border-gray-200'}`}>
         <div className="flex items-start gap-3 px-5 pt-4 pb-3 border-b border-gray-100">
           <div className="min-w-0 flex-1">
             <h2 className="text-base font-semibold text-gray-900">{title}</h2>
