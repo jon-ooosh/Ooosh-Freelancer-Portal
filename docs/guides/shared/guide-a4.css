@@ -1,0 +1,20 @@
+/*
+ * A4 pages for STAFF guides, read on a laptop in OP's Staff Documents rather than on a
+ * phone (jon, 18 Nov 2026). Load it AFTER guide.css: same look (DM Sans, plum, warm
+ * neutrals), bigger pages and wider screenshots. build-pdf.js works the same — the footer
+ * still sits in the bottom 34px of each page.
+ */
+@page { size: 210mm 297mm; margin: 0; }
+body { font-size: 14px; }
+.page { width: 210mm; height: 297mm; padding: 40px 48px 46px; }
+.page::after { left: 48px; right: 48px; bottom: 16px; }
+h2 { font-size: 23px; }
+.cover h1 { font-size: 36px; }
+.cover .logo { width: 90px; }
+.cover .sub { font-size: 18px; }
+.shot { border-radius: 10px; }
+.shot.half { width: 62%; }
+/* A part divider: "Part 1 · The till" */
+.part { margin: 0 0 14px; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--link); }
+.cols { display: flex; gap: 22px; align-items: flex-start; }
+.cols > * { flex: 1; min-width: 0; }

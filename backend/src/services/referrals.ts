@@ -376,7 +376,10 @@ async function sendRewardThanks(referrerPersonId: string, detail: string, vouche
 export async function sendReferralTestEmails(toEmail: string, personId: string | null): Promise<{ ok: boolean; error?: string }> {
   const offer = await currentOffer();
   const name = personId ? (await referrer(personId)).name : '';
-  const sample = makeReferralCode(name || 'sam');
+  // The tester's OWN link when they have a person record, so the link in the test really
+  // goes to the enquiry form (a made-up code goes to the home page). Else a sample.
+  const own = personId ? await getOrCreateReferralLink(personId, null).catch(() => null) : null;
+  const sample = own?.code || makeReferralCode(name || 'sam');
   const e2 = await emailService.send('referral_enquiry_thanks', {
     to: toEmail, replyTo: REPLY_TO, fromName: FROM_NAME, subjectOverride: '[Test] Thank you for sending someone our way',
     variables: { ...greeting(name), rewardLine: enquiryThanksRewardLine(offer) },
