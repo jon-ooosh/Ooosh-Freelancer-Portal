@@ -18,14 +18,19 @@ import { ukToday } from './uk-date';
 // 'released' — terminal, out of v_excess_held, no Reimburse button — while £950
 // of the client's money taken on a second card was still sitting with us.
 //
-// So: recording or linking money onto a record with a live hold is refused (staff
-// split an excess across two cards by taking two PAYMENTS), and as a backstop a
-// release that finds money already taken keeps the record live for that money
-// (STATUS_AFTER_RELEASE_SQL) instead of burying it.
+// So: recording or linking money onto a record with a live hold is refused, and as
+// a backstop a release that finds money already taken keeps the record live for
+// that money (STATUS_AFTER_RELEASE_SQL) instead of burying it.
+//
+// ONE CARD PER EXCESS (jon, Nov 2026). Two payments on one record don't reimburse
+// cleanly either: the record keeps the LAST payment's PaymentIntent and the FIRST
+// payment's HireHop deposit, so Reimburse refuses (HireHop shortfall) or refunds
+// the wrong card. If a client can't put the excess on one card, a manager decides
+// (Edit Required Amount) — never a split.
 
 export const HOLD_PLUS_PAYMENT_MESSAGE =
-  'This excess has a pre-auth hold on it. A record holds a pre-auth OR payments, never both — ' +
-  'capture or release the hold first. To split an excess across two cards, take two excess payments instead of a pre-auth.';
+  'This excess has a pre-auth hold on it, so no money can be added to it — capture or release the hold first. ' +
+  'An excess goes on ONE card: if the client can\'t do that, ask a manager (Edit Required Amount).';
 
 /** Does this record carry a live pre-auth hold (so no money may be added to it)? */
 export function hasLiveHold(row: { excess_status?: string | null; amount_held?: string | number | null }): boolean {
