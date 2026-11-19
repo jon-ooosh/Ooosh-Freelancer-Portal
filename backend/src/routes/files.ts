@@ -299,6 +299,27 @@ router.delete('/delete', async (req: AuthRequest, res: Response) => {
       res.status(400).json({ error: 'Invalid entity_type' });
       return;
     }
+    // Same rule as uploading one: a driver's documents are manager-tier.
+    if (entity_type === 'drivers' && !isManagerTier(req.user?.role)) {
+      res.status(403).json({ error: 'Only a manager can remove a driver document' });
+      return;
+    }
+
+    // The file must actually be ON this record (Nov 2026). Until then the route
+    // took the key on trust: it tidied the record's list, then deleted WHATEVER
+    // key it was sent from R2 — so any staff login could permanently remove a
+    // claim photo, a staff record or a premises certificate by naming its key
+    // beside any record id. R2 has no second copy (BACKLOG: file backup).
+    const owner = await query(`SELECT files FROM ${entity_type} WHERE id = $1`, [entity_id]);
+    if (owner.rows.length === 0) {
+      res.status(404).json({ error: 'Record not found' });
+      return;
+    }
+    const onRecord = ((owner.rows[0].files || []) as Array<{ url?: string }>).some((f) => f.url === key);
+    if (!onRecord) {
+      res.status(404).json({ error: "That file isn't on this record" });
+      return;
+    }
 
     // Delete guard — a file with live links out of it is BLOCKED, not silently
     // unlinked. Someone deliberately surfaced this file on a band; removing it
@@ -345,9 +366,11 @@ router.delete('/delete', async (req: AuthRequest, res: Response) => {
       );
     }
 
-    // Remove from R2 — skip for external links (type: 'link'), which have an
-    // http(s) URL as their "key" and no object in our bucket.
-    if (!/^https?:\/\//i.test(String(key))) {
+    // Remove from R2 — only an object this route's own upload made (`files/…`).
+    // External links (type: 'link') have an http(s) URL as their "key" and no
+    // object at all; any other key found on a record is taken off the list but
+    // its object is left where it is, so nothing outside `files/` is ever deleted here.
+    if (!/^https?:\/\//i.test(String(key)) && String(key).startsWith('files/')) {
       await deleteFromR2(key);
     }
 
