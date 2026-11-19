@@ -245,8 +245,8 @@ export default function CombineBookingsModal({ jobId, onClose, onCombined }: Pro
                   {preview.survivor.pipeline_status === 'dispatched' && (
                     <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2 mb-2">
                       #{preview.survivor.hh_job_number} is out on hire, so its drivers signed for the old end date.
-                      Afterwards, on that job: <strong>Extend hire form</strong> on each driver, then{' '}
-                      <strong>Hire form ▾ → Generate + Email</strong> so each gets the new end date.
+                      Afterwards, on that job: <strong>Update hire forms</strong> on the "Hire dates have changed"
+                      banner, so each driver is emailed an agreement with the new end date.
                       Check the price in HireHop too — it re-prices over the longer hire.
                     </p>
                   )}

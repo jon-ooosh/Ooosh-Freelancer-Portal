@@ -9,7 +9,7 @@ import { Router, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { query, getPool } from '../config/database';
-import { authenticate, authorize, MANAGER_ROLES, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, MANAGER_ROLES, STAFF_ROLES, AuthRequest } from '../middleware/auth';
 import {
   authenticateVehicleFlexible,
   isFreelancerBookout,
@@ -40,6 +40,8 @@ import { applyAccountAutoCover, AUTO_COVER_MARKER, TOWBAR_LIST_ID } from '../ser
 import { reconcileJobExcessTopN } from '../services/excess-topn';
 import { isIdentityAuthorised, identityHoldReason } from '../services/identity-review';
 import { retireDoneBells } from '../services/notification-resolve';
+import { hireDateYmd, getHireDateCheck } from '../services/hire-agreement-dates';
+import { ukDatePlus } from '../services/uk-date';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -2603,11 +2605,14 @@ async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string
     const r2Key = `hire-forms/${assignmentId}/${filename}`;
     await uploadToR2(r2Key, Buffer.from(pdfBytes), 'application/pdf');
 
+    // agreement_hire_* = the dates this PDF prints (mig 358), read by the
+    // "hire dates have changed" check (services/hire-agreement-dates.ts).
     await query(
       `UPDATE vehicle_hire_assignments
-       SET hire_form_pdf_key = $1, hire_form_generated_at = NOW(), updated_at = NOW()
+       SET hire_form_pdf_key = $1, hire_form_generated_at = NOW(),
+           agreement_hire_start = $3::date, agreement_hire_end = $4::date, updated_at = NOW()
        WHERE id = $2`,
-      [r2Key, assignmentId]
+      [r2Key, assignmentId, formData.hireStartDate || null, formData.hireEndDate || null]
     );
 
     console.log(`[hire-forms] ${trigger}: PDF generated for ${assignmentId} (${pdfBytes.length} bytes)`);
@@ -2774,8 +2779,11 @@ async function generateAndEmailCrossVanHireForm(
       // No recipient — keep the PDF + record (proof of authorisation) but leave
       // emailed_at NULL. Won't auto-retry; staff can resend if a contact lands.
       await query(
-        `UPDATE hire_form_documents SET vehicle_reg = $1, pdf_r2_key = $2 WHERE id = $3`,
-        [vanReg, r2Key, docId],
+        `UPDATE hire_form_documents
+            SET vehicle_reg = $1, pdf_r2_key = $2,
+                agreement_hire_start = $4::date, agreement_hire_end = $5::date
+          WHERE id = $3`,
+        [vanReg, r2Key, docId, formData.hireStartDate || null, formData.hireEndDate || null],
       );
       console.warn(`[hire-forms] cross-van: no recipient for ${driverAssignmentId} van ${vanReg}; PDF stored, not emailed`);
       return 'skipped';
@@ -2805,9 +2813,10 @@ async function generateAndEmailCrossVanHireForm(
 
     await query(
       `UPDATE hire_form_documents
-         SET vehicle_reg = $1, pdf_r2_key = $2, email_to = $3, emailed_at = NOW()
+         SET vehicle_reg = $1, pdf_r2_key = $2, email_to = $3, emailed_at = NOW(),
+             agreement_hire_start = $5::date, agreement_hire_end = $6::date
        WHERE id = $4`,
-      [vanReg, r2Key, target.to, docId],
+      [vanReg, r2Key, target.to, docId, formData.hireStartDate || null, formData.hireEndDate || null],
     );
     if (target.kind === 'fallback' && target.jobId) {
       await logFallbackToTimeline({ jobId: target.jobId, templateId: 'hire_form' });
@@ -2957,18 +2966,10 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
   // .split('T')[0] approach returned the raw toString which leaked into the
   // PDF as "Sun Jan 09 1983 00:00:00 GM...". Use toISOString() which is
   // always YYYY-MM-DDTHH:MM:SS.sssZ.
-  function toISODate(v: unknown): string | undefined {
-    if (v === null || v === undefined || v === '') return undefined;
-    if (v instanceof Date) {
-      if (isNaN(v.getTime())) return undefined;
-      return v.toISOString().split('T')[0];
-    }
-    const s = String(v);
-    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-    const d = new Date(s);
-    if (isNaN(d.getTime())) return undefined;
-    return d.toISOString().split('T')[0];
-  }
+  // Shared with services/hire-agreement-dates.ts, so "the dates this
+  // agreement printed" and "the dates it would print now" are worked out the
+  // same way (the "hire dates have changed" warning compares the two).
+  const toISODate = hireDateYmd;
 
   return {
     driverName: row.driver_name || '',
@@ -3092,11 +3093,14 @@ router.post('/:id/generate-pdf', authenticatePdfRoute, async (req: FlexibleVehic
     await uploadToR2(r2Key, Buffer.from(pdfBytes), 'application/pdf');
 
     // Update assignment record
+    // agreement_hire_* = the dates this PDF prints (mig 358), read by the
+    // "hire dates have changed" check (services/hire-agreement-dates.ts).
     await query(
       `UPDATE vehicle_hire_assignments
-       SET hire_form_pdf_key = $1, hire_form_generated_at = NOW(), updated_at = NOW()
+       SET hire_form_pdf_key = $1, hire_form_generated_at = NOW(),
+           agreement_hire_start = $3::date, agreement_hire_end = $4::date, updated_at = NOW()
        WHERE id = $2`,
-      [r2Key, id]
+      [r2Key, id, formData.hireStartDate || null, formData.hireEndDate || null]
     );
 
     console.log(`[hire-forms] PDF generated and stored: ${r2Key} (${pdfBytes.length} bytes)`);
@@ -3887,6 +3891,287 @@ router.post('/send-email', authenticate, validate(sendHireFormEmailSchema), asyn
   } catch (error) {
     console.error('Send hire form email error:', error);
     res.status(500).json({ error: 'Failed to send emails' });
+  }
+});
+
+// ── Hire dates changed → update the hire forms ─────────────────────────────
+//
+// When a hire's dates change (most often extended while the van is out), the
+// drivers' agreements still carry the old dates, and any driver row that
+// STORES its own dates no longer follows the job. services/hire-agreement-dates.ts
+// decides which rows need attention; these two routes show it and act on it.
+//
+// Deliberately a person's button, never automatic (jon, Nov 2026): a job's
+// dates are often changed in HireHop only to price a change for the client and
+// then put back — emailing on every change would spam drivers with agreements.
+// Revert the dates and the warning disappears by itself.
+
+/**
+ * Regenerate ONE agreement (the driver's own van, or one of a multi-van
+ * driver's other-van agreements) with the current dates, file it, and email it
+ * as an UPDATED agreement. Mirrors generateAndEmailHireFormPdf /
+ * generateAndEmailCrossVanHireForm, minus their once-only claims — this is the
+ * deliberate re-send. The caller has already checked the driver is cleared.
+ */
+async function sendUpdatedAgreement(
+  assignmentId: string,
+  otherVan: { docId: string; vehicleId: string } | null,
+): Promise<{ status: 'sent' | 'no_recipient' | 'failed'; vehicleReg: string | null; to?: string }> {
+  const formData = await loadHireFormData(assignmentId);
+  if (!formData) return { status: 'failed', vehicleReg: null };
+
+  let vanModel = formData.vehicleModel;
+  if (otherVan) {
+    const van = await query(`SELECT reg, vehicle_type, make, model FROM fleet_vehicles WHERE id = $1`, [otherVan.vehicleId]);
+    formData.vehicleReg = (van.rows[0]?.reg as string | undefined) || '';
+    vanModel = (van.rows[0]?.vehicle_type as string | undefined) || '';
+    formData.vehicleModel = vanModel;
+    formData.vehicleMakeModel = composeMakeModel(van.rows[0]?.make, van.rows[0]?.model) || undefined;
+  }
+  if (!formData.vehicleReg || formData.vehicleReg === 'TBC') {
+    return { status: 'failed', vehicleReg: null };
+  }
+
+  const { pdfBytes, filename } = await generateHireFormPdf(formData);
+  const r2Key = `hire-forms/${assignmentId}/${filename}`;
+  await uploadToR2(r2Key, Buffer.from(pdfBytes), 'application/pdf');
+
+  if (otherVan) {
+    await query(
+      `UPDATE hire_form_documents
+          SET vehicle_reg = $1, pdf_r2_key = $2, generated_at = NOW(),
+              agreement_hire_start = $4::date, agreement_hire_end = $5::date
+        WHERE id = $3`,
+      [formData.vehicleReg, r2Key, otherVan.docId, formData.hireStartDate || null, formData.hireEndDate || null],
+    );
+  } else {
+    await query(
+      `UPDATE vehicle_hire_assignments
+          SET hire_form_pdf_key = $1, hire_form_generated_at = NOW(),
+              agreement_hire_start = $3::date, agreement_hire_end = $4::date, updated_at = NOW()
+        WHERE id = $2`,
+      [r2Key, assignmentId, formData.hireStartDate || null, formData.hireEndDate || null],
+    );
+  }
+
+  const target = await resolveHireFormEmailTarget(assignmentId, formData.email);
+  if (target.kind === 'none') return { status: 'no_recipient', vehicleReg: formData.vehicleReg };
+
+  const emailResult = await emailService.send('hire_form', {
+    to: target.to,
+    cc: target.cc.length > 0 ? target.cc : undefined,
+    prependBanner: target.kind === 'fallback' ? target.banner : undefined,
+    variables: {
+      driverName: formData.driverName,
+      vehicleReg: formData.vehicleReg,
+      vehicleModel: vanModel || 'TBC',
+      hireStart: fmtDate(formData.hireStartDate),
+      hireEnd: fmtDate(formData.hireEndDate),
+      jobNumber: formData.hhJobNumber || '',
+      updatedNote: 'yes',
+      ...(otherVan ? { multiVanNote: 'yes' } : {}),
+    },
+    attachments: [{ filename, content: Buffer.from(pdfBytes), contentType: 'application/pdf' }],
+  });
+  if (!emailResult.success) return { status: 'failed', vehicleReg: formData.vehicleReg };
+
+  if (otherVan) {
+    await query(
+      `UPDATE hire_form_documents SET email_to = $1, emailed_at = NOW() WHERE id = $2`,
+      [target.to, otherVan.docId],
+    );
+  } else {
+    await query(
+      `UPDATE vehicle_hire_assignments SET hire_form_emailed_at = NOW() WHERE id = $1`,
+      [assignmentId],
+    );
+  }
+  if (target.kind === 'fallback' && target.jobId) {
+    await logFallbackToTimeline({ jobId: target.jobId, templateId: 'hire_form' });
+  }
+  return { status: 'sent', vehicleReg: formData.vehicleReg, to: target.to };
+}
+
+const jobIdParam = z.string().guid();
+
+// ── GET /api/hire-forms/job/:jobId/date-check ──
+// The warning's data: which drivers' paperwork no longer matches the job's
+// dates, and any VE103B that ends before the job now does. Read-only.
+router.get('/job/:jobId/date-check', authenticate, authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parsed = jobIdParam.safeParse(req.params.jobId);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid job id' });
+    const check = await getHireDateCheck(parsed.data);
+    if (!check) return res.status(404).json({ error: 'Job not found' });
+    res.json({ data: check });
+  } catch (error) {
+    console.error('[hire-forms] date-check error:', error);
+    res.status(500).json({ error: 'Failed to check hire form dates' });
+  }
+});
+
+// ── POST /api/hire-forms/job/:jobId/update-dates ──
+// The one "Update hire forms" button. For every driver row the check flags:
+//   1. refuse (409, nothing changed) if moving a row's stored dates would
+//      clash with another hire on the same van;
+//   2. move any STORED hire dates to the job's (unstored ones follow the job);
+//   3. let the out-of-hours reminder go again for the new end date;
+//   4. regenerate + email each out-of-date agreement as "Updated", per driver,
+//      own van and other vans — skipping a driver held back for a referral or
+//      ID check (isDriverAuthorisedForAgreement), whose dates still move.
+// A row with no agreement yet only has its dates moved; its book-out makes
+// the agreement with the right dates.
+router.post('/job/:jobId/update-dates', authenticate, authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parsed = jobIdParam.safeParse(req.params.jobId);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid job id' });
+    const jobId = parsed.data;
+
+    const check = await getHireDateCheck(jobId);
+    if (!check) return res.status(404).json({ error: 'Job not found' });
+    if (!check.jobStart || !check.jobEnd) {
+      return res.status(400).json({ error: 'This job has no hire dates set' });
+    }
+    if (check.rows.length === 0) {
+      return res.json({ data: { jobStart: check.jobStart, jobEnd: check.jobEnd, results: [] } });
+    }
+
+    // 1. Clash check first, before anything is written or sent.
+    const checkedVans = new Set<string>();
+    for (const row of check.rows) {
+      if (!row.storedDrift || !row.vehicleId || checkedVans.has(row.vehicleId)) continue;
+      checkedVans.add(row.vehicleId);
+      const conflicts = await findOverlappingAssignments({
+        vehicleId: row.vehicleId,
+        hireStart: check.jobStart,
+        hireEnd: check.jobEnd,
+        jobId,
+        hirehopJobId: check.hhJobNumber,
+        excludeAssignmentId: row.assignmentId,
+      });
+      if (conflicts.length > 0) {
+        return res.status(409).json(buildConflictPayload(conflicts, row.vehicleReg));
+      }
+    }
+
+    type AgreementResult = { vehicleReg: string | null; status: 'sent' | 'no_recipient' | 'failed'; to?: string };
+    const results: Array<{
+      assignmentId: string;
+      driverName: string | null;
+      datesMoved: boolean;
+      heldBack: boolean;
+      busy: boolean;
+      agreements: AgreementResult[];
+    }> = [];
+
+    for (const row of check.rows) {
+      const result = {
+        assignmentId: row.assignmentId,
+        driverName: row.driverName,
+        datesMoved: false,
+        heldBack: false,
+        busy: false,
+        agreements: [] as AgreementResult[],
+      };
+      results.push(result);
+
+      // Same 10-minute claim the book-out email uses, so a double press (or a
+      // book-out landing at the same moment) can't email this driver twice.
+      const claim = await query(
+        `UPDATE vehicle_hire_assignments
+            SET hire_form_email_claimed_at = NOW()
+          WHERE id = $1
+            AND (hire_form_email_claimed_at IS NULL
+                 OR hire_form_email_claimed_at < NOW() - INTERVAL '10 minutes')
+          RETURNING id`,
+        [row.assignmentId],
+      );
+      if (claim.rows.length === 0) {
+        result.busy = true;
+        continue;
+      }
+
+      try {
+        // 2. Stored dates → the job's. A NULL stays NULL (it follows the job).
+        if (row.storedDrift) {
+          await query(
+            `UPDATE vehicle_hire_assignments
+                SET hire_start = CASE WHEN hire_start IS NULL THEN NULL ELSE $2::date END,
+                    hire_end   = CASE WHEN hire_end   IS NULL THEN NULL ELSE $3::date END,
+                    updated_at = NOW()
+              WHERE id = $1`,
+            [row.assignmentId, check.jobStart, check.jobEnd],
+          );
+          result.datesMoved = true;
+        }
+
+        // 3. The out-of-hours reminder goes the day before the end. While the
+        // end is more than a day away, any "sent" stamp was for an earlier end
+        // date — clear it so the reminder goes again for the new one.
+        if (row.afterEnd && row.afterEnd > ukDatePlus(1)) {
+          await query(
+            `UPDATE vehicle_hire_assignments SET ooh_reminder_sent_at = NULL
+              WHERE id = $1 AND ooh_reminder_sent_at IS NOT NULL`,
+            [row.assignmentId],
+          );
+        }
+
+        // 4. The agreements.
+        if (row.ownStale || row.staleOtherVanDocs.length > 0) {
+          if (!(await isDriverAuthorisedForAgreement(row.assignmentId))) {
+            result.heldBack = true;
+          } else {
+            if (row.ownStale) {
+              try {
+                result.agreements.push(await sendUpdatedAgreement(row.assignmentId, null));
+              } catch (err) {
+                console.error(`[hire-forms] update-dates: own agreement failed for ${row.assignmentId}:`, err);
+                result.agreements.push({ vehicleReg: row.vehicleReg, status: 'failed' });
+              }
+            }
+            for (const doc of row.staleOtherVanDocs) {
+              try {
+                result.agreements.push(
+                  await sendUpdatedAgreement(row.assignmentId, { docId: doc.docId, vehicleId: doc.vehicleId }),
+                );
+              } catch (err) {
+                console.error(`[hire-forms] update-dates: other-van agreement failed for ${row.assignmentId}:`, err);
+                result.agreements.push({ vehicleReg: doc.vehicleReg, status: 'failed' });
+              }
+            }
+          }
+        }
+      } finally {
+        await query(
+          `UPDATE vehicle_hire_assignments SET hire_form_email_claimed_at = NULL WHERE id = $1`,
+          [row.assignmentId],
+        ).catch(() => {});
+      }
+    }
+
+    // The job's Activity Timeline records what went to whom.
+    const lines = results.map((r) => {
+      const who = r.driverName || 'Driver';
+      if (r.busy) return `${who}: skipped (already being updated)`;
+      if (r.heldBack) return `${who}: dates updated, agreement held back (referral / ID check)`;
+      const sent = r.agreements.filter((a) => a.status === 'sent').map((a) => a.vehicleReg).filter(Boolean);
+      const notSent = r.agreements.filter((a) => a.status !== 'sent').map((a) => a.vehicleReg || 'van');
+      const parts: string[] = [];
+      if (sent.length) parts.push(`updated agreement emailed (${sent.join(', ')})`);
+      if (notSent.length) parts.push(`NOT emailed (${notSent.join(', ')})`);
+      if (!parts.length) parts.push('dates updated');
+      return `${who}: ${parts.join('; ')}`;
+    });
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by, source)
+       VALUES ('note', $1, $2, $3, 'system')`,
+      [`📅 Hire forms updated to ${check.jobStart} → ${check.jobEnd}. ${lines.join('. ')}.`, jobId, req.user!.id],
+    ).catch((err) => console.warn('[hire-forms] update-dates timeline note failed:', err));
+
+    res.json({ data: { jobStart: check.jobStart, jobEnd: check.jobEnd, results } });
+  } catch (error) {
+    console.error('[hire-forms] update-dates error:', error);
+    res.status(500).json({ error: 'Failed to update hire forms' });
   }
 });
 
