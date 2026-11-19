@@ -27,6 +27,33 @@ const SOURCE_LABEL: Record<string, string> = {
   referral: 'Referral', close_out: 'After a hire', problem: 'From a Problem', cancellation: 'Cancelled job',
 };
 
+type SortKey = 'code' | 'value' | 'for' | 'why' | 'use_by' | 'status';
+
+// Column-header sorting (as the PCNs page): clicking a column sorts by it, clicking it again
+// flips it. Money and dates lead with the biggest / latest; text with A→Z. "Why" sorts by when
+// the voucher was given — the reason itself is free text.
+const DESC_FIRST = new Set<SortKey>(['value', 'why', 'use_by']);
+const STATUS_ORDER: Record<string, number> = { offered: 0, reserved: 1, used: 2, expired: 3, withdrawn: 4 };
+const sortValue = (g: GoodwillCredit, k: SortKey): string | number => {
+  switch (k) {
+    case 'code': return creditCode(g).toLowerCase();
+    case 'value': return incVatOf(g);
+    case 'for': return (g.owner_name || '').toLowerCase();
+    case 'why': return g.offered_at || '';
+    case 'use_by': return g.expires_on || '';
+    case 'status': return STATUS_ORDER[g.status] ?? 9;
+  }
+};
+
+// Everything the search box looks through. Dashes and spaces are ignored, so "rbgnpbkx" finds RBGN-PBKX-J7UQ.
+const squash = (t: string) => t.toLowerCase().replace(/[\s-]+/g, '');
+const searchText = (g: GoodwillCredit) => squash([
+  g.voucher_code, g.ref, g.owner_name, g.reason, g.offered_by_name, g.withdrawn_reason, g.used_hh_ref,
+  SOURCE_LABEL[g.source_kind], STATUS_LABEL[g.status],
+  g.reserved_job_number != null ? `job ${g.reserved_job_number}` : null,
+  g.source_job_number != null ? `job ${g.source_job_number}` : null,
+].filter(Boolean).join(' | '));
+
 export default function VouchersPage() {
   const role = useAuthStore((s) => s.user?.role);
   const isManager = hasManagerRole(role);
@@ -38,6 +65,9 @@ export default function VouchersPage() {
   const [copied, setCopied] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [pointsFor, setPointsFor] = useState<GoodwillCredit | null>(null);
+  const [search, setSearch] = useState('');
+  // null = the order the list arrives in (newest first).
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' } | null>(null);
 
   const load = useCallback(async () => {
     try { setRows((await api.get<{ data: GoodwillCredit[] }>('/vouchers')).data); setError(null); }
@@ -45,8 +75,19 @@ export default function VouchersPage() {
   }, []);
   useEffect(() => { if (isManager) load(); }, [isManager, load]);
 
-  const shown = useMemo(() => (rows || []).filter((g) =>
-    filter === 'all' ? true : filter === 'used' ? g.status === 'used' : g.status === 'offered' || g.status === 'reserved'), [rows, filter]);
+  const shown = useMemo(() => {
+    const q = squash(search);
+    const list = (rows || []).filter((g) =>
+      (filter === 'all' ? true : filter === 'used' ? g.status === 'used' : g.status === 'offered' || g.status === 'reserved')
+      && (!q || searchText(g).includes(q)));
+    if (!sort) return list;
+    const flip = sort.dir === 'asc' ? 1 : -1;
+    return [...list].sort((a, b) => {
+      const x = sortValue(a, sort.key);
+      const y = sortValue(b, sort.key);
+      return (x < y ? -1 : x > y ? 1 : 0) * flip;
+    });
+  }, [rows, filter, search, sort]);
 
   if (!isManager) return <div className="p-6 text-sm text-gray-600">Vouchers are for managers and admins.</div>;
 
@@ -60,6 +101,16 @@ export default function VouchersPage() {
     finally { setBusy(null); }
   };
   const live = (rows || []).filter((g) => g.status === 'offered' || g.status === 'reserved');
+  const toggleSort = (key: SortKey) => setSort((s) =>
+    s && s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: DESC_FIRST.has(key) ? 'desc' : 'asc' });
+  const th = (key: SortKey, label: string, title = `Sort by ${label}`) => (
+    <th className="text-left font-semibold px-3 py-2">
+      <button type="button" onClick={() => toggleSort(key)} className="inline-flex items-center gap-1 hover:text-gray-700" title={title}>
+        {label}
+        <span className="text-[10px] text-gray-400">{sort?.key === key ? (sort.dir === 'asc' ? '▲' : '▼') : '↕'}</span>
+      </button>
+    </th>
+  );
 
   return (
     <div className="p-4 sm:p-6 max-w-7xl mx-auto space-y-4">
@@ -81,23 +132,25 @@ export default function VouchersPage() {
               className={`px-3 py-1.5 rounded-md ${filter === k ? 'bg-ooosh-600 text-white' : 'text-gray-700 hover:bg-gray-50'}`}>{label}</button>
           ))}
         </div>
+        <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search code, name, reason, job…"
+          className="w-full sm:w-72 border border-gray-300 rounded-lg px-3 py-1.5 text-sm" />
         {rows && <span className="text-sm text-gray-500">{live.length} out there, worth {voucherMoney(live.reduce((s, g) => s + incVatOf(g), 0))} inc VAT</span>}
       </div>
 
       {error && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
       {rows === null ? <p className="text-sm text-gray-500">Loading…</p> : shown.length === 0 ? (
-        <p className="text-sm text-gray-500 rounded-xl border border-dashed border-gray-300 bg-white p-6 text-center">No vouchers here.</p>
+        <p className="text-sm text-gray-500 rounded-xl border border-dashed border-gray-300 bg-white p-6 text-center">{search.trim() ? 'No vouchers match that search.' : 'No vouchers here.'}</p>
       ) : (
         <div className="rounded-xl border border-gray-200 bg-white overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead className="text-xs text-gray-500 whitespace-nowrap bg-gray-50">
               <tr>
-                <th className="text-left font-semibold px-3 py-2">Code</th>
-                <th className="text-left font-semibold px-3 py-2">Value</th>
-                <th className="text-left font-semibold px-3 py-2">For</th>
-                <th className="text-left font-semibold px-3 py-2">Why</th>
-                <th className="text-left font-semibold px-3 py-2">Use by</th>
-                <th className="text-left font-semibold px-3 py-2">Status</th>
+                {th('code', 'Code')}
+                {th('value', 'Value')}
+                {th('for', 'For')}
+                {th('why', 'Why', 'Sort by date given')}
+                {th('use_by', 'Use by')}
+                {th('status', 'Status')}
                 <th className="px-3 py-2" />
               </tr>
             </thead>
