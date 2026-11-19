@@ -1,0 +1,278 @@
+# Premises & compliance — spec
+
+**Status: DRAFT, 19 Nov 2026. Nothing built.** Mockups (v1, before the decisions below):
+https://claude.ai/artifact/GnedY9eyyMDydPUKMg2tJK — Mockup A's place chips, visibility and "Book the next
+visit" are described here, not drawn there yet.
+
+**What it is.** Operations › **Premises & compliance** (`/operations/premises`): everything that keeps the
+two buildings, the yard and the company itself legal, insured and serviced — the checks that come round on
+a cycle, the certificate from every visit, who looks after each one, the meter readings, and the documents
+that go with the premises (lease, plans, insurance schedules). Born from jon, 19 Nov 2026: "store
+documents relating to our building / premises … gas meter readings (triggered through a To Do to someone I
+assign), elec readings, periodical things like air con servicing, 5-year electrical inspection, annual gas
+inspection … importantly … all the relevant documents, ie inspection certificates."
+
+**The analogy.** A building is a van that doesn't move. Van compliance (MOT, tax, service) already does
+"a thing that comes round, a date it's due, someone chased, a record of it done" — this is the same idea
+pointed at the premises, with the certificate kept against each visit.
+
+---
+
+## §1 Settled decisions (jon, 19 Nov 2026)
+
+1. **Its own section under Operations**, named **"Premises & compliance"**. Not Staff Documents (that is
+   for things people must read or sign) and not the staff calendar (that is people's time). It ties into
+   both, read-through only (§7).
+2. **A check is the unit.** Everything on the register is a check of one of four kinds (§3): a contractor
+   **visit**, an in-house **test**, a meter **reading**, or a **renewal** date.
+3. **Places.** Every check belongs to one place: **Building 1, Building 2, Yard, Whole site, Company**
+   (names editable; Ooosh leases two adjoining buildings and one yard). "Company" holds what isn't about a
+   building — employers' and public liability, the ICO fee, music licences. "Whole site" is for what spans
+   both buildings (a fire risk assessment, an alarm system covering both).
+4. **Headings** group checks on the register (Fire, Gas & electrical, Insurance …). Admins add, rename,
+   reorder and retire headings and places from the page's settings — no deploy needed.
+5. **Visibility per check: Everyone, Managers, or Admins.** "Everyone" means every staff login
+   (`STAFF_ROLES`), never freelancers. Managers = `MANAGER_ROLES`. A check's visit files follow the check;
+   a library document has its own setting (§6). **A check you can't see does not exist for you** — not on
+   the register, not in search, not as a reminder. So a check's owner must be able to see it (enforced on
+   save: an admin-only check can only be owned by an admin).
+6. **Reminders are To Do items**, made by this module (`staff_tasks.source_type = 'premises_check'`,
+   `source_id` = the check) — the same pattern as social posts (`marketing-content.ts`
+   `syncPostReminder()`). **ONE open reminder per check, at most**: a fortnight's holiday never leaves three
+   overdue meter readings behind it. Never a `staff_task_series` (§4 says why).
+7. **When a check is next due** comes from `services/task-recurrence.ts` — the existing engine, never a
+   second one. "Every 12 months from the last visit" is its `after_done` mode; "every Thursday" is its
+   `schedule` mode. **A date given on the certificate wins** (an EICR may say "next in 3 years", not 5):
+   typed when the visit is recorded and shown as "from the certificate". Never "keep the later date" — the
+   same rule as the DVSA MOT date.
+8. **Recording a visit can book the next one.** "Book the next visit now" (date + time, who's letting
+   them in) — for when the engineer says "same time next year". It puts the visit on the staff calendar and
+   turns the reminder from "Book it" into "Northside are coming on 14 Dec — let them in".
+9. **Advisories become To Dos when someone asks.** Each advisory on a visit has "Make it a To Do"; a
+   **Fail** makes one straight away ("Get it fixed"), to the check's owner. A full repairs log is later
+   (§9).
+10. **Retire, don't delete.** Retiring takes a check off the register and stops its reminders; its visits
+    and certificates stay (the insurer, the end of the lease). A true delete only for a check added by
+    mistake with nothing recorded on it. Same for places, headings and folders.
+11. **Contractors are organisations in the Address Book**, type **Supplier** (§8 keeps them out of the
+    client pickers).
+12. **Costs are linked, never retyped.** A visit points at the contractor's bill already in Costs
+    (`costs.id`). No amount is stored here.
+13. **Files live under a new R2 prefix, `premises/`**, gated in `GET /api/files/download` by the file's own
+    row (§6) — never under `files/`, which every staff login can read.
+14. **Smart meters later**: when they arrive, the meter's reading check is changed to "every 6 months" as a
+    sanity check, or paused. History stays.
+15. **Not here:** van insurance, MOT and service (the vehicle module), the staff DVLA/document check
+    (`staff-doc-cycles.ts`), policies staff must read (Staff Documents), and breakdowns / repairs (later,
+    §9).
+
+---
+
+## §2 The screen
+
+One page, three tabs: **Checks · Meter readings · Documents** (Repairs greyed until §9).
+
+**Places are filter chips, not tabs** (jon asked, 19 Nov 2026): `All · Building 1 · Building 2 · Yard ·
+Whole site · Company`, above the register, remembered per person. Tabs are for different *kinds* of thing;
+the question asked most is "what's due, anywhere?", which tabs-per-place would split five ways — and a
+"Whole site" check would belong to no building's tab. Also on the bar: a heading filter, "Due soon / Overdue
+only", and "Mine".
+
+- **Checks** — the register (Mockup A): one row per check, grouped by heading, with place, how often, last
+  done, next due, a red / amber / green status pill, who looks after it, and the current certificate. Counts
+  at the top (overdue · due soon · up to date). "+ Add a check" and "Record a visit".
+- **A check's page** (Mockup B) — about this check (how often, ours or the landlord's, contractor, owner,
+  reminder lead, where it physically is, why we do it, visibility), the history of every visit with its
+  outcome, certificates and linked bill, and the actions: Record a visit · Book a visit · Retire.
+- **Record a visit** — date done, done by (contractor or person), outcome (Pass / Pass with advisories /
+  Fail), certificates (drop a PDF or take a photo), next due (pre-filled, editable, "from the certificate"),
+  link a bill from Costs (optional, can be done when the bill arrives), notes and advisories, and "Book the
+  next visit now". The form changes with the check's kind (§3).
+- **Meter readings** (Mockup C) — one card per meter (grouped by place), last reading and use since the one
+  before, a weekly-use chart.
+- **Documents** — §6.
+
+Status colours: **Overdue** red; **Due soon** amber (inside the check's reminder lead); **OK** green;
+**Booked** blue (a visit is booked before the due date); **Landlord's** grey when the check is the
+landlord's and we only keep the copy.
+
+---
+
+## §3 The four kinds of check
+
+| Kind | Examples | Recording one | Reminder |
+|---|---|---|---|
+| **Visit** (a contractor comes) | gas safety, EICR, air con, fire alarm service, extinguishers, LOLER, roller doors | date, done by, outcome, certificate(s), next due, bill, advisories, book next | default 30 days before due: "Book the gas safety inspection" |
+| **Test** (we do it ourselves) | weekly fire alarm call-point test, monthly emergency lighting flick test, first aid kits, water temperatures | a quick phone form: OK / not OK, a note; for the alarm, which call point (rotated, shown as "last tested: CP3") | on the day: "Test the fire alarm (call point 4)" |
+| **Reading** (a number) | gas, electric, water meters | the reading, a photo of the dial, "meter replaced" tick | on the day: "Read the meters" — one To Do for every reading check due that day owned by the same person, opening one form |
+| **Renewal** (a date and a document) | buildings & contents, employers' liability, public liability, lease break / rent review, ICO fee, music licence, EPC | the new date, the policy / schedule / certificate, the bill | default 30 days before: "Renew employers' liability (via the broker)" |
+
+**The fire alarm test is the log book.** The fire officer asks for it; this replaces the paper one. A "not
+OK" on any test makes a To Do to the owner straight away.
+
+**Readings are checked as they're typed**, never refused (warnings, not gates): lower than last time
+("meter replaced?"), or more than three times the usual week. A "meter replaced" reading starts the meter's
+count afresh rather than showing a huge negative week. A day/night meter is two meters.
+
+---
+
+## §4 Why not a repeating To Do
+
+The To Do module already has repeating to-dos (`staff_task_series`) and the TASKS spec even uses "read the
+meters" as its example. It isn't enough here because **ticking a To Do records that it was done, not what was
+found** — no reading, no certificate, no outcome, no next date from the certificate. So Premises owns the
+schedule and the record; the To Do is only the nudge, and its button opens the right form. Ticking the To Do
+by hand without recording asks "Did you record it? Record now / It wasn't done".
+
+If anyone has already set up a "read the meters" repeating to-do, it is stopped when the meter checks go live
+(Phase 2), by hand, with the owner told.
+
+---
+
+## §5 Data (sketch — settled at build)
+
+Next free migration at build time (354 is the latest on `main` today).
+
+| Table | What | Notes |
+|---|---|---|
+| `premises_places` | Building 1, Building 2, Yard, Whole site, Company | `name`, `sort`, `retired_at` |
+| `premises_headings` | Fire, Gas & electrical … | `name`, `sort`, `retired_at` |
+| `premises_checks` | one row per check | `title`, `kind` (`visit`/`test`/`reading`/`renewal`), `heading_id`, `place_id`, `visibility` (`all`/`managers`/`admins`), `owner_person_id`, `contractor_org_id`, `responsibility` (`ours`/`landlord`), `recurrence` JSONB (`RecurrenceRule` + mode; NULL = one-off date), `remind_days_before`, `next_due` DATE, `next_due_source` (`computed`/`certificate`/`typed`), `location_note`, `why_note`, reading-only `unit` + `meter_serial`, test-only `points` (call points to rotate), `retired_at`, `retired_reason` |
+| `premises_records` | one row per visit / test / reading / renewal done | `check_id`, `done_on`, `done_by_org_id` / `done_by_person_id`, `outcome` (`pass`/`advisories`/`fail`/NULL), `reading_value` NUMERIC, `meter_replaced`, `point` (which call point), `notes`, `cost_id` (FK `costs`, nullable), `recorded_by`, `created_at` |
+| `premises_advisories` | an advisory on a record | `record_id`, `text`, `task_id` (when made a To Do), `done_at` |
+| `premises_bookings` | a booked visit | `check_id`, `starts_at` TIMESTAMPTZ, `letting_in_person_id`, `note`, `status` (`booked`/`done`/`cancelled` — soft-cancel) |
+| `premises_folders` | the document library's folders | `name`, `visibility`, `sort`, `retired_at` |
+| `premises_files` | every file | `r2_key` (`premises/…`), `filename`, `record_id` OR `folder_id` (CHECK: exactly one), `visibility` (NULL = inherit), `uploaded_by`, `archived_at` |
+
+**Who may do what** (proposed — confirm, §10): see a check → its visibility; **record** on a check → anyone
+who can see it; **add / edit / retire** a check → managers (admins for an admin-only check); places,
+headings and folders → admins.
+
+**The reminder service** (`services/premises-reminders.ts`): `syncCheckReminder(checkId)` keeps the one open
+To Do right (made, re-titled, moved to a new owner, or cancelled) — called after every write, plus a daily run
+(proposed 09:17, next to the social post reminders). Retired checks and retired places make nothing.
+
+---
+
+## §6 Files and who can open them
+
+- **One prefix, `premises/`, gated per file.** `GET /api/files/download` today gates whole prefixes
+  (`staff-records/`, `claims/`, `calls/`); this is the **first prefix gated by the file's own row**: look up
+  `premises_files` by `r2_key`, work out its visibility (its own, else its folder's or check's), and refuse
+  with 403 unless the caller's role meets it. A key with no row is refused. Kept in the download route so
+  `useAuthedFileUrl` / `openAuthedFile` keep working unchanged.
+- **Certificates are filed against their visit**, so "the current gas certificate" is one click and last
+  year's is never overwritten. They also show in Documents › Certificates, read-through.
+- **The library** (Documents tab) is folders for what isn't a check: Lease & legal, Insurance, Risk
+  assessments, Plans & drawings (asbestos survey here if the landlord gives us one), Manuals & warranties,
+  Utility accounts. Each folder has a visibility; a single document can be set tighter (never looser) than
+  its folder. A new upload replaces nothing — older versions stay, newest first.
+- **Backups:** the 02:00 backup is the database only; the files have no second copy. Captured in
+  `docs/reference/BACKLOG.md` as a platform-wide job (jon: "lets not get distracted here").
+
+---
+
+## §7 How it ties in (read-through only)
+
+- **To Do** — reminders as above; the To Do's button opens the right form ("Enter readings", "Record the
+  visit", "Open the check"). Source chip "Premises".
+- **Staff calendar** — **booked visits only, never due dates**: "Gas engineer on site 10:00 · Northside ·
+  Sam letting in", a new read-through layer on `routes/staff-calendar.ts` `GET /calendar`, the way company
+  days are read. Shown to every staff login whatever the check's visibility? **No** — only to those who can
+  see the check; others see nothing. Not in anyone's iCal feed (`staff-ical.ts` is own time only).
+- **Staff Documents** — linked, never copied. A check can point at a Staff Document ("the fire procedure"),
+  and recording a new fire risk assessment offers "Re-issue the fire procedure for everyone to read?" —
+  which opens Staff Documents' own New version.
+- **Costs** — a record links an existing bill; the check's page totals what it has cost by year.
+- **Address Book** — a supplier org's page gets a "Premises" line listing the checks it does (visible ones
+  only).
+- **Dashboard** — an overdue check shows in the owner's existing attention list, through To Do, nothing new.
+
+---
+
+## §8 Suppliers in the Address Book (the adjunct)
+
+jon, 19 Nov 2026: "we don't necessarily want 'Joe Bloggs plumbing' cluttering up our search when we're
+creating a new enquiry > org". **Settled:**
+
+- **No separate suppliers address book** — it would be two lists drifting apart, and some organisations are
+  both supplier and client.
+- **The client pickers leave out organisations whose type is Supplier**, with a line at the foot of the
+  results — "1 supplier matches · show" — so one can still be picked (warnings, not gates). The pickers: New
+  Enquiry's client picker (`PipelinePage.tsx`, via `GET /search`), a job's client, and a job's linked
+  organisations; the build lists every client-picking surface first and confirms with jon.
+- **People are never hidden** (jon: "if we're searching by name rather than org then we're probably after
+  that org"). Joe Bloggs himself still appears.
+- **The top-bar search and the Organisations page still find suppliers.** The Organisations page gets a
+  **Suppliers** filter.
+
+**One type per organisation — proposed fix (to confirm, §10).** jon: "a shame we only have one attribute
+per Org … Promoter AND Supplier for instance." Making `organisations.type` a list is a big change — it is
+read in about 44 places across 20 files, each assuming one value. Smaller and safer: **keep `type` as the
+main type and add `organisations.also_types TEXT[]`** from the same `org_type` picklist (`picklist_items`),
+shown on the org page as "Also: Supplier". Then:
+- the Suppliers filter = main type Supplier **or** Supplier in "also";
+- the client pickers hide an org only when its main type is Supplier **and** "also" holds nothing else — a
+  promoter who also supplies us stays findable as a client.
+Free-text tags were considered and rejected: "supplier", "Supplier" and "suppliers" would drift.
+
+---
+
+## §9 Phases
+
+| # | What | Notes |
+|---|---|---|
+| **S** | Suppliers out of the client pickers + Organisations "Suppliers" filter (+ `also_types` if agreed) | Independent of the rest; small; can go first |
+| **1** | Places, headings, checks (visit + renewal), the register, the check page, Record a visit, certificates on `premises/` with the per-file gate, visibility, reminders through To Do, retire. **Seed the starting list (§11) once jon has ticked which apply and who owns each** | The core |
+| **2** | Tests (fire alarm log book with call-point rotation, emergency lighting) and meter readings (phone form, photo, sanity flags, chart); stop any "read the meters" repeating to-do | |
+| **3** | Documents library (folders, versions), Book a visit → staff calendar layer, advisories → To Do, Costs links and the cost-by-year total, the supplier org's "Premises" line, the Staff Documents nudge after a fire risk assessment | |
+| Later | Repairs log (reactive faults: "roller door's jammed"); readings against utility bills (catching estimated bills); smart-meter import; the R2 file backup (BACKLOG) | jon: core first |
+
+---
+
+## §10 Open questions (for jon)
+
+1. **`also_types`** (§8) — agree?
+2. **Who may add / edit / retire checks** — managers (admins for admin-only ones), recording by anyone who can
+   see the check (§5)?
+3. **The starting list** (§11) — which apply to Ooosh's buildings, which are the landlord's (ask for the copy
+   rather than do the work), and who owns each. Anything left blank seeds owned by jon.
+4. **Default reminder lead** — 30 days for visits and renewals; insurance perhaps 45 (the broker needs time)?
+
+---
+
+## §11 Starting list (jon: "happy to take that starting list")
+
+A prompt, not compliance advice: the lease decides which are ours, and the insurer's policy wording often sets
+the frequency. Each seeds as a check with the place, heading, kind and interval below; jon can retire any.
+
+| Heading | Check | Kind | How often | Place (guess) |
+|---|---|---|---|---|
+| Fire | Fire risk assessment (written, reviewed) | visit | 12 months, or on change | Whole site |
+| Fire | Fire alarm service | visit | 6 months | Whole site |
+| Fire | Fire alarm call-point test | test | weekly, rotate points | Whole site |
+| Fire | Emergency lighting flick test | test | monthly | per building |
+| Fire | Emergency lighting full-duration test | visit | 12 months | per building |
+| Fire | Extinguisher service | visit | 12 months | Whole site |
+| Gas & electrical | Gas safety inspection / boiler service | visit | 12 months | per building with gas |
+| Gas & electrical | EICR (fixed wiring) | visit | set by the certificate, ≤ 5 years | per building |
+| Gas & electrical | PAT (office and studio kit — not hire stock) | visit | 12 months (risk-based) | Whole site |
+| Air & water | Air con service and F-gas leak check | visit | 12 months (depends on system size) | per building |
+| Air & water | Air con energy inspection (TM44, over 12 kW) | visit | 5 years | Whole site |
+| Air & water | Legionella risk assessment | visit | about 2 years | Whole site |
+| Air & water | Water temperature checks | test | monthly, if the assessment asks | Whole site |
+| Building & equipment | Asbestos register (pre-2000 building) | renewal | review yearly — often the landlord's | Whole site |
+| Building & equipment | Forklift thorough examination (LOLER) | visit | 12 months | Yard |
+| Building & equipment | Pallet racking inspection | visit | 12 months | per building |
+| Building & equipment | Roller shutter / powered doors | visit | 6–12 months | per building |
+| Building & equipment | Intruder alarm and CCTV | visit | 12 months | Whole site |
+| Building & equipment | First aid kits | test | monthly | per building |
+| Insurance | Buildings and contents insurance | renewal | yearly | Company |
+| Insurance | Employers' liability insurance (certificate kept available) | renewal | yearly | Company |
+| Insurance | Public liability insurance | renewal | yearly | Company |
+| Lease & legal | Lease breaks and rent reviews | renewal | one-off dates | per building / Yard |
+| Lease & legal | EPC | renewal | 10 years | per building |
+| Licences & registrations | ICO data protection fee | renewal | yearly | Company |
+| Licences & registrations | Music licence for the studios (if needed) | renewal | yearly | Company |
+| Licences & registrations | Waste transfer notes (keep 2 years) | renewal | yearly | Whole site |
+| Meters | Gas, electric, water readings | reading | weekly | per building |

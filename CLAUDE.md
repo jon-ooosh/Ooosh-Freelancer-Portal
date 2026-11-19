@@ -395,6 +395,13 @@ Google Drive links, saved hashtag sets, a tracked link per post. **OP plans; Met
 post from OP. The owner gets ONE To Do two days before a post that isn't approved (`source_type = 'marketing_post'`,
 09:16 run + every save). Posts are dropped, content archived — never deleted. Next: studio sitters sending content in.
 
+**DRAFT, 19 Nov 2026:** `docs/PREMISES-COMPLIANCE-SPEC.md` — Operations › Premises & compliance: the checks that
+keep the two buildings, the yard and the company legal and serviced (visits, in-house tests, meter readings,
+renewals), a certificate kept against every visit, reminders as To Dos (`source_type = 'premises_check'`, one open
+per check, dates from `task-recurrence.ts`), per-check visibility (everyone / managers / admins), files under a new
+`premises/` prefix gated per file. §1 is settled, §8 keeps Supplier orgs out of the client pickers, §10 the open
+questions. Nothing built.
+
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
 (support, 15 Oct 2026) — never work around it; §3 is the evidence. §5 the decisions, §6 what must exist first.
