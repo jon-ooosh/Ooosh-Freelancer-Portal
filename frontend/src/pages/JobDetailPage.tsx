@@ -72,6 +72,7 @@ import { cancellationBalance, cancellationFeeGross } from '../lib/money';
 import { EndorsementsNote, type Endorsement } from '../components/EndorsementsPanel';
 import GoodwillNote from '../components/goodwill/GoodwillNote';
 import AccountCreditNote from '../components/account-credit/AccountCreditNote';
+import { useReservedCreditNote } from '../components/account-credit/useReservedCredit';
 import GoodwillJobChips from '../components/goodwill/GoodwillJobChips';
 
 
@@ -8172,6 +8173,13 @@ function StatusTransitionModal({
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
   const [note, setNote] = useState('');
+  // Money on account put aside for this job: confirming on it is offered, never automatic,
+  // and the note is pre-filled so the timeline says why (docs/CREDIT-ON-ACCOUNT-SPEC.md).
+  const creditOnAccountNote = useReservedCreditNote(jobId, targetStatus === 'confirmed');
+  const pickConfirmedMethod = (m: ConfirmedMethod) => {
+    setConfirmedMethod(m);
+    if (m === 'credit_on_account' && creditOnAccountNote && !note.trim()) setNote(creditOnAccountNote);
+  };
   const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('great');
   const [retroNotes, setRetroNotes] = useState('');
   // Optional second retro question. Saved as a "Next time:" line inside the same
@@ -8414,14 +8422,20 @@ function StatusTransitionModal({
             <label className="block text-sm font-medium text-gray-700">How was this confirmed?</label>
             <select
               value={confirmedMethod}
-              onChange={(e) => setConfirmedMethod(e.target.value as ConfirmedMethod)}
+              onChange={(e) => pickConfirmedMethod(e.target.value as ConfirmedMethod)}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             >
               <option value="deposit">Deposit received</option>
               <option value="full_payment">Full payment received</option>
               <option value="po">Purchase order received</option>
               <option value="manual">Manual confirmation</option>
+              {creditOnAccountNote && <option value="credit_on_account">Credit on account</option>}
             </select>
+            {creditOnAccountNote && (
+              <p className="text-xs text-blue-800">
+                {creditOnAccountNote}, put aside for this job. Choose "Credit on account" if that is what confirms it.
+              </p>
+            )}
           </div>
         )}
 

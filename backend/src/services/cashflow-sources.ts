@@ -10,6 +10,7 @@
  * except van HP (fleet finance) and planned items. Never both for one thing.
  */
 import { query } from '../config/database';
+import { reservedForJobSql } from './account-credit';
 import { isXeroConfigured } from '../config/xero';
 import { getStripeClient, isStripeConfigured } from '../config/stripe';
 import { getWiseBalances, isWiseConfigured, wiseEnv } from '../config/wise';
@@ -256,13 +257,16 @@ export async function loadJobBalances(): Promise<JobBalanceRow[]> {
             j.pipeline_status,
             to_char((j.job_date AT TIME ZONE 'Europe/London')::date, 'YYYY-MM-DD') AS start_date,
             to_char((j.job_end AT TIME ZONE 'Europe/London')::date, 'YYYY-MM-DD') AS end_date,
-            jf.hire_value_inc_vat, jf.total_hire_deposits, jf.balance_outstanding,
+            jf.hire_value_inc_vat, jf.total_hire_deposits,
+            -- Money on account put aside for the job (CREDIT-ON-ACCOUNT-SPEC.md) is already in
+            -- the bank: it will pay part of this balance without any cash arriving.
+            GREATEST(jf.balance_outstanding - ${reservedForJobSql('jf.job_id')}, 0) AS balance_outstanding,
             o.working_terms_credit_days
      FROM job_financials jf
      JOIN jobs j ON j.id = jf.job_id
      LEFT JOIN organisations o ON o.id = j.client_id
      LEFT JOIN job_balance_overrides bo ON bo.job_id = jf.job_id
-     WHERE jf.balance_outstanding > 0.01
+     WHERE jf.balance_outstanding - ${reservedForJobSql('jf.job_id')} > 0.01
        AND bo.job_id IS NULL
        AND j.pipeline_status = ANY($1::text[])
        AND COALESCE(j.is_internal, false) = false

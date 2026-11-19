@@ -34,6 +34,8 @@ import { fireEventTriggeredReminders } from '../services/requirement-close-sweep
 import { afterOptionConfirmed } from '../services/option-confirm';
 import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
 import { portalOptionsFor } from '../services/job-groups';
+import { listReservedForJob, withCreditOnAccount, hasLiveHold } from '../services/account-credit';
+import { planHireCloseOut } from '../services/hire-close-out';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 import { requiredDeposit as depositRule } from '../services/deposit-rule';
 import { reconcileExpiredPreauthsForJob } from '../services/excess-preauth';
@@ -2243,7 +2245,14 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // Calculate deposit requirements using effective (VAT-adjusted) total
     let requiredDeposit = depositRule(effectiveHireValueIncVat);
     if (effectiveHireValueIncVat === 0) requiredDeposit = 0;
-    const depositPaid = totalHireDeposits >= (requiredDeposit - 5); // £5 tolerance
+    // Money on account put aside for this job (CREDIT-ON-ACCOUNT-SPEC.md) — the client's own
+    // overpayment from an earlier job. It is NOT in HireHop's balance (it still sits on that
+    // job until this one is invoiced), so balance_outstanding and job_financials are left
+    // alone; this says what of the balance it will cover and what is left to ask for.
+    const reservedOnAccount = cancellation || !job.id ? [] : await listReservedForJob(job.id);
+    const onAccount = withCreditOnAccount(Math.max(0, effectiveBalanceOutstanding), reservedOnAccount);
+    // It counts towards the deposit (jon, 18 Nov 2026) — but confirming on it is a person's call.
+    const depositPaid = totalHireDeposits + onAccount.total >= (requiredDeposit - 5); // £5 tolerance
     // Credit-note write-offs count toward payment progress (the written-off
     // portion is settled, just not by cash) so the bar/label agree with the
     // £0 balance instead of sitting at 99% forever.
@@ -2455,6 +2464,10 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           required_deposit: requiredDeposit,
           deposit_paid: depositPaid,
           deposit_percent: depositPercent,
+          /** Money on account put aside for this job — null when there is none. `to_pay` is what to ask the client for. */
+          on_account: reservedOnAccount.length
+            ? { total: onAccount.total, covers: onAccount.covers, to_pay: onAccount.toPay, items: reservedOnAccount }
+            : null,
           deposits,
           pending_refunds: pendingRefunds,
           /** Set on a cancelled job only — its charge is the fee, not the hire (balance_outstanding follows it). */
@@ -2576,6 +2589,20 @@ async function fetchOpenInvoicesForHhJob(hhJobId: number): Promise<Array<{ id: n
     out.push({ id, number: String(row.data?.NUMBER || row.number || ''), description: String(row.data?.DESCRIPTION || row.desc || ''), owing });
   }
   return out;
+}
+
+/**
+ * Money has just left a job's payments (a refund, or applied to another job's invoice). If
+ * that job's spare money is held on account (CREDIT-ON-ACCOUNT-SPEC.md), re-read it from
+ * HireHop now so the hold — and the job it is put aside for — stops counting what has gone.
+ * The close-out plan does the refresh; a job with no hold costs one small query. Never throws.
+ */
+async function refreshHoldAfterMoneyMoved(jobId: string): Promise<void> {
+  try {
+    if (await hasLiveHold(jobId)) await planHireCloseOut(jobId, { fresh: true });
+  } catch (e) {
+    console.warn('[money] hold refresh failed (non-fatal):', e instanceof Error ? e.message : e);
+  }
 }
 
 // GET same-client open invoices on OTHER jobs (for the apply-credit picker).
@@ -2700,6 +2727,10 @@ router.post('/:jobId/apply-credit', authorize('admin', 'manager'), validate(appl
       [job.id, job.hh_job_number, amount, getMethodForBankId(resolvedBank), String(hhAppId || ''),
        hh_deposit_id, job.client_name, `Cross-job credit → job ${target_hh_job} invoice ${invoice_id}${notes ? `: ${notes}` : ''}`]
     ).catch((e) => console.error('[money] apply-credit audit insert failed (non-fatal):', e.message));
+
+    // Money held on account on this job has just gone down: bring OP's figure into line
+    // now, so the job it was put aside for doesn't count it as well as HireHop.
+    await refreshHoldAfterMoneyMoved(job.id);
 
     res.json({ data: { hh_application_id: hhAppId, target_hh_job, invoice_id, amount } });
   } catch (error) {
@@ -3183,6 +3214,7 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       console.log(`[money] Refund confirmation email: ${clientEmail.sent ? `sent to ${clientEmail.toEmail}${clientEmail.isFallback ? ' (info@ fallback)' : ''}` : `NOT sent — ${clientEmail.error || 'unknown'}`}`);
     }
 
+    await refreshHoldAfterMoneyMoved(job.id);
     console.log(`[money] Hire refund recorded: £${amount} on job ${job.id} via ${method}${stripeRefundId ? ` (Stripe ${stripeRefundId})` : ''}${hhPushError ? ' [HH push failed]' : ''}${xeroSync && !xeroSync.ok ? ' [Xero sync refused]' : ''}`);
     res.json({
       data: opResult.rows[0],

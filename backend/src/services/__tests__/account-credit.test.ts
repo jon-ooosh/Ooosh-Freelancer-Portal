@@ -12,6 +12,7 @@ import { query } from '../../config/database';
 import {
   holdBlockReason, holdOnAccount, holdForPlan, reserveOnJob, unreserve, releaseHold,
   ACCOUNT_CREDIT_STATUS_SQL, AccountCreditError,
+  withCreditOnAccount, creditOnAccountPhrase, listReservedForJob, reservedForJobSql,
 } from '../account-credit';
 
 const mockQuery = query as jest.MockedFunction<any>;
@@ -172,5 +173,39 @@ describe('unreserve / releaseHold', () => {
     expect(sqls()[1]).toContain("status = 'released'");
     expect(sqls()[1]).toContain('reserved_job_id = NULL');
     expect(sqls().filter((s: string) => s.includes('INSERT INTO interactions')).length).toBe(2);
+  });
+});
+
+describe('what a job has put aside for it', () => {
+  const c = (amount: number, n: number | null = 16489) => ({ id: `c${amount}`, amount, source_job_id: SOURCE, source_job_number: n });
+
+  it('covers the balance up to what is owed and says what is left to ask for', () => {
+    expect(withCreditOnAccount(500, [c(68.4)])).toEqual({ total: 68.4, covers: 68.4, toPay: 431.6 });
+  });
+  it('never covers more than the job owes — the rest stays on account', () => {
+    expect(withCreditOnAccount(50, [c(68.4)])).toEqual({ total: 68.4, covers: 50, toPay: 0 });
+    expect(withCreditOnAccount(0, [c(68.4)])).toEqual({ total: 68.4, covers: 0, toPay: 0 });
+    // An overpaid job (negative balance) is not made "more overpaid" by it.
+    expect(withCreditOnAccount(-20, [c(68.4)])).toEqual({ total: 68.4, covers: 0, toPay: 0 });
+  });
+  it('adds several credits, to the penny', () => {
+    expect(withCreditOnAccount(100, [c(33.33), c(33.33), c(33.33)])).toEqual({ total: 99.99, covers: 99.99, toPay: 0.01 });
+    expect(withCreditOnAccount(250, [])).toEqual({ total: 0, covers: 0, toPay: 250 });
+  });
+  it('names where the money is', () => {
+    expect(creditOnAccountPhrase([c(68.4)])).toBe('£68.40 on account from job 16489');
+    expect(creditOnAccountPhrase([c(68.4), c(30, 16502)])).toBe('£98.40 on account from jobs 16489 and 16502');
+    expect(creditOnAccountPhrase([c(10, null)])).toBe('£10.00 on account from an earlier job');
+  });
+  it('a balance read never fails over it', async () => {
+    mockQuery.mockRejectedValue(new Error('boom'));
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(listReservedForJob(NEXT)).resolves.toEqual([]);
+    warn.mockRestore();
+  });
+  it('the SQL sum counts only live holds with money left', () => {
+    const sql = reservedForJobSql('jf.job_id');
+    expect(sql).toContain('a.reserved_job_id = jf.job_id');
+    expect(sql).toContain("a.status = 'held' AND a.amount >= 0.005");
   });
 });

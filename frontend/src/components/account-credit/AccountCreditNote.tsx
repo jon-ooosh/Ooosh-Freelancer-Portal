@@ -66,8 +66,8 @@ export default function AccountCreditNote({ clientOrgId, jobId }: {
 
             {c.status === 'reserved' ? (
               <div className="mt-1.5 p-2 bg-amber-50 border border-amber-200 rounded text-amber-900">
-                Put aside for this job. It comes off the invoice when this job is invoiced. Until then HireHop and the
-                payment link still show the full balance, so tell the client to pay {acMoney(c.amount)} less.
+                Put aside for this job. It comes off the invoice when this job is invoiced; the Money tab shows what
+                is left to pay. HireHop and the payment link still show the full balance until then.
                 {isManager && (
                   <div className="mt-1.5">
                     <button type="button" disabled={busy === c.id} className={btn}

@@ -42,6 +42,7 @@
  * payment that isn't a job's is marked `ignored` with a note.
  */
 import { query } from '../config/database';
+import { listReservedForJob, withCreditOnAccount } from './account-credit';
 import { hhBroker } from './hirehop-broker';
 import { findIndexedInvoices, indexJobInvoices, invoicesFromBillingRows } from './hh-invoice-index';
 import { emailService } from './email-service';
@@ -99,7 +100,11 @@ export interface IncomingCandidate {
   /** How this job came up: job_number · hh_invoice · payer_name */
   via: string;
   /** Figures the amount was compared against (for the resolve UI / email). */
-  expected?: { deposit: number; half: number; remaining: number; excess: number; halfExact?: number; invoice?: number };
+  expected?: {
+    deposit: number; half: number; remaining: number; excess: number; halfExact?: number; invoice?: number;
+    /** The remaining balance less money on account put aside for the job — what the client is asked for (CREDIT-ON-ACCOUNT-SPEC.md). Only set when there is some. */
+    remainingLessCredit?: number;
+  };
 }
 
 // ── Detection ──────────────────────────────────────────────────────────────
@@ -239,6 +244,8 @@ interface MoneyPosition {
   half: number;
   halfExact: number;
   depositPaid: boolean;
+  /** `remaining` less money on account put aside for the job; null when there is none. */
+  remainingLessCredit: number | null;
   excessOutstanding: number;
   invoiceNumbers: string[];
 }
@@ -305,6 +312,9 @@ async function getMoneyPosition(job: JobRow): Promise<MoneyPosition> {
   }
 
   const remaining = Math.max(0, hireValueIncVat - depositsPaid);
+  // Money on account put aside for this job: the client is told to pay that much less,
+  // so a transfer of "remaining − credit" is the balance arriving, not a stray amount.
+  const onAccount = withCreditOnAccount(remaining, await listReservedForJob(job.id));
   const requiredDeposit = depositRule(hireValueIncVat);
   const depositPaid = depositsPaid >= requiredDeposit - 5; // portal's £5 tolerance
   return {
@@ -317,6 +327,7 @@ async function getMoneyPosition(job: JobRow): Promise<MoneyPosition> {
     depositPaid,
     excessOutstanding: Math.max(0, excessRequired - excessTaken),
     invoiceNumbers,
+    remainingLessCredit: onAccount.covers >= 0.005 ? onAccount.toPay : null,
   };
 }
 
@@ -610,6 +621,7 @@ export async function matchIncomingPayment(p: {
     try {
       const pos = await getMoneyPosition(job);
       c.expected = { deposit: round2(pos.requiredDeposit), half: round2(pos.half), remaining: round2(pos.remaining), excess: round2(pos.excessOutstanding), halfExact: round2(pos.halfExact) };
+      if (pos.remainingLessCredit != null) c.expected.remainingLessCredit = round2(pos.remainingLessCredit);
       const owed = invoiceOwing.get(c.job_id);
       if (owed !== undefined && owed !== null && owed > 0) c.expected.invoice = round2(owed);
       c.via += pos.depositPaid ? '' : '';
@@ -624,6 +636,7 @@ export async function matchIncomingPayment(p: {
     const c = strongCandidates[0];
     const e = c.expected!;
     const hireHit = near(p.amount, e.deposit) || near(p.amount, e.half) || near(p.amount, e.halfExact ?? 0) || near(p.amount, e.remaining)
+      || (e.remainingLessCredit !== undefined && near(p.amount, e.remainingLessCredit))
       || (e.invoice !== undefined && near(p.amount, e.invoice));
     const excessHit = near(p.amount, e.excess);
     const hint = referenceHintsExcess(p.reference);
@@ -648,7 +661,7 @@ export async function matchIncomingPayment(p: {
         paymentType,
       };
     }
-    if (!cancelled) notes.push(`amount £${p.amount.toFixed(2)} does not equal deposit £${e.deposit}, half £${e.half}, remaining £${e.remaining}${e.invoice !== undefined ? `, invoice owing £${e.invoice}` : ''} or excess £${e.excess}`);
+    if (!cancelled) notes.push(`amount £${p.amount.toFixed(2)} does not equal deposit £${e.deposit}, half £${e.half}, remaining £${e.remaining}${e.remainingLessCredit !== undefined ? ` (£${e.remainingLessCredit} after credit on account)` : ''}${e.invoice !== undefined ? `, invoice owing £${e.invoice}` : ''} or excess £${e.excess}`);
   } else if (strongCandidates.length > 1) {
     notes.push('more than one job referenced');
   } else if (strongCandidates.length === 0 && invoiceTokens.length === 0) {

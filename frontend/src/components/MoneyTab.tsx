@@ -88,6 +88,8 @@ interface FinancialData {
     } | null;
     required_deposit: number;
     deposit_paid: boolean;
+    /** Money on account put aside for this job (CREDIT-ON-ACCOUNT-SPEC.md) — not in HireHop's balance until invoicing. */
+    on_account?: { total: number; covers: number; to_pay: number; items: Array<{ id: string; amount: number; source_job_id: string; source_job_number: number | null }> } | null;
     deposit_percent: number;
     deposits: Array<{
       id: number; amount: number; date: string;
@@ -1509,6 +1511,27 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
             )}
             {balError && <p className="text-xs text-red-600 mt-1">{balError}</p>}
 
+            {/* The client's own money from an earlier job, put aside for this one. HireHop
+                (and so the balance above) doesn't know about it until this job is invoiced —
+                this is the figure to ask the client for meanwhile. */}
+            {financial.on_account && !financial.balance_override && (
+              <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-900">
+                <p>
+                  <span className="font-semibold">£{financial.on_account.total.toFixed(2)} on account</span>{' '}
+                  from {financial.on_account.items.map((c, i) => (
+                    <span key={c.id}>{i > 0 && ', '}<Link to={`/jobs/${c.source_job_id}?tab=money`} className="underline">job {c.source_job_number ?? '—'}</Link></span>
+                  ))}
+                  {hasOutstanding(financial.balance_outstanding)
+                    ? <> comes off at invoicing. <span className="font-semibold">To pay now: £{financial.on_account.to_pay.toFixed(2)}</span></>
+                    : <> is put aside for this job; nothing is owed on it at the moment.</>}
+                </p>
+                {financial.on_account.total - financial.on_account.covers > 0.005 && hasOutstanding(financial.balance_outstanding) && (
+                  <p className="text-xs mt-0.5">More than this job owes: the other £{(financial.on_account.total - financial.on_account.covers).toFixed(2)} stays on account.</p>
+                )}
+                <p className="text-xs text-blue-800 mt-0.5">HireHop and the payment link still show the full balance until then.</p>
+              </div>
+            )}
+
             {/* Deposit to Secure info — a pre-hire prompt; noise once the hire is back. */}
             {!hireIsBack && financial.hire_value_inc_vat > 0 && !financial.deposit_paid && (
               <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
@@ -1517,7 +1540,8 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                   {financial.hire_value_inc_vat < 400
                     ? `Full payment required: £${financial.hire_value_inc_vat.toFixed(2)} (jobs under £400)`
                     : <>
-                        Minimum deposit (25%): <span className="font-bold">£{financial.required_deposit.toFixed(2)}</span>
+                        Minimum deposit (25%): <span className="font-bold">£{Math.max(0, financial.required_deposit - (financial.on_account?.total ?? 0)).toFixed(2)}</span>
+                        {financial.on_account && <> (£{financial.required_deposit.toFixed(2)} less what's on account)</>}
                         {' · '}Half: £{(financial.hire_value_inc_vat * 0.5).toFixed(2)}
                         {' · '}Full: £{financial.hire_value_inc_vat.toFixed(2)}
                       </>
@@ -1528,7 +1552,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
             {!hireIsBack && financial.deposit_paid && hasOutstanding(financial.balance_outstanding) && (
               <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
                 <p className="text-xs text-green-700">
-                  Deposit secured. Remaining balance: <span className="font-semibold">£{financial.balance_outstanding.toFixed(2)}</span>
+                  Deposit secured{financial.on_account ? ' (counting what\'s on account)' : ''}. Remaining balance: <span className="font-semibold">£{(financial.on_account ? financial.on_account.to_pay : financial.balance_outstanding).toFixed(2)}</span>
                 </p>
               </div>
             )}

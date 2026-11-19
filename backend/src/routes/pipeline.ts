@@ -505,7 +505,7 @@ const updateStatusSchema = z.object({
   // pause modal, which sends an ISO date here. Survives the sacred-future
   // rule on any subsequent contact-type interaction.
   revisit_date: z.string().optional().nullable(),
-  confirmed_method: z.enum(['deposit', 'full_payment', 'po', 'manual']).optional().nullable(),
+  confirmed_method: z.enum(['deposit', 'full_payment', 'po', 'manual', 'credit_on_account']).optional().nullable(),
   lost_reason: z.string().optional().nullable(),
   lost_detail: z.string().optional().nullable(),
   transition_note: z.string().optional().nullable(),  // Why the status changed
