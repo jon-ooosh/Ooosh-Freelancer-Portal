@@ -2,6 +2,7 @@ import { Routes, Route, Navigate, useLocation, useSearchParams } from 'react-rou
 import { useAuthStore } from './hooks/useAuthStore';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
+import HelpPage from './pages/HelpPage';
 import PeoplePage from './pages/PeoplePage';
 import PersonDetailPage from './pages/PersonDetailPage';
 import OrganisationsPage from './pages/OrganisationsPage';
@@ -324,6 +325,8 @@ export default function App() {
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />
                 <Route path="/data-cleanup" element={<DataCleanupPage />} />
                 <Route path="/money/overview" element={<MoneyOverviewPage />} />
+                <Route path="/help" element={<HelpPage />} />
+                <Route path="/help/:slug" element={<HelpPage />} />
                 <Route path="/money/cashflow" element={<CashflowForecastPage />} />
                 <Route path="/money/business" element={<BusinessFiguresPage />} />
                 <Route path="/money/vouchers" element={<VouchersPage />} />

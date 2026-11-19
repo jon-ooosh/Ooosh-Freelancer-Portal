@@ -1,0 +1,71 @@
+{
+  "title": "Use money a client has on account on their new booking",
+  "area": "Money",
+  "who": "Any staff. A manager applies it at invoicing.",
+  "checked": "2026-11-19",
+  "summary": "A client has money held from an earlier job. This puts it towards a new booking so they are asked for less.",
+  "useWhen": [
+    "You open a job or new enquiry and the Client History panel shows a blue Money on account box.",
+    "The client has said they want it used on this booking."
+  ],
+  "notWhen": [
+    { "text": "The box is green and says Vouchers. That is money off, with a code, and works differently." },
+    { "text": "The client has not said which booking it is for. Leave it; it stays on account." }
+  ],
+  "steps": [
+    {
+      "text": "Open the new job. Find Money on account in the Client History panel on the right.",
+      "detail": "It shows how much, which job it was overpaid on, and the note left when it was held. Hover the note to read all of it.",
+      "open": "job",
+      "image": "1-on-account-box.png"
+    },
+    {
+      "text": "Press Use on this job.",
+      "detail": "The box turns amber and says \"Put aside for this job\". It can only be put aside for one job at a time.",
+      "image": "2-put-aside.png"
+    },
+    {
+      "text": "Check the Money tab shows what is left to pay.",
+      "detail": "A blue line under the balance says how much is on account and gives a \"To pay now\" figure. That is what to ask the client for.",
+      "open": "job:money",
+      "image": "3-to-pay-now.png"
+    },
+    {
+      "text": "Send the client their payment link as usual.",
+      "detail": "The payment page already asks for the reduced balance and the reduced deposit, and lists \"Credit held from a previous booking\". You do not need to work anything out."
+    },
+    {
+      "text": "If the money on account is what confirms the booking, confirm it by hand.",
+      "detail": "Change the status to Confirmed and choose Credit on account as how it was confirmed. The note is filled in for you. OP never confirms a job on credit by itself.",
+      "image": "4-confirm-method.png"
+    },
+    {
+      "text": "After the hire, a manager creates the invoice as normal.",
+      "detail": "The invoice panel says \"This will also apply ... held on account\". The one button raises the invoice, uses the job's own payments first, then moves the held money onto the invoice in HireHop and Xero.",
+      "who": "Manager",
+      "image": "5-also-applies.png"
+    }
+  ],
+  "next": [
+    "Until the job is invoiced, HireHop itself still shows the full balance. OP's Money tab and the payment link show the right figure.",
+    "If the held money is more than the invoice needs, the rest stays on account for the client's next booking.",
+    "If this job is lost or cancelled, the money goes back to being free to use on another of their jobs.",
+    "The pre-hire briefing email tells staff the figure to ask for."
+  ],
+  "wrong": [
+    { "problem": "There is no Money on account box.", "fix": "The client has nothing held, or it was held for a different client. Check Money > Overview, Held on Account. The money follows the client who paid, not the band." },
+    { "problem": "It says it is already put aside for another job.", "fix": "A manager opens that other job and presses Take off this job in its Money on account box. Then use it here." },
+    { "problem": "We used it on the wrong job.", "fix": "A manager presses Take off this job. Nothing has moved, so nothing needs undoing in HireHop." },
+    { "problem": "The client paid the full amount anyway.", "fix": "The job is now overpaid. After the hire, hold the overpayment on account again or refund it." },
+    { "problem": "The invoice panel says \"Payments to allocate\" after a late payment arrived.", "fix": "A manager presses Allocate. A payment that arrives after invoicing is allocated on its own; the held money waits for a person to press the button." }
+  ],
+  "related": ["keep-an-overpayment", "keep-a-cancellation-refund"],
+  "routes": ["/jobs/:id", "/pipeline"],
+  "keywords": ["on account", "credit", "use on this job", "put aside", "to pay now", "credit on account", "previous booking", "apply credit", "deposit"],
+  "covers": [
+    "frontend/src/components/account-credit/**",
+    "frontend/src/lib/accountCredit.ts",
+    "backend/src/services/account-credit.ts",
+    "backend/src/routes/account-credit.ts"
+  ]
+}

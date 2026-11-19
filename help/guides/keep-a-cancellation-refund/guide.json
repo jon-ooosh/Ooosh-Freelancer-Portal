@@ -1,0 +1,61 @@
+{
+  "title": "Keep a cancelled booking's refund for the client's next booking",
+  "area": "Money",
+  "who": "Any staff. A manager to undo it.",
+  "checked": "2026-11-19",
+  "summary": "A booking was cancelled and we owe the client money back, but they would rather we kept it for when they rebook.",
+  "useWhen": [
+    "The job is Cancelled and its cancellation fee has been invoiced and paid.",
+    "The invoice panel says there is money \"to refund to the client\".",
+    "The client has asked us to keep it for a future booking."
+  ],
+  "notWhen": [
+    { "text": "The client wants the money back. Use Process on the pending refund instead." },
+    { "text": "The cancellation fee has not been invoiced yet. A manager raises the fee invoice first." }
+  ],
+  "steps": [
+    {
+      "text": "Open the cancelled job and go to its Money tab.",
+      "detail": "The panel is titled Cancellation fee and says \"Refund due\", with the amount to refund.",
+      "open": "job:money",
+      "image": "1-refund-due.png"
+    },
+    {
+      "text": "Press Hold on account.",
+      "detail": "It is on the amber \"to refund to the client\" line.",
+      "image": "2-confirm.png"
+    },
+    {
+      "text": "Add a note saying why, then press Hold on account again.",
+      "detail": "For example who asked, and roughly when they expect to rebook."
+    },
+    {
+      "text": "Check the panel now says Settled, with the money held.",
+      "detail": "The pending refund on this job has been cleared, marked \"Held on account for their next booking\".",
+      "image": "3-settled.png"
+    },
+    {
+      "text": "When they rebook, use it on the new job.",
+      "detail": "It shows in the new job's Client History panel like any other money on account.",
+      "see": "use-money-on-account"
+    }
+  ],
+  "next": [
+    "Nothing has moved. The money is still on the cancelled job's payments in HireHop and Xero.",
+    "The job drops off Owed to Clients in Money > Overview and appears under Held on Account instead.",
+    "The cancelled job stays Cancelled. It is never completed."
+  ],
+  "wrong": [
+    { "problem": "There is no Hold on account button.", "fix": "The cancellation fee has to be invoiced and paid first. If the panel says \"Fee to invoice\", a manager presses Raise fee invoice." },
+    { "problem": "The client changed their mind and wants the refund after all.", "fix": "A manager opens the ... menu at the top right of the panel and chooses Stop holding on account. The pending refund comes back and can be processed as normal." },
+    { "problem": "They never rebooked.", "fix": "It stays in Money > Overview, Held on Account, with how long it has been there. Either refund it from the cancelled job or keep holding; it does not expire." }
+  ],
+  "related": ["use-money-on-account", "keep-an-overpayment"],
+  "routes": ["/jobs/:id", "/money/overview"],
+  "keywords": ["cancel", "cancelled", "cancellation", "refund", "rebook", "rebooking", "hold", "on account", "refund due", "owed to clients"],
+  "covers": [
+    "frontend/src/components/account-credit/**",
+    "backend/src/services/account-credit.ts",
+    "backend/src/routes/account-credit.ts"
+  ]
+}
