@@ -15,6 +15,18 @@ Future enhancements. Nothing here is committed work; treat as a menu, not a queu
 
 ### Future Enhancements (captured, not scheduled)
 
+- **Back up the FILES in R2, not just the database** (captured 19 Nov 2026, jon: "add that R2 backup to our backlog").
+  The 02:00 backup (`scripts/backup.ts`) is a `pg_dump` of the database to R2's `backups/` prefix — the files
+  themselves (claim photos, staff records, van photos, certificates, call recordings) have no second copy. R2 is
+  durable against hardware loss; the gap is a file being DELETED — by a bug, by a person, or by anyone holding the
+  R2 key — with nothing to bring it back, and a database restore only brings back the pointer to it. Not urgent,
+  platform-wide, and it matters more once Premises & compliance (`docs/PREMISES-COMPLIANCE-SPEC.md`) keeps
+  inspection certificates in OP. Steps: (1) check what R2 itself offers against deletion (object lock / retention
+  rules on the private `ooosh-operations` bucket) and what that does to the code paths that legitimately overwrite
+  or delete; (2) otherwise a nightly copy of the private bucket to a second place under a different account and key
+  (another provider, or a Hetzner Storage Box), only new and changed objects; (3) a restore test, and a line in
+  `weekly-maintenance.sh` saying when the copy last ran. `docs/MAINTENANCE.md` §1.2 covers the database only.
+
 - **Parked 17 Nov 2026 (jon: "lets hold off … make sure they're recorded so they don't get forgotten")** — three
   marketing / money follow-ons, in no order:
   - **Referral postcards and review posters** — the van / kit-case "Recommended by: ______" card with one QR per
