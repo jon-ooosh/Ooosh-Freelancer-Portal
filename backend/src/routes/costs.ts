@@ -13,9 +13,9 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import multer from 'multer';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES, isManagerTier } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES, isManagerTier } from '../middleware/auth';
 import { partialForUpdate } from '../middleware/validate';
-import { resolveRemittanceContact, getCostForRemittance, sendRemittance } from '../services/remittance';
+import { resolveRemittanceContact, getCostForRemittance, sendRemittance, buildRemittanceGroups, sendRemittanceForCosts } from '../services/remittance';
 import { fetchCostLines, validateCostLines, replaceCostLines, headerVatFromLines, type CostLineInput } from '../services/cost-lines';
 import { listFreelancerWork, getInvoiceTolerance, planWorkLinks, writeWorkLinks, WorkLinkError, type WorkLinkRow } from '../services/freelancer-work';
 import { suggestInvoicePerson, personIdByEmail } from '../services/freelancer-invoice-person';
@@ -40,10 +40,9 @@ const extractUpload = multer({
   limits: { fileSize: 10 * 1024 * 1024 },
 });
 
-// Manager+ can verify AND approve a payable (incl. one-click "Approve & save");
-// only admin can mark paid (money actually leaving + the Xero payment).
+// Manager+ can verify AND approve a payable (incl. one-click "Approve & save"),
+// and since Nov 2026 mark it paid too (MANAGER_ROLES on the pay routes).
 const VERIFY_ROLES = ['admin', 'manager'] as const;
-const ADMIN_ONLY = ['admin'] as const;
 
 // Curated staff-facing Xero account codes for the cost-capture category picker.
 // Ordered as they appear in the dropdown. Names are pulled live from Xero — this
@@ -1987,7 +1986,10 @@ const paySchema = z.object({
   paid_date: z.string().trim().max(20).optional().nullable(),
 });
 
-router.post('/:id/pay', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+// Manager tier (jon, Nov 2026): the people paying the bills are managers, so
+// admin-only meant an admin ticking every one. Same for the batch, settle,
+// the Xero check and remittance below.
+router.post('/:id/pay', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const parse = paySchema.safeParse(req.body ?? {});
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
@@ -2029,7 +2031,7 @@ router.post('/:id/pay', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: 
 // `settled_externally` is persisted rather than being a one-off "skip the push":
 // paid + no xero_payment_id is the exact shape three other code paths read as
 // "this bill still needs its payment recording in Xero", so without the flag the
-// next edit to the row would pay the supplier again. ADMIN_ONLY like /pay — it
+// next edit to the row would pay the supplier again. Manager tier like /pay — it
 // doesn't move money, but it closes the book on money that moved.
 const settleExternalSchema = z.object({
   // Required: a clean ledger nobody can explain is worse than a dirty one.
@@ -2038,7 +2040,7 @@ const settleExternalSchema = z.object({
   paid_date: z.string().trim().max(20).optional().nullable(),
 });
 
-router.post('/:id/settle-external', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+router.post('/:id/settle-external', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const parse = settleExternalSchema.safeParse(req.body ?? {});
     if (!parse.success) { res.status(400).json({ error: 'A short note saying how it was settled is required', issues: parse.error.issues }); return; }
@@ -2075,7 +2077,7 @@ router.post('/:id/settle-external', authorize(...ADMIN_ONLY), async (req: AuthRe
 // Ask Xero, now, whether any outstanding bill has already been paid there.
 // The same sweep the scheduler runs at 07:50 — on the button, for the day you
 // don't want to wait until tomorrow to see the ledger clear.
-router.post('/sync-xero-payments', authorize(...ADMIN_ONLY), async (_req: AuthRequest, res: Response) => {
+router.post('/sync-xero-payments', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
   try {
     const { runCostXeroPaymentSync } = await import('../services/cost-xero-payment-sync');
     const result = await runCostXeroPaymentSync();
@@ -2089,8 +2091,8 @@ router.post('/sync-xero-payments', authorize(...ADMIN_ONLY), async (_req: AuthRe
 // Pay MANY bills with ONE Xero batch payment — the monthly garage run. Refuses
 // the whole selection if any one bill can't be paid, and creates the batch in
 // Xero BEFORE marking anything paid here. See services/cost-batch-pay.ts.
-// ADMIN_ONLY, same as /:id/pay: this is money out the door, times twenty.
-router.post('/pay-batch', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+// Manager tier, same as /:id/pay: this is money out the door, times twenty.
+router.post('/pay-batch', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const parse = z.object({
       cost_ids: z.array(z.string().guid()).min(1).max(200),
@@ -2124,7 +2126,7 @@ router.post('/pay-batch', authorize(...ADMIN_ONLY), async (req: AuthRequest, res
 // paid. Decoupled from /pay — a bad email must never block/unwind a payment.
 
 // Resolve the payee + address for pre-filling the mark-paid modal's tickbox.
-router.get('/:id/remittance-contact', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+router.get('/:id/remittance-contact', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const cost = await getCostForRemittance(req.params.id as string);
     if (!cost) { res.status(404).json({ error: 'Cost not found' }); return; }
@@ -2138,31 +2140,83 @@ router.get('/:id/remittance-contact', authorize(...ADMIN_ONLY), async (req: Auth
 
 const remittanceSchema = z.object({ email: z.string().trim().email().max(200) });
 
-router.post('/:id/send-remittance', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: Response) => {
+router.post('/:id/send-remittance', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const parse = remittanceSchema.safeParse(req.body ?? {});
     if (!parse.success) { res.status(400).json({ error: 'A valid recipient email is required' }); return; }
     const result = await sendRemittance(req.params.id as string, parse.data.email);
     if (!result.ok) { res.status(502).json({ error: result.error || 'Send failed' }); return; }
     await audit(req.user!.id, req.params.id as string, 'remittance_sent', null, { email: parse.data.email });
-    // A freelancer invoice nobody linked yet: the address staff just chose names
-    // the freelancer, so link it (FREELANCER-PORTAL-SPEC §5). Only on a clear,
-    // single match, and never over an existing link.
-    try {
-      const c = await query(`SELECT cost_type, person_id FROM costs WHERE id = $1`, [req.params.id]);
-      if (c.rows[0]?.cost_type === 'freelancer_invoice' && !c.rows[0].person_id) {
-        const personId = await personIdByEmail(parse.data.email);
-        if (personId) {
-          await query(`UPDATE costs SET person_id = $1 WHERE id = $2 AND person_id IS NULL`, [personId, req.params.id]);
-          await audit(req.user!.id, req.params.id as string, 'cost_person_linked', null, { person_id: personId, from: 'remittance' });
-        }
-      }
-    } catch (linkErr) {
-      console.error('[costs] remittance person link failed (non-fatal):', linkErr);
-    }
+    await linkFreelancerFromRemittance(req.user!.id, req.params.id as string, parse.data.email);
     res.json({ data: { sent: true, email: parse.data.email } });
   } catch (err) {
     console.error('[costs] send-remittance error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// A freelancer invoice nobody linked yet: the address staff just chose names
+// the freelancer, so link it (FREELANCER-PORTAL-SPEC §5). Only on a clear,
+// single match, and never over an existing link. Never fails the send.
+async function linkFreelancerFromRemittance(userId: string, costId: string, email: string): Promise<void> {
+  try {
+    const c = await query(`SELECT cost_type, person_id FROM costs WHERE id = $1`, [costId]);
+    if (c.rows[0]?.cost_type === 'freelancer_invoice' && !c.rows[0].person_id) {
+      const personId = await personIdByEmail(email);
+      if (personId) {
+        await query(`UPDATE costs SET person_id = $1 WHERE id = $2 AND person_id IS NULL`, [personId, costId]);
+        await audit(userId, costId, 'cost_person_linked', null, { person_id: personId, from: 'remittance' });
+      }
+    }
+  } catch (linkErr) {
+    console.error('[costs] remittance person link failed (non-fatal):', linkErr);
+  }
+}
+
+// Remittance for a bulk payment: ONE email per payee listing every bill paid
+// to them, not one per bill (jon, Nov 2026). The modal asks for the groups
+// (read-only, with an address to pre-fill), staff confirm each address, and
+// the frontend sends them only AFTER the batch has been paid — like the
+// single-bill flow, a failed email never unwinds a payment.
+router.post('/remittance-groups', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = z.object({ cost_ids: z.array(z.string().guid()).min(1).max(200) }).safeParse(req.body ?? {});
+    if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
+    res.json({ data: await buildRemittanceGroups(parse.data.cost_ids) });
+  } catch (err) {
+    console.error('[costs] remittance-groups error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+const remittanceBatchSchema = z.object({
+  // The batch's own reference, so the payee can match the email to their bank line.
+  reference: z.string().trim().max(255).optional().nullable(),
+  groups: z.array(z.object({
+    cost_ids: z.array(z.string().guid()).min(1).max(200),
+    email: z.string().trim().email().max(200),
+  })).min(1).max(200),
+});
+
+router.post('/send-remittance-batch', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const parse = remittanceBatchSchema.safeParse(req.body ?? {});
+    if (!parse.success) { res.status(400).json({ error: 'Each payee needs a valid email address', issues: parse.error.issues }); return; }
+    // Each payee is its own send: one failing doesn't stop the rest, and the
+    // answer says which went and which didn't.
+    const results: Array<{ cost_ids: string[]; email: string; ok: boolean; error?: string }> = [];
+    for (const g of parse.data.groups) {
+      const r = await sendRemittanceForCosts(g.cost_ids, g.email, parse.data.reference ?? null);
+      results.push({ cost_ids: g.cost_ids, email: g.email, ok: r.ok, ...(r.ok ? {} : { error: r.error || 'Send failed' }) });
+      if (!r.ok) continue;
+      for (const costId of g.cost_ids) {
+        await audit(req.user!.id, costId, 'remittance_sent', null, { email: g.email, bills_in_email: g.cost_ids.length });
+        await linkFreelancerFromRemittance(req.user!.id, costId, g.email);
+      }
+    }
+    res.json({ data: { results } });
+  } catch (err) {
+    console.error('[costs] send-remittance-batch error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

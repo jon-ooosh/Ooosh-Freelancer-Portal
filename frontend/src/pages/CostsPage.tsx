@@ -19,6 +19,7 @@ import CostCaptureModal from '../components/CostCaptureModal';
 import { UNMATCHED_REASONS } from '../components/costs/FreelancerInvoiceLinks';
 import RechargeResolveModal, { RechargeSlot, type RechargeCost } from '../components/RechargeResolveModal';
 import RecordRefundModal from '../components/RecordRefundModal';
+import RecordActionsMenu, { type RecordAction } from '../components/RecordActionsMenu';
 import { PAID_NOW_METHODS } from '../lib/costOptions';
 import type { Cost, SupplierPaymentTerms } from '../../../shared/types';
 import { ukToday } from '../lib/ukDate';
@@ -209,8 +210,9 @@ export default function CostsPage() {
   const navigate = useNavigate();
   const { user } = useAuthStore();
   const role = user?.role || '';
+  // Paying bills is manager tier (jon, Nov 2026) — mark paid, bulk pay, settle,
+  // the Xero check and remittance all follow it, server and screen alike.
   const isManager = hasManagerRole(role);
-  const isAdmin = role === 'admin';
 
   const [view, setView] = useState<ViewMode>((searchParams.get('view') as ViewMode) || 'all');
   const missingReceipt = searchParams.get('missing_receipt') === '1';
@@ -234,6 +236,8 @@ export default function CostsPage() {
   // ⑂ opens the edit form at its Jobs section (the split modal it used to open is retired).
   const [editingJobs, setEditingJobs] = useState(false);
   const [payTarget, setPayTarget] = useState<CostRow | null>(null);
+  // "Send remittance advice…" on a bill that's already paid (the ⋯ menu).
+  const [remitTarget, setRemitTarget] = useState<CostRow | null>(null);
   // "Query" on a freelancer invoice: a question for them instead of approving (FREELANCER-PORTAL-SPEC §5).
   const [queryTarget, setQueryTarget] = useState<CostRow | null>(null);
   // Recording money coming BACK. `null` target with the flag on = opened from
@@ -427,7 +431,7 @@ export default function CostsPage() {
     c.payment_status !== 'paid'
     && (c.payment_method === 'not_yet_paid' || c.payment_method === 'reimburse_me')
     && c.approval_state === 'approved';
-  const selectableRows = view === 'payable' && isAdmin ? sortedRows.filter(batchPayable) : [];
+  const selectableRows = view === 'payable' && isManager ? sortedRows.filter(batchPayable) : [];
   const selectedRows = selectableRows.filter((c) => selected.has(c.id));
   const selectedTotal = selectedRows.reduce((t, c) => t + (Number(c.amount_gross) || 0), 0);
   // What the table in front of you actually adds up to. Deliberately SEPARATE
@@ -449,17 +453,38 @@ export default function CostsPage() {
     });
   }
 
-  async function payBatch(paidDate: string, paidMethod: string, reference: string) {
+  async function payBatch(paidDate: string, paidMethod: string, reference: string, remittances: RemittanceSend[]) {
     setActionBusy('batch-pay');
     try {
       const r = await api.post<{ data: { paid: number; total: number; batchPaymentId?: string } }>(
         '/costs/pay-batch',
         { cost_ids: [...selected], paid_method: paidMethod, paid_date: paidDate, reference: reference || null },
       );
+      // Remittance only AFTER the batch is paid, one email per payee. Decoupled
+      // like the single bill: a failed email never unwinds the payment.
+      let remitNote = '';
+      if (remittances.length) {
+        try {
+          const sent = await api.post<{ data: { results: Array<{ email: string; ok: boolean; error?: string }> } }>(
+            '/costs/send-remittance-batch', { reference: reference || null, groups: remittances },
+          );
+          const ok = sent.data.results.filter((x) => x.ok);
+          const failed = sent.data.results.filter((x) => !x.ok);
+          if (ok.length) remitNote += `\n\nRemittance advice sent to ${ok.map((x) => x.email).join(', ')}.`;
+          if (failed.length) {
+            remitNote += `\n\nRemittance NOT sent to ${failed.map((x) => `${x.email} (${x.error || 'failed'})`).join('; ')}.`
+              + ' Use "Send remittance advice…" in each bill\'s ⋯ menu to send it.';
+          }
+        } catch (remErr) {
+          // No answer to read, so some may have gone: the ✉︎ mark on each bill says which.
+          remitNote = `\n\nBut the remittance emails may not all have been sent: ${remErr instanceof Error ? remErr.message : 'unknown error'}.`
+            + ' A bill with ✉︎ beside its status got one; use "Send remittance advice…" in the ⋯ menu for the rest.';
+        }
+      }
       setShowBatchPay(false);
       setSelected(new Set());
       await load(true);
-      alert(`Paid ${r.data.paid} bill${r.data.paid === 1 ? '' : 's'} — £${r.data.total.toFixed(2)} as a single Xero batch payment.`);
+      alert(`Paid ${r.data.paid} bill${r.data.paid === 1 ? '' : 's'} — £${r.data.total.toFixed(2)} as a single Xero batch payment.${remitNote}`);
     } catch (err) {
       // Every refusal names what's wrong and confirms nothing was paid.
       alert(err instanceof Error ? err.message : 'Batch payment failed');
@@ -477,7 +502,7 @@ export default function CostsPage() {
         try {
           await api.post(`/costs/${id}/send-remittance`, { email: remittanceEmail });
         } catch (remErr) {
-          alert(`Marked paid — but the remittance email to ${remittanceEmail} failed to send: ${remErr instanceof Error ? remErr.message : 'unknown error'}. You can resend it later.`);
+          alert(`Marked paid — but the remittance email to ${remittanceEmail} failed to send: ${remErr instanceof Error ? remErr.message : 'unknown error'}. You can send it again from the bill's ⋯ menu ("Send remittance advice…").`);
         }
       }
       setPayTarget(null);
@@ -710,7 +735,7 @@ export default function CostsPage() {
               </span>
             )}
           </span>
-          {view === 'payable' && isAdmin && (
+          {view === 'payable' && isManager && (
             <button onClick={checkXeroPayments} disabled={actionBusy === 'xero-payment-sync'}
               title="Ask Xero whether any of these have already been paid there, and clear the ones that have"
               className="px-2.5 py-1 text-xs rounded-md border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50 whitespace-nowrap">
@@ -919,31 +944,35 @@ export default function CostsPage() {
                   <td className="px-2 py-2 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
                       {view === 'payable' && (
-                        <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} onQuery={() => setQueryTarget(c)} />
+                        <PayableActions cost={c} isManager={isManager} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} onQuery={() => setQueryTarget(c)} />
                       )}
-                      {/* Money back. Not offered on a credit (you can't refund a
-                          refund) or on a £0 row, which is what the server says too. */}
-                      {!c.is_credit && Number(c.amount_gross) > 0 && (
-                        <button onClick={() => { setRefundTarget(c); setRefundFile(null); setRefundOpen(true); }}
-                          title="Record a refund / credit against this purchase"
-                          className="px-1.5 py-1 text-sm text-gray-500 hover:text-emerald-700 hover:bg-emerald-50 rounded">
-                          ↩
-                        </button>
-                      )}
-                      <button onClick={() => { setEditingJobs(true); setEditing(c); }} title="Split across jobs"
-                        className={`px-1.5 py-1 text-sm rounded hover:bg-gray-100 ${c.allocation_count ? 'text-purple-700' : 'text-gray-500 hover:text-gray-800'}`}>
-                        ⑂{c.allocation_count ? <span className="text-[10px] align-top">{c.allocation_count}</span> : ''}
-                      </button>
-                      <button onClick={() => { setEditingJobs(false); setEditing(c); }} title="Edit"
-                        className="px-1.5 py-1 text-sm text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
-                        ✎
-                      </button>
-                      {isManager && (
-                        <button disabled={actionBusy === c.id + 'delete'} onClick={() => deleteCost(c)} title="Delete"
-                          className="px-1.5 py-1 text-sm text-red-500 hover:text-red-700 hover:bg-red-50 rounded disabled:opacity-50">
-                          🗑
-                        </button>
-                      )}
+                      {/* Edit, split, refund, remittance and delete live in one ⋯ menu
+                          (jon, Nov 2026): as a row of icons they pushed the table past
+                          the screen's width. The workflow button above stays out. */}
+                      {(() => {
+                        const actions: RecordAction[] = [
+                          { label: 'Edit', onClick: () => { setEditingJobs(false); setEditing(c); } },
+                          {
+                            label: c.allocation_count ? `Split across jobs (${c.allocation_count})` : 'Split across jobs',
+                            onClick: () => { setEditingJobs(true); setEditing(c); },
+                          },
+                        ];
+                        // Money back. Not offered on a credit (you can't refund a
+                        // refund) or on a £0 row, which is what the server says too.
+                        if (!c.is_credit && Number(c.amount_gross) > 0) {
+                          actions.push({ label: 'Record a refund…', title: 'Record a refund / credit against this purchase',
+                            onClick: () => { setRefundTarget(c); setRefundFile(null); setRefundOpen(true); } });
+                        }
+                        if (isManager && canSendRemittance(c)) {
+                          actions.push({
+                            label: c.remittance_sent_at ? 'Send remittance advice again…' : 'Send remittance advice…',
+                            title: 'Email the payee that this bill has been paid',
+                            onClick: () => setRemitTarget(c),
+                          });
+                        }
+                        if (isManager) actions.push({ label: 'Delete', danger: true, onClick: () => deleteCost(c) });
+                        return <RecordActionsMenu floating actions={actions} />;
+                      })()}
                     </div>
                   </td>
                 </tr>
@@ -1013,6 +1042,7 @@ export default function CostsPage() {
 
       {showBatchPay && (
         <BatchPayModal
+          costIds={selectedRows.map((c) => c.id)}
           count={selectedRows.length}
           total={selectedTotal}
           supplierCount={selectedSuppliers.size}
@@ -1025,6 +1055,11 @@ export default function CostsPage() {
       {queryTarget && (
         <QueryInvoiceModal cost={queryTarget} onClose={() => setQueryTarget(null)}
           onSaved={() => { setQueryTarget(null); void load(true); }} />
+      )}
+
+      {remitTarget && (
+        <SendRemittanceModal cost={remitTarget} onClose={() => setRemitTarget(null)}
+          onSent={() => { setRemitTarget(null); void load(true); }} />
       )}
 
       {payTarget && (
@@ -1169,24 +1204,59 @@ function SupplierTermsModal({ cost, onClose, onSaved }: {
 // a bill payment posts to. Keep in step with the paid-now methods in
 // CostCaptureModal + backend SPEND_MONEY_METHODS.
 // One payment, many bills. Deliberately a SEPARATE component from PayModal:
-// that one carries remittance advice, a person picker and a payee, all of which
-// are per-payee concepts that don't survive a batch spanning suppliers. Bolting
-// a "many" mode onto it would make both harder to read.
-function BatchPayModal({ count, total, supplierCount, busy, onClose, onSubmit }: {
+// that one carries the "already paid, just clear it" escape hatch and a single
+// payee. Remittance here is per PAYEE, not per bill (jon, Nov 2026): the
+// selected bills are grouped by who is being paid and each payee gets ONE email
+// listing their bills, the total and the reference — twenty invoices in one
+// transfer is one cover letter, not twenty.
+function BatchPayModal({ costIds, count, total, supplierCount, busy, onClose, onSubmit }: {
+  costIds: string[];
   count: number;
   total: number;
   supplierCount: number;
   busy: boolean;
   onClose: () => void;
-  onSubmit: (paidDate: string, paidMethod: string, reference: string) => void;
+  onSubmit: (paidDate: string, paidMethod: string, reference: string, remittances: RemittanceSend[]) => void;
 }) {
   const [paidDate, setPaidDate] = useState(() => ukToday());
   const [paidMethod, setPaidMethod] = useState('lloyds_transfer');
   const [reference, setReference] = useState('');
 
+  // Default unticked, as on a single bill — sending external mail is a deliberate act.
+  const [sendRemittance, setSendRemittance] = useState(false);
+  const [groups, setGroups] = useState<RemittanceGroup[] | null>(null);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, { include: boolean; email: string; source: string | null }>>({});
+  // A stable key, so a parent re-render doesn't restart the lookup.
+  const idsKey = costIds.join(',');
+
+  // Look the payees up the first time the box is ticked; ticking it again keeps
+  // whatever was typed.
+  useEffect(() => {
+    if (!sendRemittance || groups) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.post<{ data: RemittanceGroup[] }>('/costs/remittance-groups', { cost_ids: idsKey.split(',') });
+        if (cancelled) return;
+        setGroups(res.data);
+        setDrafts(Object.fromEntries(res.data.map((g) => [g.key, { include: true, email: g.email || '', source: g.source }])));
+      } catch (err) {
+        if (!cancelled) setGroupsError(err instanceof Error ? err.message : 'Could not look up the payees');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [sendRemittance, groups, idsKey]);
+
+  const included = sendRemittance && groups ? groups.filter((g) => drafts[g.key]?.include) : [];
+  const remittanceReady = !sendRemittance
+    || (groups !== null && included.every((g) => isRemittanceEmail(drafts[g.key].email)));
+  const setDraft = (key: string, patch: Partial<{ include: boolean; email: string; source: string | null }>) =>
+    setDrafts((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
+
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="px-5 py-4 border-b border-gray-200">
           <h3 className="text-lg font-semibold text-gray-900">Pay {count} bill{count === 1 ? '' : 's'}</h3>
           <p className="text-sm text-gray-500 mt-0.5">
@@ -1215,8 +1285,62 @@ function BatchPayModal({ count, total, supplierCount, busy, onClose, onSubmit }:
             <input value={reference} onChange={(e) => setReference(e.target.value)}
               placeholder="e.g. Garage — September"
               className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
-            <p className="text-xs text-gray-400 mt-1">Shown on the batch in Xero, to help match it to the bank line.</p>
+            <p className="text-xs text-gray-400 mt-1">
+              Shown on the batch in Xero, to help match it to the bank line
+              {sendRemittance ? ' — and in the remittance emails, so the payee sees it too' : ''}.
+            </p>
           </div>
+
+          {/* Optional remittance advice — one email per payee. */}
+          <div className="border-t border-gray-100 pt-3">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" checked={sendRemittance}
+                onChange={(e) => { setSendRemittance(e.target.checked); if (e.target.checked) setGroupsError(null); }}
+                className="mt-0.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
+              <span className="text-sm text-gray-700">
+                Also send remittance advice
+                <span className="block text-xs text-gray-400">
+                  One email per payee, listing the bills paid to them, the total and the reference. Sent once the payment has gone through.
+                </span>
+              </span>
+            </label>
+            {sendRemittance && (
+              <div className="mt-2 pl-6 space-y-2">
+                {groupsError ? (
+                  <p className="text-xs text-amber-700">
+                    Couldn't look up the payees ({groupsError}). Untick this to pay without remittance — you can send it
+                    afterwards from each bill's ⋯ menu.
+                  </p>
+                ) : !groups ? (
+                  <p className="text-xs text-gray-400">Looking up the payees…</p>
+                ) : groups.map((g) => {
+                  const d = drafts[g.key];
+                  const n = g.cost_ids.length;
+                  return (
+                    <div key={g.key} className="border border-gray-200 rounded-md p-2.5">
+                      <label className="flex items-start gap-2 cursor-pointer">
+                        <input type="checkbox" checked={d.include} onChange={(e) => setDraft(g.key, { include: e.target.checked })}
+                          className="mt-0.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500" />
+                        <span className="text-sm text-gray-800">
+                          <strong>{g.payee_name || 'Unknown payee'}</strong>
+                          <span className="block text-xs text-gray-500">
+                            {n} {g.mode === 'reimbursement' ? (n === 1 ? 'expense' : 'expenses') : (n === 1 ? 'bill' : 'bills')} · {gbp(g.total)}
+                          </span>
+                        </span>
+                      </label>
+                      {d.include && (
+                        <div className="mt-2 pl-6">
+                          <RemittanceEmailField email={d.email} source={d.source} loaded
+                            onChange={(email, source) => setDraft(g.key, { email, source })} />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           <p className="text-xs text-gray-500 border-t border-gray-100 pt-3">
             Each bill is paid in full. If any one of them can't be paid, nothing is —
             you'll be told which and why.
@@ -1224,9 +1348,223 @@ function BatchPayModal({ count, total, supplierCount, busy, onClose, onSubmit }:
         </div>
         <div className="px-5 py-3 border-t border-gray-200 flex justify-end gap-2">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
-          <button disabled={busy} onClick={() => onSubmit(paidDate, paidMethod, reference)}
+          <button disabled={busy || !remittanceReady}
+            onClick={() => onSubmit(paidDate, paidMethod, reference,
+              included.map((g) => ({ cost_ids: g.cost_ids, email: drafts[g.key].email.trim() })))}
             className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
-            {busy ? 'Paying…' : `Pay ${gbp(total)}`}
+            {busy ? 'Paying…' : included.length ? `Pay ${gbp(total)} & send ${included.length}` : `Pay ${gbp(total)}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Remittance advice: shared pieces ────────────────────────────────────────
+
+/** One payee in a bulk payment, as `POST /costs/remittance-groups` returns it. */
+interface RemittanceGroup {
+  key: string;
+  payee_name: string | null;
+  mode: 'supplier' | 'reimbursement';
+  cost_ids: string[];
+  total: number;
+  email: string | null;
+  source: string;
+}
+
+/** One email to send after a bulk payment: these bills, to this address. */
+type RemittanceSend = { cost_ids: string[]; email: string };
+
+const isRemittanceEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+
+/**
+ * A remittance can go after the fact for a bill OP paid (a pay-later bill or a
+ * reimbursement). Not for a credit, a card purchase, or a bill cleared as
+ * "already paid" — OP doesn't know how or when that money moved.
+ */
+function canSendRemittance(c: Cost): boolean {
+  return c.payment_status === 'paid'
+    && !c.is_credit
+    && !c.settled_externally
+    && (c.payment_method === 'not_yet_paid' || c.payment_method === 'reimburse_me');
+}
+
+/** Pre-fill a bill's remittance address from the resolved contact (best-effort). */
+function useRemittanceContact(costId: string) {
+  const [email, setEmail] = useState('');
+  const [source, setSource] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.get<{ data: { email: string | null; source: string } }>(`/costs/${costId}/remittance-contact`);
+        if (cancelled) return;
+        const c = res.data;
+        if (c?.email) setEmail(c.email);
+        setSource(c?.source ?? null);
+      } catch {
+        /* pre-fill is best-effort — staff can still type an address */
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [costId]);
+  const set = (nextEmail: string, nextSource: string | null) => { setEmail(nextEmail); setSource(nextSource); };
+  return { email, source, loaded, set };
+}
+
+/**
+ * The address a remittance goes to: typed, pre-filled, or picked from OP, with
+ * a note on where a pre-filled one came from. Staff always see it before it
+ * goes (never send blind).
+ */
+function RemittanceEmailField({ email, source, loaded, onChange }: {
+  email: string;
+  source: string | null;
+  loaded: boolean;
+  onChange: (email: string, source: string | null) => void;
+}) {
+  // Person picker — search OP for the payee (freelancers are always in here).
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [pickerResults, setPickerResults] = useState<Array<{ id: string; first_name: string; last_name: string; email: string | null }>>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  useEffect(() => {
+    const q = pickerQuery.trim();
+    if (q.length < 2) { setPickerResults([]); return; }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string | null }> }>(
+          `/people?search=${encodeURIComponent(q)}&limit=8`,
+        );
+        if (!cancelled) setPickerResults(res.data || []);
+      } catch {
+        if (!cancelled) setPickerResults([]);
+      }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [pickerQuery]);
+
+  const emailValid = isRemittanceEmail(email);
+
+  return (
+    <>
+      <input type="email" value={email}
+        onChange={(e) => onChange(e.target.value, 'manual')}
+        placeholder={loaded ? 'name@example.com' : 'Looking up contact…'}
+        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
+      {loaded && !email && (
+        <p className="text-xs text-amber-600 mt-1">No email found for this payee — search OP below or type one.</p>
+      )}
+      {email && !emailValid && (
+        <p className="text-xs text-amber-600 mt-1">That doesn't look like a valid email address.</p>
+      )}
+      {email && emailValid && source === 'reimbursement_staff' && (
+        <p className="text-xs text-gray-400 mt-1">From their staff profile.</p>
+      )}
+      {email && emailValid && (source === 'freelancer_linked' || source === 'freelancer_assignment' || source === 'person_match') && (
+        <p className="text-xs text-gray-400 mt-1">From their OP contact record.</p>
+      )}
+      {email && emailValid && source === 'remembered' && (
+        <p className="text-xs text-gray-400 mt-1">Remembered from a previous remittance.</p>
+      )}
+      {email && emailValid && source === 'supplier_org' && (
+        <p className="text-xs text-gray-400 mt-1">From the supplier's record.</p>
+      )}
+
+      {/* Person picker — search OP for the payee (freelancers are always here). */}
+      <div className="relative mt-2">
+        <input type="text" value={pickerQuery}
+          onChange={(e) => { setPickerQuery(e.target.value); setPickerOpen(true); }}
+          onFocus={() => setPickerOpen(true)}
+          placeholder="🔍 Search OP for the payee (name or email)"
+          className="w-full border border-gray-200 rounded-md px-3 py-1.5 text-sm focus:ring-2 focus:ring-purple-500" />
+        {pickerOpen && pickerResults.length > 0 && (
+          <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-md shadow-lg max-h-48 overflow-auto">
+            {pickerResults.map((p) => {
+              const name = `${p.first_name} ${p.last_name}`.trim();
+              return (
+                <button key={p.id} type="button" disabled={!p.email}
+                  onClick={() => {
+                    if (!p.email) return;
+                    onChange(p.email, 'person_match');
+                    setPickerQuery('');
+                    setPickerResults([]);
+                    setPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <span className="text-gray-800">{name}</span>
+                  <span className="block text-xs text-gray-400">{p.email || 'no email on file'}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// "Send remittance advice…" from a paid bill's ⋯ menu — for a bill paid without
+// one, or one whose email failed. One bill, one email, no payment reference
+// (OP doesn't keep the batch's reference against each bill).
+function SendRemittanceModal({ cost, onClose, onSent }: { cost: CostRow; onClose: () => void; onSent: () => void }) {
+  const remit = useRemittanceContact(cost.id);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const emailValid = isRemittanceEmail(remit.email);
+  const isReimburse = cost.payment_method === 'reimburse_me';
+  const payeeName = isReimburse ? (cost.uploaded_by_name || 'staff') : (cost.supplier_name || 'supplier');
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  async function send() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`/costs/${cost.id}/send-remittance`, { email: remit.email.trim() });
+      onSent();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'The email could not be sent');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900">Send remittance advice</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+        </div>
+        <div className="px-6 py-4 space-y-3">
+          <p className="text-sm text-gray-600">
+            Tell <strong>{payeeName}</strong> that {isReimburse ? 'their expense' : 'their invoice'}
+            {cost.invoice_number ? <> <strong>{cost.invoice_number}</strong></> : null} for <strong>{gbp(cost.amount_gross)}</strong>
+            {' '}{cost.paid_value_date ? <>was paid on <strong>{fmtDate(cost.paid_value_date)}</strong></> : 'has been paid'}.
+          </p>
+          {cost.remittance_sent_at && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
+              Already sent{cost.remittance_email ? ` to ${cost.remittance_email}` : ''} on {fmtDate(cost.remittance_sent_at)} — this sends it again.
+            </p>
+          )}
+          <RemittanceEmailField email={remit.email} source={remit.source} loaded={remit.loaded} onChange={remit.set} />
+          {error && <p className="text-sm text-red-600">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
+          <button onClick={send} disabled={busy || !emailValid}
+            className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
+            {busy ? 'Sending…' : 'Send'}
           </button>
         </div>
       </div>
@@ -1256,51 +1594,11 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
   // address from the resolved contact; staff confirm before it goes (never
   // send blind). Default unticked — sending external mail is a deliberate act.
   const [sendRemittance, setSendRemittance] = useState(false);
-  const [remittanceEmail, setRemittanceEmail] = useState('');
-  const [contactLoaded, setContactLoaded] = useState(false);
-  const [contactSource, setContactSource] = useState<string | null>(null);
-  // Person picker — search OP for the payee (freelancers are always in here).
-  const [pickerQuery, setPickerQuery] = useState('');
-  const [pickerResults, setPickerResults] = useState<Array<{ id: string; first_name: string; last_name: string; email: string | null }>>([]);
-  const [pickerOpen, setPickerOpen] = useState(false);
-
-  useEffect(() => {
-    const q = pickerQuery.trim();
-    if (q.length < 2) { setPickerResults([]); return; }
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      try {
-        const res = await api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string | null }> }>(
-          `/people?search=${encodeURIComponent(q)}&limit=8`,
-        );
-        if (!cancelled) setPickerResults(res.data || []);
-      } catch {
-        if (!cancelled) setPickerResults([]);
-      }
-    }, 300);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [pickerQuery]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await api.get<{ data: { email: string | null; source: string } }>(`/costs/${cost.id}/remittance-contact`);
-        if (cancelled) return;
-        const c = res.data;
-        if (c?.email) setRemittanceEmail(c.email);
-        setContactSource(c?.source ?? null);
-      } catch {
-        /* pre-fill is best-effort — staff can still type an address */
-      } finally {
-        if (!cancelled) setContactLoaded(true);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [cost.id]);
+  const remit = useRemittanceContact(cost.id);
+  const remittanceEmail = remit.email;
 
   const isFutureDate = paidDate > ukToday();
-  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(remittanceEmail.trim());
+  const emailValid = isRemittanceEmail(remittanceEmail);
   // Due date from the supplier's resolved terms (server-computed), falling back
   // to flat invoice + 30 for an older API response.
   const dueDate = (() => {
@@ -1401,59 +1699,7 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
             </label>
             {sendRemittance && (
               <div className="mt-2 pl-6">
-                <input type="email" value={remittanceEmail}
-                  onChange={(e) => { setRemittanceEmail(e.target.value); setContactSource('manual'); }}
-                  placeholder={contactLoaded ? 'name@example.com' : 'Looking up contact…'}
-                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
-                {contactLoaded && !remittanceEmail && (
-                  <p className="text-xs text-amber-600 mt-1">No email found for this payee — search OP below or type one.</p>
-                )}
-                {remittanceEmail && !emailValid && (
-                  <p className="text-xs text-amber-600 mt-1">That doesn't look like a valid email address.</p>
-                )}
-                {remittanceEmail && emailValid && contactSource === 'reimbursement_staff' && (
-                  <p className="text-xs text-gray-400 mt-1">From their staff profile.</p>
-                )}
-                {remittanceEmail && emailValid && (contactSource === 'freelancer_linked' || contactSource === 'freelancer_assignment' || contactSource === 'person_match') && (
-                  <p className="text-xs text-gray-400 mt-1">From their OP contact record.</p>
-                )}
-                {remittanceEmail && emailValid && contactSource === 'remembered' && (
-                  <p className="text-xs text-gray-400 mt-1">Remembered from a previous remittance.</p>
-                )}
-                {remittanceEmail && emailValid && contactSource === 'supplier_org' && (
-                  <p className="text-xs text-gray-400 mt-1">From the supplier's record.</p>
-                )}
-
-                {/* Person picker — search OP for the payee (freelancers are always here). */}
-                <div className="relative mt-2">
-                  <input type="text" value={pickerQuery}
-                    onChange={(e) => { setPickerQuery(e.target.value); setPickerOpen(true); }}
-                    onFocus={() => setPickerOpen(true)}
-                    placeholder="🔍 Search OP for the payee (name or email)"
-                    className="w-full border border-gray-200 rounded-md px-3 py-1.5 text-sm focus:ring-2 focus:ring-purple-500" />
-                  {pickerOpen && pickerResults.length > 0 && (
-                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-md shadow-lg max-h-48 overflow-auto">
-                      {pickerResults.map((p) => {
-                        const name = `${p.first_name} ${p.last_name}`.trim();
-                        return (
-                          <button key={p.id} type="button" disabled={!p.email}
-                            onClick={() => {
-                              if (!p.email) return;
-                              setRemittanceEmail(p.email);
-                              setContactSource('person_match');
-                              setPickerQuery('');
-                              setPickerResults([]);
-                              setPickerOpen(false);
-                            }}
-                            className="w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50 disabled:opacity-50 disabled:cursor-not-allowed">
-                            <span className="text-gray-800">{name}</span>
-                            <span className="block text-xs text-gray-400">{p.email || 'no email on file'}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
+                <RemittanceEmailField email={remit.email} source={remit.source} loaded={remit.loaded} onChange={remit.set} />
               </div>
             )}
           </div>
@@ -1476,10 +1722,9 @@ function PayModal({ cost, busy, onClose, onSubmit, onSettleExternal }: {
   );
 }
 
-function PayableActions({ cost, isManager, isAdmin, busy, onAction, onPay, onQuery }: {
+function PayableActions({ cost, isManager, busy, onAction, onPay, onQuery }: {
   cost: Cost;
   isManager: boolean;
-  isAdmin: boolean;
   busy: string | null;
   onAction: (id: string, a: 'verify' | 'approve') => void;
   onPay: () => void;
@@ -1511,7 +1756,7 @@ function PayableActions({ cost, isManager, isAdmin, busy, onAction, onPay, onQue
   if (s === 'verified' && isManager) {
     return <ActionBtn busy={busy === cost.id + 'approve'} onClick={() => onAction(cost.id, 'approve')} label="Approve" />;
   }
-  if (s === 'approved' && isAdmin) {
+  if (s === 'approved' && isManager) {
     return <ActionBtn busy={busy === cost.id + 'pay'} onClick={onPay} label="Mark paid" />;
   }
   return <span className="text-xs text-gray-400">{s ? `awaiting ${s === 'verified' ? 'approval' : 'payment'}` : '—'}</span>;
