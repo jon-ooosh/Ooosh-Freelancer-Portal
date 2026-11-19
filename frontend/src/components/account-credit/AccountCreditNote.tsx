@@ -5,6 +5,9 @@ import { useAuthStore } from '../../hooks/useAuthStore';
 import { hasManagerRole } from '../../lib/roles';
 import { type AccountCredit, acMoney, acDay, acError, fromJob } from '../../lib/accountCredit';
 
+const PUT_ASIDE = 'Put aside for this job. The Money tab and the client\'s payment link both ask for that much less. '
+  + 'It moves onto this job\'s invoice when the job is invoiced; until then HireHop shows the full balance.';
+
 /**
  * Money this client has on account — the Client History sidebar, above Vouchers
  * (docs/CREDIT-ON-ACCOUNT-SPEC.md). Fetches its own data so the pages that show it only
@@ -67,8 +70,8 @@ export default function AccountCreditNote({ clientOrgId, jobId }: {
 
             {c.status === 'reserved' ? (
               <div className="mt-1.5 p-2 bg-amber-50 border border-amber-200 rounded text-amber-900">
-                Put aside for this job. The Money tab and the client's payment link both ask for that much less.
-                It moves onto this job's invoice when the job is invoiced; until then HireHop shows the full balance.
+                {/* Two lines, the rest on hover — like the note above (jon, 19 Nov 2026) */}
+                <div className="line-clamp-2 cursor-help" title={PUT_ASIDE}>{PUT_ASIDE}</div>
                 {isManager && (
                   <div className="mt-1.5">
                     <button type="button" disabled={busy === c.id} className={btn}
