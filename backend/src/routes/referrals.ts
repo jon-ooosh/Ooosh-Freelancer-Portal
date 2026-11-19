@@ -4,15 +4,15 @@
  *   GET    /job/:jobId               staff   — the job's referral, if any
  *   POST   /                         staff   — "Referred by" { jobId, referrerPersonId, how: named | card }
  *   DELETE /:id                      staff   — linked by mistake (only before a thank-you / credit)
- *   POST   /:id/welcome-credit       manager — the friend's welcome voucher { sendEmail } (a goodwill credit with a code)
+ *   POST   /:id/welcome-credit       manager — the friend's welcome voucher { sendEmail } — normally automatic when a
+ *                                     referral is linked; this is for one linked before the offer had an amount
  *   POST   /:id/welcome-email        manager — email the friend their voucher code (if it didn't go first time)
  *   GET    /person/:personId         staff   — their personal link + counts
  *   POST   /person/:personId/link    staff   — make their personal link
- *   GET    /overview                 admin   — the offer, the email switch, totals, the list
+ *   GET    /overview                 manager — the offer, the email switch, totals, the list
  *   PUT    /offer                    admin   — a new offer (the old one stays on its referrals)
  *   PUT    /settings                 admin   — { emailsEnabled }
  *   POST   /test                     admin   — emails 2, 2b, 3 and the friend's welcome to yourself
- *   POST   /:id/thanked              manager — the thank-you was given { detail, sendEmail, voucherIncVat? }
  *   POST   /:id/decline              manager — { reason }
  */
 import { Router, Response } from 'express';
@@ -21,7 +21,7 @@ import { authenticate, authorize, AuthRequest, MANAGER_ROLES, STAFF_ROLES } from
 import { validate } from '../middleware/validate';
 import {
   ReferralError, createReferral, currentOffer, declineReferral, getJobReferral, getOrCreateReferralLink,
-  giveWelcomeCredit, sendWelcomeVoucher, listReferrals, markThanked, personReferralSummary, referralEmailsEnabled, referralTotals,
+  giveWelcomeCredit, sendWelcomeVoucher, listReferrals, personReferralSummary, referralEmailsEnabled, referralTotals,
   removeReferral, sendReferralTestEmails, setOffer, setReferralEmailsEnabled,
 } from '../services/referrals';
 import { personIdForUser } from '../services/staff-tasks';
@@ -101,19 +101,7 @@ router.post('/person/:personId/link', authorize(...STAFF_ROLES), validate(person
   } catch (err) { fail(res, 'make link', err); }
 });
 
-// ── Thank-you / decline (managers) ───────────────────────────────────────────
-
-router.post('/:id/thanked', authorize(...MANAGER_ROLES), validate(id, 'params'), validate(z.object({
-  detail: z.string().max(300),
-  sendEmail: z.boolean(),
-  /** Make the referrer a voucher for this much (inc VAT); its code goes in the email. */
-  voucherIncVat: z.number().positive().max(10000).nullable().optional(),
-})), async (req: AuthRequest, res: Response) => {
-  try {
-    await markThanked(String(req.params.id), req.body, req.user!.id);
-    res.json({ data: { ok: true } });
-  } catch (err) { fail(res, 'thanked', err); }
-});
+// ── Decline (managers; the thank-you is automatic) ───────────────────────────────────────────
 
 router.post('/:id/decline', authorize(...MANAGER_ROLES), validate(id, 'params'),
   validate(z.object({ reason: z.string().trim().min(1).max(300) })), async (req: AuthRequest, res: Response) => {
@@ -125,7 +113,8 @@ router.post('/:id/decline', authorize(...MANAGER_ROLES), validate(id, 'params'),
 
 // ── Admin: Marketing › Referrals ─────────────────────────────────────────────
 
-router.get('/overview', authorize('admin'), async (_req: AuthRequest, res: Response) => {
+// Managers see it (jon, 18 Nov 2026); the offer, the email switch and the test stay admin.
+router.get('/overview', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
   try {
     const [offer, emailsEnabled, totals, referrals] = await Promise.all([currentOffer(), referralEmailsEnabled(), referralTotals(), listReferrals()]);
     res.json({ data: { offer, emailsEnabled, totals, referrals } });

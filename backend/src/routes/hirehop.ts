@@ -5,6 +5,9 @@ import { previewHireHopSync, syncContactsFromHireHop } from '../services/hirehop
 import { previewHireHopJobSync, syncJobsFromHireHop } from '../services/hirehop-job-sync';
 import { query } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
+import {
+  STRIP_MAPPING, STRIP_DONE_STATUSES, STRIP_WIP_STATUSES, ProgressStripCategory,
+} from '../services/job-progress-strip';
 
 const router = Router();
 router.use(authenticate);
@@ -115,7 +118,7 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
     const {
       status, search, ooh_only, manager, service_type,
       date_from, date_to, date_field,
-      has_issues, has_retro, overdue,
+      has_issues, has_retro, overdue, closeout,
       sort,
       page = '1', limit = '50',
     } = req.query;
@@ -200,9 +203,31 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
           SELECT 1 FROM job_requirements jr
           WHERE jr.job_id = jobs.id
             AND jr.status = 'blocked'
-            AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended: Van & Driver]%')
+            -- ANY suspension marker, not just Van & Driver (Nov 2026): Internal
+            -- and No-vehicle suspensions also sit at 'blocked' and made every
+            -- internal job read as "has issues".
+            AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended:%')
         )
       )`;
+    }
+
+    // Pre-OP cut-off — the Returns page hides jobs from before OP went live
+    // (they were never closed out in OP and are clutter). Keeps a job whose
+    // dates are all missing rather than guess. Date checked so it can't be
+    // anything but a plain YYYY-MM-DD.
+    const { exclude_before, internal } = req.query;
+    if (typeof exclude_before === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(exclude_before)) {
+      params.push(exclude_before);
+      whereClause += ` AND (COALESCE(return_date, job_end, job_date) IS NULL
+        OR COALESCE(return_date, job_end, job_date)::date >= $${params.length})`;
+    }
+
+    // Internal jobs (Ooosh's own use) — 'exclude' hides them, 'only' shows
+    // just them; anything else leaves them in.
+    if (internal === 'exclude') {
+      whereClause += ` AND COALESCE(jobs.is_internal, false) = false`;
+    } else if (internal === 'only') {
+      whereClause += ` AND COALESCE(jobs.is_internal, false) = true`;
     }
 
     // Overdue filter — return_date in the past AND not completed. Server-side
@@ -242,6 +267,61 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
       )`;
     }
 
+    // "Waiting on" filter — the Returns page (Nov 2026). Built from the same
+    // post-hire mapping and status sets as the progress strip
+    // (services/job-progress-strip.ts), so a job the filter finds always shows
+    // that pip as not done, and vice versa. Values: a strip slot ('payment',
+    // 'excess', …), 'invoice_raise' (Invoice card still to do — no invoice yet),
+    // 'invoice_send' (invoice raised, not sent), or 'ready' (has close-out cards
+    // and none left open). Cancelled and suspended cards never count.
+    if (closeout && typeof closeout === 'string') {
+      const liveCard = `jr.job_id = jobs.id AND jr.phase = 'post_hire'
+            AND jr.status <> 'cancelled'
+            AND COALESCE(jr.notes, '') NOT LIKE '%[Suspended:%'`;
+      if (closeout === 'invoice_raise' || closeout === 'invoice_send') {
+        params.push(STRIP_DONE_STATUSES);
+        const doneIdx = params.length;
+        params.push(STRIP_WIP_STATUSES);
+        const wipIdx = params.length;
+        const wipTest = closeout === 'invoice_send'
+          ? `COALESCE(jr.status, '') = ANY($${wipIdx})`
+          : `COALESCE(jr.status, '') <> ALL($${wipIdx})`;
+        whereClause += ` AND EXISTS (
+          SELECT 1 FROM job_requirements jr
+          WHERE ${liveCard}
+            AND jr.requirement_type = 'invoice'
+            AND COALESCE(jr.status, '') <> ALL($${doneIdx})
+            AND ${wipTest}
+        )`;
+      } else if (closeout === 'ready') {
+        params.push(Object.values(STRIP_MAPPING.post_hire).flat());
+        const typesIdx = params.length;
+        params.push(STRIP_DONE_STATUSES);
+        const doneIdx = params.length;
+        whereClause += ` AND EXISTS (
+          SELECT 1 FROM job_requirements jr
+          WHERE ${liveCard} AND jr.requirement_type = ANY($${typesIdx})
+        ) AND NOT EXISTS (
+          SELECT 1 FROM job_requirements jr
+          WHERE ${liveCard} AND jr.requirement_type = ANY($${typesIdx})
+            AND COALESCE(jr.status, '') <> ALL($${doneIdx})
+        )`;
+      } else if (Object.prototype.hasOwnProperty.call(STRIP_MAPPING.post_hire, closeout)) {
+        const types = STRIP_MAPPING.post_hire[closeout as ProgressStripCategory];
+        if (types.length > 0) {
+          params.push(types);
+          const typesIdx = params.length;
+          params.push(STRIP_DONE_STATUSES);
+          const doneIdx = params.length;
+          whereClause += ` AND EXISTS (
+            SELECT 1 FROM job_requirements jr
+            WHERE ${liveCard} AND jr.requirement_type = ANY($${typesIdx})
+              AND COALESCE(jr.status, '') <> ALL($${doneIdx})
+          )`;
+        }
+      }
+    }
+
     // Service type filter — comma-separated requirement_type values
     // (vehicle, backline, rehearsal). Matches if the job has ANY listed
     // type as a non-cancelled pre-hire requirement.
@@ -275,7 +355,30 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
       // jobs naturally fall in line with the rest. NULL last.
       overdue:        'return_date ASC NULLS LAST',
     };
-    const orderBy = allowedSorts[(sort as string) || 'job_date_desc'] || 'job_date DESC NULLS LAST';
+    // Column sorts for the Returns page's clickable headers (Nov 2026). Every
+    // column qualified with its table — the list query joins job_financials and
+    // organisations. Client sorts by the name the row SHOWS (★ lead org, else
+    // the client org, else HireHop's strings — lib/jobOrgName.ts).
+    const clientNameSql = `lower(COALESCE(
+      NULLIF(trim((SELECT lo.name FROM job_organisations jo
+                     JOIN organisations lo ON lo.id = jo.organisation_id
+                    WHERE jo.job_id = jobs.id AND jo.is_primary = true LIMIT 1)), ''),
+      NULLIF(trim(o.name), ''), NULLIF(trim(jobs.company_name), ''), NULLIF(trim(jobs.client_name), '')))`;
+    const columnSorts: Record<string, string> = {
+      job:     'jobs.hh_job_number',
+      name:    'lower(jobs.job_name)',
+      client:  clientNameSql,
+      status:  'jobs.status %DIR% NULLS LAST, jobs.pipeline_status',
+      value:   'COALESCE(jf.hire_value_inc_vat, jobs.job_value)',
+      manager: 'lower(jobs.manager1_name)',
+    };
+    for (const [key, expr] of Object.entries(columnSorts)) {
+      for (const dir of ['asc', 'desc'] as const) {
+        allowedSorts[`${key}_${dir}`] = `${expr.split('%DIR%').join(dir.toUpperCase())} ${dir.toUpperCase()} NULLS LAST`;
+      }
+    }
+    // jobs.id last so rows with equal values keep a fixed order between pages.
+    const orderBy = (allowedSorts[(sort as string) || 'job_date_desc'] || 'job_date DESC NULLS LAST') + ', jobs.id';
 
     params.push(parseInt(limit as string));
     params.push(offset);

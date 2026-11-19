@@ -28,6 +28,7 @@ const STRIP_CAT_LABELS: Record<ProgressStripCategory, string> = {
   payment: 'Payment',
   vehicle: 'Vehicle',
   merch: 'Merch',
+  recharges: 'Recharges', // post-hire only — never on a pre-hire briefing
 };
 
 const STRIP_CAT_ORDER: ProgressStripCategory[] = [
@@ -272,6 +273,11 @@ function renderMoneyAndPeople(b: JobBriefing): string {
     if (m.hh_billing_loaded) {
       if (m.balance_outstanding > 0) {
         moneyLines.push(`<strong>Hire fee:</strong> £${m.balance_outstanding.toFixed(2)} due (£${m.deposits_paid.toFixed(2)} paid of £${m.hire_value.toFixed(2)})`);
+        // The client's own money held from an earlier job, put aside for this one — not in
+        // HireHop's balance until invoicing, so staff need the figure to actually ask for.
+        if (m.on_account_label) {
+          moneyLines.push(`<strong>On account:</strong> ${m.on_account_label} comes off at invoicing — <strong>ask the client for £${m.to_pay.toFixed(2)}</strong>. HireHop and the payment link still show the full £${m.balance_outstanding.toFixed(2)}.`);
+        }
       } else {
         moneyLines.push(`<strong>Hire fee:</strong> £${m.hire_value.toFixed(2)} paid in full ✓`);
       }
@@ -526,16 +532,24 @@ function buildClientDraft(b: JobBriefing): string {
   if (b.money.hh_billing_loaded) {
     const m = b.money;
     const hireFeeApplies = m.hire_value > 0;
-    const hireFeeOutstanding = hireFeeApplies && m.balance_outstanding > 0;
+    // What is left to ASK for: money on account put aside for this job comes off first.
+    const held = m.on_account > 0.004 ? m.on_account : 0;
+    const hireFeeOutstanding = hireFeeApplies && m.to_pay > 0.004;
     const excessOutstanding = m.excess_outstanding > 0;
 
     // Build the hire fee clause (or null if no hire fee on the job).
     let hireFeeClause: string | null = null;
     if (hireFeeApplies) {
       if (hireFeeOutstanding) {
-        hireFeeClause = m.deposits_paid > 0
+        hireFeeClause = held
+          ? (m.deposits_paid > 0
+            ? `You've paid £${m.deposits_paid.toFixed(2)} so far and we're holding £${held.toFixed(2)} from your last hire towards this one, leaving a balance of £${m.to_pay.toFixed(2)} due before the hire`
+            : `We're holding £${held.toFixed(2)} from your last hire towards the hire fee of £${m.hire_value.toFixed(2)}, leaving £${m.to_pay.toFixed(2)} to be paid before the hire`)
+          : m.deposits_paid > 0
           ? `You've paid £${m.deposits_paid.toFixed(2)} so far, leaving a balance of £${m.balance_outstanding.toFixed(2)} due before the hire`
           : `Hire fee of £${m.hire_value.toFixed(2)} is still to be paid before the hire`;
+      } else if (held) {
+        hireFeeClause = `Hire fee of £${m.hire_value.toFixed(2)} is covered by what you've paid and the £${held.toFixed(2)} we're holding from your last hire, thanks`;
       } else {
         hireFeeClause = `Hire fee of £${m.hire_value.toFixed(2)} is paid in full, thanks`;
       }

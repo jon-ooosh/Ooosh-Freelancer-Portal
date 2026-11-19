@@ -3,12 +3,14 @@ import { api } from '../../services/api';
 import DatePicker from '../DatePicker';
 import { ukToday, ukDatePlus } from '../../lib/ukDate';
 import {
-  type GoodwillCredit, type GoodwillOwner, plusVat, grossAt20, emailPoints, copyText,
+  type GoodwillCredit, type GoodwillOwner, creditHeadline, creditCode, voucherMoney, emailPoints, copyText,
 } from '../../lib/goodwillCopy';
+import VoucherAmount, { useVoucherAmount } from './VoucherAmount';
 
 /**
- * "Offer goodwill credit" — one modal behind every door (close-out panel, a
- * Problem's Money card, an org or person page). docs/GOODWILL-CREDIT-SPEC.md §4.2.
+ * "Give a voucher" (once "Offer goodwill credit") — one modal behind every door
+ * (close-out panel, a Problem's Money card, an org or person page). docs/GOODWILL-CREDIT-SPEC.md
+ * §4.2, §17: it makes a voucher with its own code, held by the band / client / a person.
  * Managers only (the routes enforce it). OP sends nothing to the client: once it's
  * saved, the modal shows the points to put in your own email.
  *
@@ -27,7 +29,7 @@ export default function OfferGoodwillModal({ jobId, owner, sourceKind, sourceJob
   const [choices, setChoices] = useState<GoodwillOwner[]>(owner ? [owner] : []);
   const [ownerKey, setOwnerKey] = useState(owner ? `${owner.kind}:${owner.id}` : '');
   const [loadingChoices, setLoadingChoices] = useState(!owner && !!jobId);
-  const [amount, setAmount] = useState('');
+  const { amounts, setAmounts, value } = useVoucherAmount();
   const [reason, setReason] = useState('');
   const [expiresOn, setExpiresOn] = useState(ukDatePlus(365));
   const [saving, setSaving] = useState(false);
@@ -46,13 +48,11 @@ export default function OfferGoodwillModal({ jobId, owner, sourceKind, sourceJob
       .finally(() => setLoadingChoices(false));
   }, [jobId, owner]);
 
-  const net = Number(amount);
-  const amountOk = amount.trim() !== '' && Number.isFinite(net) && net > 0 && net <= 100000;
   const chosen = choices.find((c) => `${c.kind}:${c.id}` === ownerKey) || null;
 
   async function save() {
     if (!chosen) { setError('Pick who it is for'); return; }
-    if (!amountOk) { setError('Enter the amount, ex VAT'); return; }
+    if (!value) { setError('Say how much it is worth'); return; }
     if (!reason.trim()) { setError('Say why — staff only'); return; }
     setSaving(true);
     setError('');
@@ -60,7 +60,8 @@ export default function OfferGoodwillModal({ jobId, owner, sourceKind, sourceJob
       const r = await api.post<{ data: GoodwillCredit }>('/goodwill', {
         organisation_id: chosen.kind === 'organisation' ? chosen.id : null,
         person_id: chosen.kind === 'person' ? chosen.id : null,
-        amount_ex_vat: Math.round(net * 100) / 100,
+        amount_ex_vat: value.amount_ex_vat,
+        value_inc_vat: value.value_inc_vat,
         reason: reason.trim(),
         source_kind: sourceKind,
         source_job_id: sourceJobId || null,
@@ -80,18 +81,18 @@ export default function OfferGoodwillModal({ jobId, owner, sourceKind, sourceJob
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => { if (!saving) onClose(); }}>
       <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="px-5 pt-5 pb-3 border-b border-gray-100">
-          <h3 className="text-lg font-semibold text-gray-900">{saved ? `Goodwill credit ${saved.ref} offered` : 'Offer goodwill credit'}</h3>
+          <h3 className="text-lg font-semibold text-gray-900">{saved ? `Voucher ${creditCode(saved)} made` : 'Give a voucher'}</h3>
           <p className="text-sm text-gray-500 mt-0.5">
             {saved
               ? 'Nothing has been sent to the client — put these points in your own email.'
-              : 'Money off a future hire, or off money they already owe. Nothing is refunded and nothing changes in HireHop or Xero today.'}
+              : 'Money off a future hire, the shop, or money they already owe, with its own code. Nothing is refunded and nothing changes in HireHop or Xero today.'}
           </p>
         </div>
 
         {saved ? (
           <div className="px-5 py-4 space-y-3">
             <div className="text-sm text-gray-700">
-              <b>{plusVat(saved.amount_ex_vat)}</b> for <b>{saved.owner_name}</b>. It shows on their next enquiry.
+              <b>{creditHeadline(saved)}</b> for <b>{saved.owner_name}</b>. It shows on their next enquiry.
             </div>
             <div className="border border-gray-200 rounded-lg p-3">
               <div className="flex items-center justify-between mb-2">
@@ -112,7 +113,7 @@ export default function OfferGoodwillModal({ jobId, owner, sourceKind, sourceJob
               {loadingChoices ? (
                 <div className="text-sm text-gray-400">Loading…</div>
               ) : choices.length === 0 ? (
-                <div className="text-sm text-amber-700">This job has no band, client or contacts to hold a credit. Add one to the job, or offer it from the band's or person's page.</div>
+                <div className="text-sm text-amber-700">This job has no band, client or contacts to hold a voucher. Add one to the job, or give it from Money › Vouchers.</div>
               ) : (
                 <select id="gw-for" value={ownerKey} onChange={(e) => setOwnerKey(e.target.value)} disabled={!!owner}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm disabled:bg-gray-50">
@@ -125,15 +126,8 @@ export default function OfferGoodwillModal({ jobId, owner, sourceKind, sourceJob
             </div>
 
             <div>
-              <label htmlFor="gw-amount" className="block text-xs font-semibold text-gray-700 mb-1">Amount (ex VAT)</label>
-              <div className="flex items-center gap-3">
-                <div className="flex items-center border border-gray-300 rounded-lg px-3 w-36">
-                  <span className="text-sm text-gray-500">£</span>
-                  <input id="gw-amount" type="number" inputMode="decimal" min="0.01" step="0.01" value={amount}
-                    onChange={(e) => setAmount(e.target.value)} className="w-full py-2 pl-1 text-sm outline-none" />
-                </div>
-                {amountOk && <span className="text-sm text-gray-700">+ VAT = <b>{grossAt20(net)}</b> total</span>}
-              </div>
+              <span className="block text-xs font-semibold text-gray-700 mb-1">Worth</span>
+              <VoucherAmount amounts={amounts} onChange={setAmounts} />
             </div>
 
             <div>
@@ -154,7 +148,7 @@ export default function OfferGoodwillModal({ jobId, owner, sourceKind, sourceJob
               <button type="button" onClick={onClose} disabled={saving} className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Cancel</button>
               <button type="button" onClick={save} disabled={saving || loadingChoices || choices.length === 0}
                 className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50">
-                {saving ? 'Saving…' : amountOk ? `Offer ${grossAt20(net)} credit` : 'Offer credit'}
+                {saving ? 'Saving…' : value ? `Give the ${voucherMoney(value.value_inc_vat)} voucher` : 'Give the voucher'}
               </button>
             </div>
           </div>

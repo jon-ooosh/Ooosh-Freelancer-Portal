@@ -6,18 +6,22 @@
  *     (go.oooshtours.co.uk/r/<code> → the website with ol=ref-<code> → the enquiry form);
  *   - by staff, from "Referred by" on the job (a name they mentioned, or a postcard).
  * Only a genuinely NEW client counts, never the referrer's own band, and only once per
- * new client (no stacking). When the friend's hire is Completed a To Do asks the admins to
- * send the thank-you — nothing is ever sent or given automatically. Both rewards are
- * VOUCHERS (a goodwill credit with a code, GOODWILL-CREDIT-SPEC §16, source 'referral'):
- * the friend's is held for their hire, the referrer's thank-you is theirs to use on a hire
- * or in the shop. One system for "money off", not two. Amounts are inc VAT.
+ * new client (no stacking). Both rewards are VOUCHERS (GOODWILL-CREDIT-SPEC §16–17, source
+ * 'referral'), amounts inc VAT, and since 18 Nov 2026 both are AUTOMATIC (jon):
+ *   - the friend's welcome voucher is made the moment a referral is linked, held for their
+ *     enquiry, and the welcome email sent;
+ *   - the referrer's voucher is made when the friend's hire is Completed (straight away on
+ *     OP's Completed, else at the 10:20 run), and Jon's thank-you email sent with its code.
+ * The emails go only while Marketing › Referrals has the referral emails on; the vouchers
+ * are made either way. Taking a referral off, or declining it, withdraws an unused welcome
+ * voucher.
  */
 import { query } from '../config/database';
 import { emailService } from './email-service';
 import { returningClientSql } from './returning-client';
-import { offerGoodwill, ownerChoicesForJob, reserveGoodwill, getGoodwillCredit, day, GoodwillError } from './goodwill-credits';
+import { offerGoodwill, ownerChoicesForJob, reserveGoodwill, getGoodwillCredit, withdrawGoodwill, day, GoodwillError } from './goodwill-credits';
 import { resolveClientEmailTarget } from './money-emails';
-import { createTask, listTasksForSource, updateTask } from './staff-tasks';
+import { listTasksForSource, updateTask } from './staff-tasks';
 import { ukDatePlus, ukToday } from './uk-date';
 import { FALLBACK_URL, deviceOf } from './marketing-links';
 // Jon's emails share one sender and one reply-to address (the review email defines them).
@@ -169,7 +173,33 @@ export async function createReferral(input: CreateReferralInput, userId: string 
   await note(input.jobId, null, `🤝 Referred by ${who} (${how}).`, userId);
   await note(null, input.referrerPersonId, `🤝 Recommended us — job ${await jobLabel(input.jobId)}.`, userId);
   await sendEnquiryThanks(id).catch((err) => console.error('[referrals] thank-you email failed (non-fatal):', err));
+  // The friend's welcome voucher, straight away (jon, 18 Nov 2026). Never fails the referral.
+  await autoWelcomeVoucher(id, userId);
   return id;
+}
+
+/** Make the friend's welcome voucher if the offer has one; email it while the emails are on. Never throws. */
+async function autoWelcomeVoucher(referralId: string, userId: string | null): Promise<void> {
+  try {
+    const r = await query(
+      `SELECT o.friend_voucher_inc_vat::float AS amount FROM referrals rf
+         LEFT JOIN referral_offers o ON o.id = rf.offer_id WHERE rf.id = $1`,
+      [referralId],
+    );
+    if (!r.rows[0]?.amount) return;
+    await giveWelcomeCredit(referralId, { sendEmail: await referralEmailsEnabled() }, userId || SYSTEM_USER_ID);
+  } catch (err) {
+    console.error(`[referrals] welcome voucher for ${referralId} not made (non-fatal):`, err);
+  }
+}
+
+/** Withdraw a referral's welcome voucher unless it has been used. Throws a ReferralError when it has. */
+async function withdrawWelcomeVoucher(welcomeCreditId: string | null, why: string, userId: string): Promise<void> {
+  if (!welcomeCreditId) return;
+  const g = await getGoodwillCredit(welcomeCreditId);
+  if (!g || g.status === 'withdrawn' || g.status === 'expired') return;
+  if (g.status === 'used') throw new ReferralError('Their welcome voucher has already been used, so this referral stays');
+  await withdrawGoodwill(welcomeCreditId, why, userId);
 }
 
 /**
@@ -208,14 +238,15 @@ export async function referralFromMarketingSource(jobId: string): Promise<void> 
   }
 }
 
-/** Take a referral off a job (linked by mistake). Only before the thank-you or a welcome credit. */
+/** Take a referral off a job (linked by mistake). Only before the thank-you; an unused welcome voucher is withdrawn. */
 export async function removeReferral(id: string, userId: string): Promise<void> {
   const r = await query(`SELECT job_id, status, welcome_credit_id FROM referrals WHERE id = $1`, [id]);
   const row = r.rows[0];
   if (!row) throw new ReferralError('Referral not found', 404);
-  if (row.status !== 'open' || row.welcome_credit_id) {
-    throw new ReferralError('A referral with a thank-you due or given, or a welcome credit, can only be declined (Marketing › Referrals)');
+  if (row.status !== 'open') {
+    throw new ReferralError('The thank-you is due or given, so this referral can only be declined (Marketing › Referrals)');
   }
+  await withdrawWelcomeVoucher(row.welcome_credit_id, 'The referral was taken off (linked by mistake)', userId);
   await query(`DELETE FROM referrals WHERE id = $1`, [id]);
   await note(row.job_id, null, '🤝 Referral removed.', userId);
 }
@@ -345,7 +376,10 @@ async function sendRewardThanks(referrerPersonId: string, detail: string, vouche
 export async function sendReferralTestEmails(toEmail: string, personId: string | null): Promise<{ ok: boolean; error?: string }> {
   const offer = await currentOffer();
   const name = personId ? (await referrer(personId)).name : '';
-  const sample = makeReferralCode(name || 'sam');
+  // The tester's OWN link when they have a person record, so the link in the test really
+  // goes to the enquiry form (a made-up code goes to the home page). Else a sample.
+  const own = personId ? await getOrCreateReferralLink(personId, null).catch(() => null) : null;
+  const sample = own?.code || makeReferralCode(name || 'sam');
   const e2 = await emailService.send('referral_enquiry_thanks', {
     to: toEmail, replyTo: REPLY_TO, fromName: FROM_NAME, subjectOverride: '[Test] Thank you for sending someone our way',
     variables: { ...greeting(name), rewardLine: enquiryThanksRewardLine(offer) },
@@ -378,36 +412,96 @@ export async function sendReferralTestEmails(toEmail: string, personId: string |
 
 // ── Thank-you due, given, declined ───────────────────────────────────────────
 
-/** Daily: referrals whose friend's hire is now Completed → "thank-you due" + a To Do for each admin. Never throws per referral. */
+/**
+ * The referrer's thank-you (jon, 18 Nov 2026 — automatic): once the friend's hire is
+ * Completed, make the referrer's voucher (if the offer has one), and — while the referral
+ * emails are on — send Jon's thank-you (email 3) with its code. Claimed first (status →
+ * rewarded), so it happens once however many paths ask; if the voucher can't be made the
+ * claim is undone and the 10:20 run tries again. Returns true when it thanked them.
+ */
+export async function rewardReferral(id: string): Promise<boolean> {
+  const claim = await query(
+    `UPDATE referrals rf
+        SET status = 'rewarded', rewarded_at = NOW(), reward_due_at = COALESCE(rf.reward_due_at, NOW()), updated_at = NOW()
+       FROM jobs j
+      WHERE rf.id = $1 AND j.id = rf.job_id AND j.pipeline_status = 'completed' AND j.is_deleted = false
+        AND rf.status IN ('open', 'reward_due')
+      RETURNING rf.referrer_person_id, rf.job_id, rf.offer_id, rf.reward_credit_id, j.hh_job_number,
+                COALESCE(j.job_name, j.client_name) AS job_name`,
+    [id],
+  );
+  const row = claim.rows[0];
+  if (!row) return false;
+  const o = await query(
+    `SELECT referrer_reward, referrer_voucher_inc_vat::float AS voucher FROM referral_offers
+      WHERE id = COALESCE($1::uuid, (SELECT id FROM referral_offers ORDER BY created_at DESC LIMIT 1))`,
+    [row.offer_id],
+  );
+  const offer = o.rows[0] || {};
+  let voucher: VoucherEmailBits | null = null;
+  let voucherCode: string | null = null;
+  try {
+    let creditId: string | null = row.reward_credit_id;
+    if (!creditId && offer.voucher > 0) {
+      const g = await offerGoodwill({
+        person_id: row.referrer_person_id,
+        amount_ex_vat: 0,
+        voucher_value_inc_vat: offer.voucher,
+        reason: `Referral thank-you — they recommended ${row.job_name || 'a client'}${row.hh_job_number ? ` (J-${row.hh_job_number})` : ''}`,
+        source_kind: 'referral',
+        source_job_id: row.job_id,
+      }, SYSTEM_USER_ID);
+      creditId = g.id;
+      await query(`UPDATE referrals SET reward_credit_id = $2 WHERE id = $1`, [id, creditId]);
+    }
+    if (creditId) {
+      const g = await getGoodwillCredit(creditId);
+      if (g) { voucher = voucherEmailBits(g); voucherCode = g.voucher_code; }
+    }
+  } catch (err) {
+    console.error(`[referrals] referrer voucher for ${id} not made — will try again:`, err);
+    await query(`UPDATE referrals SET status = 'reward_due', rewarded_at = NULL WHERE id = $1`, [id]).catch(() => {});
+    return false;
+  }
+  const detail = (offer.referrer_reward as string | null)?.trim()
+    || (voucher ? `a ${voucher.voucherValue} voucher for a hire or our shop` : 'our thanks');
+  await query(`UPDATE referrals SET reward_detail = $2 WHERE id = $1`, [id, detail.slice(0, 300)]);
+  await closeReferralTasks(id);
+  const who = await personName(row.referrer_person_id);
+  let emailed = 'not emailed: the referral emails are off (use Email points on the voucher)';
+  if (await referralEmailsEnabled()) {
+    try {
+      const sent = await sendRewardThanks(row.referrer_person_id, detail, voucher);
+      emailed = sent.ok ? 'emailed' : `the email didn't send: ${sent.error || 'unknown error'} (use Email points on the voucher)`;
+    } catch (err) {
+      emailed = `the email didn't send: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+  await note(row.job_id, row.referrer_person_id,
+    `🤝 Thank-you to ${who}${voucherCode ? `: voucher ${voucherCode}` : ''} (${emailed}).`, null);
+  return true;
+}
+
+/** OP's Completed status: thank the referrer now. Never throws. */
+export async function rewardReferralForJob(jobId: string): Promise<void> {
+  try {
+    const r = await query(`SELECT id FROM referrals WHERE job_id = $1 AND status IN ('open', 'reward_due')`, [jobId]);
+    if (r.rows[0]) await rewardReferral(r.rows[0].id);
+  } catch (err) {
+    console.error(`[referrals] thank-you for job ${jobId} failed (the 10:20 run tries again):`, err);
+  }
+}
+
+/** Daily 10:20: every referral whose friend's hire is Completed and not yet thanked (a HireHop completion, or a missed one). Never throws per referral. */
 export async function runReferralRewardsDue(): Promise<number> {
   const due = await query(
-    `SELECT rf.id, rf.referrer_person_id, j.id AS job_id, j.hh_job_number, COALESCE(j.job_name, j.client_name) AS job_name
-       FROM referrals rf JOIN jobs j ON j.id = rf.job_id
-      WHERE rf.status = 'open' AND j.pipeline_status = 'completed' AND j.is_deleted = false`,
-  );
-  if (!due.rows.length) return 0;
-  const admins = await query(
-    `SELECT u.person_id FROM users u
-      WHERE u.role = 'admin' AND COALESCE(u.is_active, true) = true AND COALESCE(u.login_disabled, false) = false AND u.person_id IS NOT NULL`,
+    `SELECT rf.id FROM referrals rf JOIN jobs j ON j.id = rf.job_id
+      WHERE rf.status IN ('open', 'reward_due') AND j.pipeline_status = 'completed' AND j.is_deleted = false`,
   );
   let n = 0;
   for (const row of due.rows) {
-    try {
-      const upd = await query(
-        `UPDATE referrals SET status = 'reward_due', reward_due_at = NOW(), updated_at = NOW() WHERE id = $1 AND status = 'open' RETURNING id`,
-        [row.id],
-      );
-      if (!upd.rows.length) continue;
-      const who = await personName(row.referrer_person_id);
-      const title = `Referral thank-you due: ${who} sent us ${row.job_name || 'a client'}${row.hh_job_number ? ` (J-${row.hh_job_number})` : ''}`;
-      for (const a of admins.rows) {
-        await createTask({ title, dueDate: ukToday(), personId: a.person_id, sourceType: 'referral', sourceId: row.id }, SYSTEM_USER_ID, 'admin')
-          .catch((err) => console.error('[referrals] To Do not made (non-fatal):', err));
-      }
-      await note(row.job_id, null, `🤝 The friend's hire is complete — a thank-you is due to ${who}.`, null);
-      n++;
-    } catch (err) {
-      console.error(`[referrals] reward due for ${row.id} failed (non-fatal):`, err);
+    try { if (await rewardReferral(row.id)) n++; } catch (err) {
+      console.error(`[referrals] thank-you for ${row.id} failed (non-fatal):`, err);
     }
   }
   return n;
@@ -420,64 +514,13 @@ async function closeReferralTasks(referralId: string): Promise<void> {
   }
 }
 
-/**
- * The thank-you was given. With `voucherIncVat`, a voucher for the referrer is made first
- * (once — pressing again after a failed email reuses it). With `sendEmail`, email 3 goes to
- * the referrer, carrying the voucher's code (a failed email stops it here).
- */
-export async function markThanked(id: string, input: { detail: string; sendEmail: boolean; voucherIncVat?: number | null }, userId: string): Promise<void> {
-  const r = await query(
-    `SELECT rf.referrer_person_id, rf.job_id, rf.status, rf.reward_credit_id, j.hh_job_number, COALESCE(j.job_name, j.client_name) AS job_name
-       FROM referrals rf JOIN jobs j ON j.id = rf.job_id WHERE rf.id = $1`,
-    [id],
-  );
-  const row = r.rows[0];
-  if (!row) throw new ReferralError('Referral not found', 404);
-  if (row.status === 'rewarded' || row.status === 'declined') throw new ReferralError(`This referral is already ${row.status === 'rewarded' ? 'thanked' : 'declined'}`);
-  let voucher: VoucherEmailBits | null = null;
-  let voucherRef: string | null = null;
-  if (row.reward_credit_id) {
-    const g = await getGoodwillCredit(row.reward_credit_id);
-    if (g) { voucher = voucherEmailBits(g); voucherRef = g.ref; }
-  } else if (input.voucherIncVat && input.voucherIncVat > 0) {
-    try {
-      const g = await offerGoodwill({
-        person_id: row.referrer_person_id,
-        amount_ex_vat: 0,
-        voucher_value_inc_vat: input.voucherIncVat,
-        reason: `Referral thank-you — they recommended ${row.job_name || 'a client'}${row.hh_job_number ? ` (J-${row.hh_job_number})` : ''}`,
-        source_kind: 'referral',
-        source_job_id: row.job_id,
-      }, userId);
-      await query(`UPDATE referrals SET reward_credit_id = $2, updated_at = NOW() WHERE id = $1`, [id, g.id]);
-      voucher = voucherEmailBits(g);
-      voucherRef = g.ref;
-    } catch (err) {
-      if (err instanceof GoodwillError) throw new ReferralError(err.message, err.status);
-      throw err;
-    }
-  }
-  const detail = input.detail.trim() || (voucher ? `a ${voucher.voucherValue} voucher for a hire or our shop` : '');
-  if (input.sendEmail) {
-    if (!detail) throw new ReferralError('Say what the thank-you is — it goes in the email');
-    const sent = await sendRewardThanks(row.referrer_person_id, detail, voucher);
-    if (!sent.ok) throw new ReferralError(`The email didn't send: ${sent.error || 'unknown error'}${voucherRef ? ` (the voucher ${voucherRef} is made — pressing again reuses it)` : ''}`, 502);
-  }
-  input = { ...input, detail };
-  await query(
-    `UPDATE referrals SET status = 'rewarded', rewarded_at = NOW(), rewarded_by = $2, reward_detail = $3, updated_at = NOW() WHERE id = $1`,
-    [id, userId, input.detail.trim() || null],
-  );
-  await closeReferralTasks(id);
-  const who = await personName(row.referrer_person_id);
-  await note(row.job_id, row.referrer_person_id, `🤝 Thank-you sent to ${who}${input.detail.trim() ? `: ${input.detail.trim()}` : ''}${input.sendEmail ? ' (emailed)' : ''}.`, userId);
-}
-
+/** Decline a referral (it doesn't count) — an unused welcome voucher is withdrawn with it. */
 export async function declineReferral(id: string, reason: string, userId: string): Promise<void> {
-  const r = await query(`SELECT job_id, status FROM referrals WHERE id = $1`, [id]);
+  const r = await query(`SELECT job_id, status, welcome_credit_id FROM referrals WHERE id = $1`, [id]);
   const row = r.rows[0];
   if (!row) throw new ReferralError('Referral not found', 404);
   if (row.status === 'rewarded') throw new ReferralError('The thank-you has already been given');
+  await withdrawWelcomeVoucher(row.welcome_credit_id, `Referral declined: ${reason.trim()}`, userId);
   await query(
     `UPDATE referrals SET status = 'declined', declined_reason = $2, updated_at = NOW() WHERE id = $1`,
     [id, reason.trim()],
@@ -607,6 +650,8 @@ export interface ReferralRow {
   declinedReason: string | null;
   welcomeCreditRef: string | null;
   welcomeCreditStatus: string | null;
+  /** The friend's welcome voucher code (the one to show — the ref is internal). */
+  welcomeVoucherCode: string | null;
   welcomeEmailSentAt: string | null;
   /** The referrer's thank-you voucher, once given. */
   rewardVoucherRef: string | null;
@@ -619,7 +664,7 @@ const LIST_SQL = `
          (COALESCE(TRIM(p.email), '') <> '') AS referrer_has_email,
          o.referrer_reward, o.friend_offer, o.friend_voucher_inc_vat::float AS friend_voucher,
          o.referrer_voucher_inc_vat::float AS referrer_voucher,
-         g.ref AS credit_ref, g.status AS credit_status, rg.ref AS reward_ref, rg.voucher_code AS reward_code
+         g.ref AS credit_ref, g.voucher_code AS credit_code, g.status AS credit_status, rg.ref AS reward_ref, rg.voucher_code AS reward_code
     FROM referrals rf
     JOIN jobs j ON j.id = rf.job_id
     JOIN people p ON p.id = rf.referrer_person_id
@@ -641,6 +686,7 @@ function toRow(x: Record<string, unknown>): ReferralRow {
     thanksEmailSentAt: x.thanks_email_sent_at ? new Date(x.thanks_email_sent_at as string).toISOString() : null,
     rewardDetail: (x.reward_detail as string) || null, declinedReason: (x.declined_reason as string) || null,
     welcomeCreditRef: (x.credit_ref as string) || null, welcomeCreditStatus: (x.credit_status as string) || null,
+    welcomeVoucherCode: (x.credit_code as string) || null,
     welcomeEmailSentAt: x.welcome_email_sent_at ? new Date(x.welcome_email_sent_at as string).toISOString() : null,
     rewardVoucherRef: (x.reward_ref as string) || null, rewardVoucherCode: (x.reward_code as string) || null,
   };

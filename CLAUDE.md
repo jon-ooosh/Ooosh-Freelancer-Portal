@@ -145,7 +145,7 @@ Phase 5 (linking a to-do to a person/org) was skipped; its shape is in `BACKLOG.
 **CLOSED, Oct 2026:** `docs/INCIDENT-CLAIMS-SPEC.md` — possible insurance claims
 (Vehicles › Claims, replacing the broker's Word claim form). Always opened from a Problem
 (`job_issues.claim_id`); the broker is never contacted automatically — only a manager's "Send to
-broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built), §22 troubleshooting, **§23 the Money card** (Nov 2026 — shared with the Problem page; resolving a Problem now needs a reason; §23.1: "Link one from Costs", and "Written off" is a reason, not a status — mig 350). Claim files live under the
+broker". §1 lists the settled decisions, §18–21 what Phases 1–4 shipped (video and retention deliberately not built), §22 troubleshooting, **§23 the Money card** (Nov 2026 — shared with the Problem page; resolving a Problem now needs a reason; §23.1: "Link one from Costs", and "Written off" is a reason, not a status — mig 354). Claim files live under the
 `claims/` R2 prefix, which `GET /api/files/download` gates to staff — never file them under `files/`.
 
 **The staff DVLA/document check has NOTHING to do with `drivers`.** jon's decision,
@@ -290,8 +290,8 @@ recovery codes are admins only, shown once. The banner's "Set up now" opens the 
 `scopes: ['collections','till']`, the PIN works only on a tablet an admin has set up (`services/kiosk-devices.ts`,
 spec §9, 29 Oct 2026 — a one-time code from Settings, then the `op_kiosk_device` cookie; checked BEFORE the PIN;
 `system_settings.kiosk_allowed_ips` is optional since the yard's broadband address changed and locked the warehouse out), the
-till is held to `KIOSK_TILL_ALLOW` on `routes/shop.ts` (sales only, cash or reader, each naming a person
-from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`), the reader behind
+till is held to `KIOSK_TILL_ALLOW` on `routes/shop.ts` (sales only, cash, reader or "their bill" (since 19 Nov 2026), each naming a person
+from the dropdown → `recorded_in = 'kiosk_till'`, `recorded_by_person_id`; vouchers too since 18 Nov 2026), the reader behind
 `stripe_terminal_kiosk`. **Spec §8 is what shipped and where it differs from the design.**
 
 **CLOSED, 11 Nov 2026:** `docs/FREELANCER-PORTAL-SPEC.md` — the freelancer portal programme. Done:
@@ -320,12 +320,30 @@ credit note) and OP never writes it to HireHop. Managers offer (⋯ on the close
 org / person pages; a tick on Cancel Job); any staff reserves it from the Client History note and marks it
 applied. Expired and "freed by a lost / cancelled job" are DERIVED on read (`EFFECTIVE_STATUS_SQL`), never swept.
 §13 is phase 1; **§14 phase 2**: `services/goodwill-check.ts` — the code in a line's Item Note / Item Memo (`ADDITIONAL` / `TECHNICAL`, kept on `jobs.line_items` with the prices) or an APPROVED credit note marks it used; job header chips + a close-out ledger line. **§15: it makes almost no HireHop calls of its own** — hourly (:50) from the lines the sync already stored, credit notes from the Money tab summary's own billing read (`applyGoodwillFromBilling()`) plus one billing read a day per waiting invoice credit (07:40); only "Check HireHop now" reads live.
-**§16 is VOUCHERS** (17 Nov 2026, mig 349): a goodwill credit with a random 12-character code
-(`voucher_code`, `K7QM-4XWP-C9TR`) and a face value INC VAT (`voucher_value_inc_vat`), single use, may be held by
-nobody. **The code is the secret, the GW ref stays internal** — only staff look a code up (the till, "Have a voucher
-code?" on a job), never a public route. Made on Money › Vouchers (admin + managers) and by referrals. At the shop
-till (**staff till only** — never kiosk or sitter) it is spread as lowered line prices and used up in the sale's own
+**§16 is VOUCHERS** (17 Nov 2026, mig 349): a random 12-character code (`voucher_code`, `K7QM-4XWP-C9TR`) and a face
+value INC VAT (`voucher_value_inc_vat`), single use, may be held by nobody. **§17 (18 Nov 2026, mig 350): there is ONE
+thing — every credit is a voucher with one code**, used everywhere (the client quotes it, staff type it into OP, it goes
+in HireHop's Item Note as "Voucher CODE"); screens say "voucher" (org / person tab **Vouchers**, menus "Give a voucher…"),
+values read "£16.67 + VAT = £20" and are entered with the Costs-style Net · VAT · Gross boxes. **The GW ref is internal
+only** — old GW refs still work (read-back + lookup). Only staff look a code up (the till, "Have a voucher code?" on a
+job), never a public route. Money › Vouchers (admin + managers) lists every voucher. At the shop till (**staff till and
+the front-desk kiosk — never the sitter till**) it is spread as lowered line prices and used up in the sale's own
 transaction; its own amount is outside the role's discount ceiling; a cancelled / refunded sale gives it back.
+
+**PRs 1–2 OF 4 BUILT, 18 Nov 2026:** `docs/CREDIT-ON-ACCOUNT-SPEC.md` — credit on account: a client's
+overpayment on a finished hire, kept for their next one (job 16489). **It is the client's MONEY, never a voucher** —
+no VAT, no use-by date, nothing lapses; the next invoice stays full value and this pays part of it. The money
+never moves when it is held or put aside for a job: it stays unallocated on the payments of the job it was paid
+on until the next job's close-out applies it (PR 3). A hold is per JOB (`account_credits`, mig 352 — the whole
+unallocated amount, which can sit across several payments), and its amount is refreshed from HireHop by the
+close-out plan, never a stored promise. It follows the paying client (`jobs.client_id`), same client only. Any
+staff holds it and uses it on a job; a manager takes either back off. Built: the ⋯ menu on Payment History rows
+(Refund · Apply to another job · Hold on account), the close-out panel's line, "Money on account" in Client
+History and on the client's Vouchers tab. **PR 2 (§5): the job it is put aside for shows "To pay now"** — the
+Money tab, the "Credit on account" confirmation method (a person's choice), the pre-hire briefing, the Wise
+matcher and the cash forecast all subtract it through `withCreditOnAccount()` / `reservedForJobSql()`; **no stored
+or HireHop-facing balance is ever changed** (it isn't in HireHop until that job is invoiced). §6 is the two PRs
+left (close-out applies it; the payment portal).
 
 **PHASES 1–3 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
 (Money › Cash forecast, `/money/cashflow`): the committed line by week and the next 14 days by day,
@@ -350,7 +368,7 @@ from** — "came in by" stays `jobs.enquiry_source`; "heard about us" (required 
 only — "Didn't ask" is an answer; optional everywhere else) and the website's ad / campaign tags live in
 `job_marketing_source` (mig 341, `services/marketing-source.ts` — every value cleaned, never throws); returning
 client is worked out from history, never asked. **§8a is the Marketing
-page** (Jobs › Marketing, admin-only, mig 342): adverts with a "next thing due" To Do, and tracked links / QR on
+page** (Jobs › Marketing, mig 342 — the page is every staff login's since 18 Nov 2026, but only the Content tab; Adverts, Tracked links, Review emails and Referrals are manager-tier; the email switches, tests and the referral offer stay admin): adverts with a "next thing due" To Do, and tracked links / QR on
 `go.oooshtours.co.uk/<code>` (`routes/go.ts` → `/api/go/<code>`, `services/marketing-links.ts`) — **a link's code
 never changes once made (it's printed); a bad or paused code goes to the home page, never a dead end.** **§8c is Jon's review email**
 (mig 344, `services/review-requests.ts`, Marketing › Review emails — OFF until jon turns it on): 10:15 the day after
@@ -358,11 +376,17 @@ Completed, not when completed >10 days after the return, once a year per client 
 the Completion modal, the button via `go.oooshtours.co.uk/google-review` (mig 346), a "Don't ask me again" page with a button (never acts on the click — mail scanners open links), Reply-To jon@.
 **§8d is the referral scheme** (mig 347, `services/referrals.ts` + pure `referral-rules.ts`,
 Marketing › Referrals): a referral belongs to a PERSON; personal links `go.oooshtours.co.uk/r/<code>` travel as
-`ol=ref-<code>`; "Referred by" on the job; only a new client, once; both rewards are VOUCHERS (goodwill credits with a
-code, source `referral`, amounts inc VAT): the friend's held for their hire and emailed in Jon's words
-(`referral_welcome_voucher`, never to info@), the referrer's made at "Thank-you given" with its code in email 3;
-thank-you due when the friend's hire is Completed — a To Do, never automatic; the referrer's
-"someone's been in touch" email is OFF until switched on (`referral_emails_enabled`). §8b is what's left.
+`ol=ref-<code>`; "Referred by" on the job; only a new client, once; both rewards are VOUCHERS (source `referral`,
+amounts inc VAT) and **both automatic** (18 Nov 2026): the friend's made when the referral is linked, held for their
+hire (`referral_welcome_voucher`, never to info@); the referrer's when the friend's hire is Completed
+(`rewardReferral()` — at once on OP's Completed, else the 10:20 run) with its code in email 3. Taking a referral off or
+declining it withdraws an unused welcome voucher. All four emails are OFF until switched on
+(`referral_emails_enabled`); the vouchers are made either way. §8b is what's left.
+**§8e is the social media planner** (Marketing › Content, mig 351, `services/marketing-content.ts`, every staff
+login): one post per entry with channels ticked, a month calendar / board by status / ideas, a content library of
+Google Drive links, saved hashtag sets, a tracked link per post. **OP plans; Meta Business Suite posts** — never
+post from OP. The owner gets ONE To Do two days before a post that isn't approved (`source_type = 'marketing_post'`,
+09:16 run + every save). Posts are dropped, content archived — never deleted. Next: studio sitters sending content in.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
@@ -442,7 +466,7 @@ existing definition:
 | Which yard / building codes does a freelancer see, and when? | `services/site-codes.ts` — the gate code on a job's page from its day to the day after; the gate, grey cupboard and lockbox codes on a studio sitter's shift page on the day only (settings `ooh_gate_code`, `site_cupboard_code`, `site_lockbox_code`). Never on a list or a page that is always there |
 | A freelancer bringing an Ooosh van back out of hours (the staff tick, the email, the parking link) | `services/freelancer-ooh-return.ts` — `quotes.ooh_return` + `freelancer_ooh_returns` (mig 335), email only on the job's last day, ignores the email pause; NOT the hirer's `return_overnight` (`FREELANCER-PORTAL-SPEC.md` §8). On by default when the van is due back late (`autoOohReturn()`, mig 339): `ooh_return` NULL = automatic, never stored |
 | Which documents go with the "you're approved" email? | `services/approval-email-documents.ts` — Staff Documents shared with freelancers and ticked `attach_to_approval_email` (mig 340), current version's file, 10 MB in all; never stops the email |
-| Has this freelancer read this document? Which documents ask, who is asked? | `services/freelancer-document-reads.ts` — a Staff Document shared with freelancers and `freelancer_read_required` (mig 333); a read belongs to a VERSION (New version asks again, an edit doesn't); asked of approved freelancers with a portal login, never the shared office account; never blocks anything. Portal: Resources "To read" + the dashboard reminder; staff: the Staff Documents list count + the Freelancer tab card |
+| Has this freelancer read this document? Which documents ask, who is asked? | `services/freelancer-document-reads.ts` — a Staff Document shared with freelancers and `freelancer_read_required` (mig 333); a read belongs to a VERSION (New version asks again, an edit or an admin's "Small correction" version doesn't — mig 353); asked of approved freelancers with a portal login, never the shared office account; never blocks anything. Portal: Resources "To read" + the dashboard reminder; staff: the Staff Documents list count + the Freelancer tab card |
 | What does a freelancer's Earnings page show (paid, invoiced, to invoice, next payment)? | `services/freelancer-earnings.ts` `getFreelancerEarnings()` — money by INVOICE (paid in the period / dated in it and unpaid), "To invoice" only from `freelancer_earnings_labels_from`; never the expense estimate (`FREELANCER-PORTAL-SPEC.md` §5.2) |
 | When does a quote's work end? When does the completion chaser start? | `services/quote-schedule.ts` — crew and People jobs by their LAST day (complete from it, chased 09:00 UK the day after), deliveries/collections from arrival time in UK time; shared by the chaser and the portal (`docs/FREELANCER-PORTAL-SPEC.md` §2) |
 | Where does a "please complete your job" reminder send them? Who gets the text? | `services/completion-chaser.ts` — `completionLink()` (Start screen for a delivery/collection whose van step isn't done, else the completion page; the email's button and the text share it), `textableNumber()` (a real mobile only). The 2nd reminder is also a text, once per quote; off switch `completion_chase_sms_enabled` (`FREELANCER-PORTAL-SPEC.md` §2) |
@@ -484,6 +508,7 @@ existing definition:
 | Does this search look like a phone number? | `services/address-book-search.ts` `phoneDigitsForSearch()` — shared by the People and Organisations list searches |
 | Goodwill credit (offer, reserve on a job, applied, withdraw; is it still to use?) | `services/goodwill-credits.ts` — `EFFECTIVE_STATUS_SQL` is THE status (expired / freed are derived, never stored); copy and sums `frontend/src/lib/goodwillCopy.ts`; never written to HireHop (`GOODWILL-CREDIT-SPEC.md`) |
 | A voucher (its code, is it usable, make one, hold it on a job, use it at the till, give it back) | `services/vouchers.ts` + pure `voucher-rules.ts` (codes, inc→ex VAT, `spreadVoucher()`); the sale side is `shop-sales.ts` `checkVoucher()` — a voucher IS a goodwill credit, never a second money-off system (`GOODWILL-CREDIT-SPEC.md` §16) |
+| A client's overpayment kept for their next hire (hold it, is it still there, put it aside for a job, stop holding) | `services/account-credit.ts` — per JOB, the amount is HireHop's unallocated figure refreshed by the close-out plan (`holdForPlan()`), `ACCOUNT_CREDIT_STATUS_SQL` is THE status; what a job has put aside for it and what is left to pay: `listReservedForJob()` + `withCreditOnAccount()` (SQL: `reservedForJobSql()`) — never subtract it from a stored balance; real money, **never a voucher** and never written to HireHop / Xero here (`CREDIT-ON-ACCOUNT-SPEC.md`) |
 | Artist endorsements (who, which brand, the deal, last confirmed) | `services/endorsements.ts` — on a person OR a band (artist not in OP), never both; deal is free text; over 12 months since the last check is flagged. `forClientContext()` feeds New Enquiry / Job view. Page: Operations › Backline – Endorsements |
 | Recently viewed (per user) | `services/address-book-views.ts` — written ONLY when a detail page passes `?track_view=1`; pickers reading the same GET must not count |
 | Which address-book tabs have content (main row vs "More")? | `frontend/src/hooks/useTabPresence.ts` + `components/EntityTabs.tsx` — asks each tab's own endpoint; an empty tab moves under More, never hidden; one opened during a visit stays in the row until you leave the page. Both pages keep the tab in `?tab=` |
@@ -548,7 +573,8 @@ existing definition:
 | The client's payment portal link (and its hash) | `services/payment-portal-link.ts` `getPaymentPortalLink()` — computed live from HireHop, never stored; the hash changes with the hire dates |
 | A card-reader (S700) payment — sending, waiting, recording, test mode, who may use it | `services/stripe-terminal.ts` — `terminal_sessions` is the record AND the once-only gate; recorded through `recordPayment()` as `stripe_gbp` + `source = 'stripe_terminal'`; gated by `system_settings.stripe_terminal_roles` |
 | Which jobs belong to the same festival? Its value, lead, default dates | `services/job-projects.ts` (`getProject()` roll-ups; quote options inside count once) |
-| A referral — who recommended this client, does it count, the personal link, the thank-you, the friend's welcome credit | `services/referrals.ts` — `referralBlockReason()` is every rule; wording / codes in `referral-rules.ts`; the welcome credit goes through `goodwill-credits.ts`, never its own money path |
+| A referral — who recommended this client, does it count, the personal link, the thank-you, the friend's welcome voucher | `services/referrals.ts` — `referralBlockReason()` is every rule; both vouchers are automatic (`autoWelcomeVoucher()` on linking, `rewardReferral()` on Completed); wording / codes in `referral-rules.ts`; vouchers go through `goodwill-credits.ts`, never their own money path |
+| A social post, its owner's To Do, the content library, hashtag sets | `services/marketing-content.ts` — `syncPostReminder()` keeps ONE open To Do per post (call it after any write); words and colours `frontend/src/components/marketing/contentCopy.ts`. OP never posts to Meta |
 | Jon's review email — who, when, why not, the "don't send" tick, opt-outs | `services/review-requests.ts` — one `review_requests` row per job, written before the send; `reviewDecision()` is every rule |
 | Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
 | A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee. Record refuses (409) when the same money is already on the job by hand — "Link to that payment" or "Record anyway" |
@@ -676,7 +702,7 @@ Backups 02:00 · job financials 03:00 · Traccar backup + 12-month GPS purge 03:
 bill payment pull-back 07:50 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last month's, once, from the 1st) · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry
-auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · referral safety-net 09:18 · storage reminders
+auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · social post reminders 09:16 · referral safety-net 09:18 · storage reminders
 09:20 · claim client chase 09:21 · claim check dates + GPS capture 09:22 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
 pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, list items to watchers, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 (hirers) · Jon's review emails 10:15 (off until switched on, `review_requests_enabled`) · referral thank-yous due 10:20 · freelancer out-of-hours emails every 30 min 10:00–20:30 UK · sitter task summary 16:00 ·

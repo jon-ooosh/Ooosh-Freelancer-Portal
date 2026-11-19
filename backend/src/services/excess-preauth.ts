@@ -9,6 +9,53 @@ import { query } from '../config/database';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
 import { ukToday } from './uk-date';
 
+// ── One hold OR payments on a record, never both (job 17022, Nov 2026) ──
+//
+// A job_excess record has ONE slot for a Stripe PaymentIntent and ONE for a
+// HireHop deposit. A pre-auth uses both (its PI now, its deposit at capture), so
+// money added on top of a live hold has nowhere of its own to live: Capture would
+// overwrite the deposit link, and releasing the hold used to mark the WHOLE record
+// 'released' — terminal, out of v_excess_held, no Reimburse button — while £950
+// of the client's money taken on a second card was still sitting with us.
+//
+// So: recording or linking money onto a record with a live hold is refused, and as
+// a backstop a release that finds money already taken keeps the record live for
+// that money (STATUS_AFTER_RELEASE_SQL) instead of burying it.
+//
+// ONE CARD PER EXCESS (jon, Nov 2026). Two payments on one record don't reimburse
+// cleanly either: the record keeps the LAST payment's PaymentIntent and the FIRST
+// payment's HireHop deposit, so Reimburse refuses (HireHop shortfall) or refunds
+// the wrong card. If a client can't put the excess on one card, a manager decides
+// (Edit Required Amount) — never a split.
+
+export const HOLD_PLUS_PAYMENT_MESSAGE =
+  'This excess has a pre-auth hold on it, so no money can be added to it — capture or release the hold first. ' +
+  'An excess goes on ONE card: if the client can\'t do that, ask a manager (Edit Required Amount).';
+
+/** Does this record carry a live pre-auth hold (so no money may be added to it)? */
+export function hasLiveHold(row: { excess_status?: string | null; amount_held?: string | number | null }): boolean {
+  return row.excess_status === 'pre_auth' && Number(row.amount_held || 0) > 0.005;
+}
+
+/**
+ * The status a record takes when its hold is released. 'released' (terminal) only
+ * when no money was taken on it; otherwise the money taken decides, exactly as a
+ * payment would. Used inside an UPDATE ... SET excess_status = <this>, which reads
+ * the row's values from before the UPDATE.
+ */
+export const STATUS_AFTER_RELEASE_SQL = `CASE
+    WHEN COALESCE(excess_amount_taken, 0) > 0.005 THEN
+      CASE WHEN COALESCE(excess_amount_taken, 0) >= COALESCE(excess_amount_required, 0) THEN 'taken' ELSE 'partially_paid' END
+    ELSE 'released'
+  END`;
+
+/** The extra note when a release leaves money on the record (empty when it doesn't). */
+export function releaseKeptMoneyNote(excessAmountTaken: string | number | null | undefined): string {
+  const taken = Number(excessAmountTaken || 0);
+  if (!(taken > 0.005)) return '';
+  return ` £${taken.toFixed(2)} taken separately is still held, so the record stays open for it — check which Stripe payment it was before reimbursing.`;
+}
+
 /**
  * Mark a held pre-auth as released in OP (no Stripe call — caller has already
  * confirmed the hold is gone, or it's a card-machine hold that auto-voided).
@@ -16,7 +63,7 @@ import { ukToday } from './uk-date';
  */
 export async function markExcessReleased(excessId: string, reason: string): Promise<boolean> {
   const cur = await query(
-    `SELECT job_id, amount_held, notes FROM job_excess
+    `SELECT job_id, amount_held, excess_amount_taken, notes FROM job_excess
      WHERE id = $1 AND excess_status = 'pre_auth'`,
     [excessId]
   );
@@ -24,14 +71,14 @@ export async function markExcessReleased(excessId: string, reason: string): Prom
 
   const dateStr = ukToday();
   const held = parseFloat(cur.rows[0].amount_held || '0');
-  const note = `[${dateStr}] Hold released — ${reason}.`;
+  const note = `[${dateStr}] Hold released — ${reason}.${releaseKeptMoneyNote(cur.rows[0].excess_amount_taken)}`;
   const newNotes = cur.rows[0].notes ? `${cur.rows[0].notes}\n${note}` : note;
 
   await query(
     `UPDATE job_excess SET
       amount_released = COALESCE(amount_released, 0) + amount_held,
       amount_held     = 0,
-      excess_status   = 'released',
+      excess_status   = ${STATUS_AFTER_RELEASE_SQL},
       released_at     = NOW(),
       notes           = $2,
       updated_at      = NOW()

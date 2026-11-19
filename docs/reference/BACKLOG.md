@@ -28,12 +28,32 @@ Future enhancements. Nothing here is committed work; treat as a menu, not a queu
   - **Cash forecast phase 4 — the Monday email** to jon (the four tiles, the low point, the fix-it list) and the
     "last week we said X, it was Y" line. `docs/CASHFLOW-FORECAST-SPEC.md` §11 / §13 "Next".
 
+- **Social media planner — BUILT 18 Nov 2026, phone layout 19 Nov** (`docs/BUSINESS-FIGURES-SPEC.md` §8e). jon: "use
+  it for a bit and report back". Follow-ons, in rough order:
+  - **Studio sitters send content in from the portal** (photos / videos as a Drive link first, an upload later,
+    landing in the content library as `source = 'sitter'`, `added_by_person_id`) — the sitters make a lot of it
+    (jon). The table already has both columns. §8e "Next".
+  - **"Approved but not scheduled" nudge** — the owner's To Do stops at Approved, so nothing chases a post nobody
+    has put into Meta. A second To Do the day before ("Schedule it in Meta") if it's still Approved. Offered, not
+    asked for.
+  - **Edit a library item's tags** (band / job / who took it) after adding — today only archive. Build if it
+    annoys anyone.
+  - **Watch on a phone:** the owner sits under "More details" (bring it back up if Matt sets posts for others from
+    his phone); the round "+" can cover the bottom-right of a card while scrolling.
+
 - **A multi-use promo code (raised 17 Nov 2026, not asked for yet)** — one code printed for anyone to use (a
   magazine ad, a festival programme), as opposed to the single-use vouchers built in `GOODWILL-CREDIT-SPEC.md` §16.
   Would need its own shape: no single holder, a count of uses and maybe a cap, perhaps once per client. Ask jon
   before building — a stack of single-use vouchers from Money › Vouchers covers a giveaway already.
 
-- **Marketing: advert register, tracked links / QR codes, review requests, referrals, content library (jon, Nov 2026)** — agreed in outline, sequenced in `docs/BUSINESS-FIGURES-SPEC.md` §8. The content library (photos / videos used on Instagram etc.: a register of Drive links with where and when each was used — files stay in the shared Drive) is to be discussed after the register and links are built.
+- **Marketing: advert register, tracked links / QR codes, review requests, referrals, content library — ALL BUILT
+  Nov 2026** (`docs/BUSINESS-FIGURES-SPEC.md` §8a–8e). What's left is the parked list above and the planner's
+  follow-ons.
+
+- **The front-desk iPad's job search (raised 19 Nov 2026)** — the kiosk till searches every open job, not only
+  today's bookings as `STAFF-LOGIN-SECURITY-SPEC.md` §4.2 first said. Since 19 Nov the iPad can put a sale on a
+  client's bill, so a wrong pick lands on someone's invoice (a laptop cancels it). Narrow it to today's bookings +
+  the rehearsal rooms in use if that ever happens; not asked for.
 
 - **Business figures tab, beside the cash forecast (jon, 5 Nov 2026: "once we've got the cashflow sheet working as best we can")** — **now a spec: `docs/BUSINESS-FIGURES-SPEC.md`** (step 1, recording, built Nov 2026; the conversion and reply-time parts live there). Original note: admin-only, its own tab, not on the cash page. Three figures, each with a definition to settle first: **monthly utilisation by service** — vans are solid (days on hire ÷ days in the fleet, from `vehicle_hire_assignments`); rehearsals need the rooms' opening hours as the denominator; backline across hundreds of items is noisy, so income per month by category plus the most- and least-used items may say more. **Enquiry-to-booking conversion** by month — the forecast already learns booked ÷ (booked + lost) by likelihood (`cashflow-sources.ts` `loadOutcomeHistory()`; alternative-quote losses excluded, `notAltQuoteLossSql`), so this is mostly a view of it. **Repeat-client rate** — the share of a month's booked jobs whose client had an earlier completed job; decide first whether "client" is the band or the paying organisation (the band-centric model gives different answers). `job-outcomes.ts` `JOB_OUTCOME_SQL` is the starting point for both of the last two.
 

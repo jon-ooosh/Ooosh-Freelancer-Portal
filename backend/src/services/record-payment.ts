@@ -26,6 +26,7 @@ import { afterOptionConfirmed } from './option-confirm';
 import { PRE_CONFIRMED_STATUSES } from './pipeline-stage';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
 import { fireArrivalHook } from './close-out-arrival';
+import { hasLiveHold, HOLD_PLUS_PAYMENT_MESSAGE } from './excess-preauth';
 
 export type RecordPaymentType = 'deposit' | 'balance' | 'excess' | 'refund' | 'excess_refund' | 'other';
 export type RecordPaymentMethod =
@@ -138,6 +139,21 @@ export async function recordPayment(
 
     if (amount === undefined || amount < 0.01) {
       return { status: 400, body: { error: 'Amount must be at least £0.01' } };
+    }
+
+    // A live pre-auth hold and money can't share a record (job 17022): refuse
+    // BEFORE anything is written. Not for the card reader — by the time it records,
+    // the card has been charged and the money must land somewhere; its excess
+    // payment is refused up front on a held record instead (stripe-terminal.ts),
+    // and a release backstops any mix (STATUS_AFTER_RELEASE_SQL).
+    if (payment_type === 'excess' && excess_id && source !== 'stripe_terminal') {
+      const holdCheck = await query(
+        `SELECT excess_status, amount_held FROM job_excess WHERE id = $1`,
+        [excess_id]
+      );
+      if (holdCheck.rows.length > 0 && hasLiveHold(holdCheck.rows[0])) {
+        return { status: 409, body: { error: HOLD_PLUS_PAYMENT_MESSAGE } };
+      }
     }
 
     // Record in OP

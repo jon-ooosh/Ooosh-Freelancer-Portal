@@ -175,7 +175,7 @@ export default function DamageMoneyCard({ problemId, claimId, jobId, vehicleId, 
 
   return (
     <Shell action={canOfferGoodwill ? (
-      <RecordActionsMenu actions={[{ label: 'Offer goodwill credit…', title: 'Say sorry with money off their next hire or what they owe — not a refund', onClick: () => setOfferingGoodwill(true) }]} />
+      <RecordActionsMenu actions={[{ label: 'Give a voucher…', title: 'Say sorry with money off their next hire or what they owe — not a refund', onClick: () => setOfferingGoodwill(true) }]} />
     ) : undefined}>
       {offeringGoodwill && (
         <OfferGoodwillModal jobId={jobId} sourceKind="problem" sourceJobId={jobId} sourceIssueId={problemId}

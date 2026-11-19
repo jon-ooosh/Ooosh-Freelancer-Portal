@@ -59,7 +59,7 @@ function detectFileType(ext: string): 'photo' | 'pdf' | 'other' {
 
 const VALID_CATEGORIES = ['damaged', 'missing', 'broken', 'dispute', 'breakdown', 'other'] as const;
 // What a Problem's status can be CHANGED to. 'written_off' is missing on
-// purpose: it is a resolution REASON since migration 350 (INCIDENT-CLAIMS-SPEC.md
+// purpose: it is a resolution REASON since migration 354 (INCIDENT-CLAIMS-SPEC.md
 // §23.1). It stays valid in the data (the CHECK constraint) and in every "is it
 // closed?" test below, but nothing sets it any more.
 const VALID_STATUSES = ['open', 'investigating', 'awaiting_quote', 'quoted', 'actioned', 'resolved', 'cancelled'] as const;

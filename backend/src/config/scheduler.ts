@@ -1050,6 +1050,20 @@ export function startScheduler() {
   // signature-step email trigger). Idempotent via drivers.referral_alert_sent_at,
   // bounded to the last 14 days so it never spams an ancient backlog. See
   // services/referral-alert.ts + CLAUDE.md → "Insurance Referral Workflow".
+  // Social posts going out within two days and not approved yet: a To Do for the post's
+  // owner (docs/BUSINESS-FIGURES-SPEC.md §8e). Saving a post does it at once; this catches
+  // posts that come into the window as the days pass.
+  cron.schedule('16 9 * * *', async () => {
+    try {
+      const { runPostReminders } = await import('../services/marketing-content');
+      const n = await runPostReminders();
+      if (n > 0) console.log(`Scheduler: social post reminders — ${n} checked`);
+    } catch (err) {
+      console.error('Scheduler: social post reminders failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Social post reminders scheduled daily at 09:16');
+
   cron.schedule('18 9 * * *', async () => {
     try {
       const { runReferralAlertScan } = await import('../services/referral-alert');

@@ -326,11 +326,22 @@ export async function startTerminalPayment(input: StartPaymentInput): Promise<Te
   let excessId: string | null = null;
   if (isExcess) {
     if (!input.excessId) throw new TerminalError('Which excess record is this for?');
-    const own = await query(`SELECT id FROM job_excess WHERE id = $1 AND job_id = $2`, [input.excessId, job.id]);
+    const own = await query(`SELECT id, excess_amount_required FROM job_excess WHERE id = $1 AND job_id = $2`, [input.excessId, job.id]);
     if (own.rows.length === 0) throw new TerminalError('That excess record is not on this job.', 404);
     const opts = await excessReaderOptions(input.excessId);
     const allowed = isPreauth ? opts.preauth : opts.payment;
     if (!allowed.allowed) throw new TerminalError(allowed.reason);
+    // A pre-auth holds exactly the required excess (jon, Nov 2026, after job 17022) —
+    // a different figure is a change to the excess itself, made with Edit Required Amount.
+    if (isPreauth) {
+      const requiredPence = Math.round(Number(own.rows[0].excess_amount_required || 0) * 100);
+      if (pence !== requiredPence) {
+        throw new TerminalError(
+          `A pre-auth holds the excess required on the record (£${(requiredPence / 100).toFixed(2)}). ` +
+          'To hold a different amount, change it with Edit Required Amount first.',
+        );
+      }
+    }
     excessId = input.excessId;
   }
 

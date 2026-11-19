@@ -2,25 +2,29 @@
 <html lang="en-GB">
 <head>
 <meta charset="utf-8">
-<title>The shop till iPad and scanner</title>
+<title>The shop till: staff guide</title>
 <!--
-  Source of the STAFF guide to the warehouse shop till on the iPad
-  (/warehouse/till) with the Bluetooth barcode scanner (a ScanAvenger
-  Wireless Portable 1D, Nov 2026). A PDF, uploaded to OP as a Staff Document
-  for staff only: NOT shared with freelancers (studio sitters use their
-  phones; their guide is shop-till/).
+  Source of the STAFF guide to the shop till (Money > Shop Till, and the front desk
+  iPad at /warehouse/till with the Bluetooth barcode scanner, a ScanAvenger Wireless
+  Portable 1D, Nov 2026). A PDF, uploaded to OP as a Staff Document for staff only:
+  NOT shared with freelancers (studio sitters use their phones; their guide is
+  shop-till/).
 
-  Text only: the screens it describes are the iPad's own, not OP's.
-  What the till does with a scan: frontend/src/hooks/useBarcodeScanner.ts and
-  frontend/src/pages/ShopTillPage.tsx. Keep the messages quoted here in step
-  with that page.
+  A4 pages (shared/guide-a4.css), read on a laptop (jon, 18 Nov 2026). Part 1 is the
+  till anywhere; Part 2 is the front desk iPad and its scanner.
+
+  Screenshots (img/) were taken from a local copy of OP with made-up stock and sales,
+  at laptop width. What the till does: frontend/src/pages/ShopTillPage.tsx (scans:
+  hooks/useBarcodeScanner.ts; vouchers: docs/GOODWILL-CREDIT-SPEC.md §16-17; the rules:
+  docs/SHOP-SALES-SPEC.md). Keep the words quoted here in step with that page.
 
   PDF: node docs/guides/shared/build-pdf.js staff-till
   House rules for this copy: British English, no em or en dashes.
 -->
 <link rel="stylesheet" href="../shared/guide.css">
+<link rel="stylesheet" href="../shared/guide-a4.css">
 <style>
-  :root { --footer: "Shop till iPad guide"; }
+  :root { --footer: "The shop till: staff guide"; }
 </style>
 </head>
 <body>
@@ -28,26 +32,147 @@
 <!-- ── Cover ──────────────────────────────────────────────────────────── -->
 <section class="page cover">
   <img class="logo" src="../../../public/ooosh-tours-logo-small.png" alt="Ooosh! Tours">
-  <h1>The shop till iPad and scanner</h1>
-  <p class="sub">For Ooosh staff at the shop counter</p>
-  <p>The iPad on the counter runs the shop till. The barcode scanner beside it is connected to the iPad by Bluetooth.</p>
-  <p>Scanning is the safest way to ring something up. Some strings and tapes look almost the same but cost very different amounts, and the scanner never mixes them up.</p>
+  <h1>The shop till</h1>
+  <p class="sub">For Ooosh staff: on a laptop, and on the front desk iPad</p>
+  <p>The shop till is in OP under <b>Money, then Shop Till</b>. The front desk iPad runs the same till, with a barcode scanner beside it.</p>
+  <p>Every sale is saved in OP straight away and reaches HireHop about two minutes later, on that week's shop job. HireHop keeps the stock count; you never touch the shop job in HireHop yourself.</p>
 
   <div class="rules">
-    <h3>Five things to remember</h3>
+    <h3>Things to remember</h3>
     <ol>
       <li><b>Scan, don't search</b>, whenever the item has a barcode.</li>
-      <li>Scan the same item again for a <b>second one</b>.</li>
-      <li>Need to type? Tap the <b>keyboard icon</b> at the bottom left, then <b>Show Keyboard</b>.</li>
-      <li>Check the <b>basket</b> before you take the money.</li>
-      <li>Item won't scan? <b>Search by name</b>, and tell the office so the barcode gets added.</li>
+      <li>Check the <b>basket</b> and the <b>total</b> before you take the money.</li>
+      <li>Pick <b>who it's for</b>: a walk-in, a band in today, or another job.</li>
+      <li>Got a voucher? Tap <b>Voucher code</b> before you take the money.</li>
+      <li>Rang something up wrong? <b>Cancel</b> it in Recent sales within two minutes. After that, a manager refunds it.</li>
+      <li>Used something ourselves? Record it under <b>Used for Ooosh</b>, never as a sale at £0.</li>
     </ol>
   </div>
+
+  <h3>What's in this guide</h3>
+  <p><b>Part 1, the till:</b> selling, who it's for and how they pay, discounts and vouchers, used for Ooosh, and after the sale.<br>
+  <b>Part 2, the front desk iPad:</b> signing in, scanning, typing with the scanner connected, and when a scan doesn't work.</p>
 </section>
 
-<!-- ── 1. Scanning ────────────────────────────────────────────────────── -->
+<!-- ── 1. Selling ─────────────────────────────────────────────────────── -->
 <section class="page">
-  <div class="step"><span class="n">1</span><h2>Scanning an item</h2></div>
+  <p class="part">Part 1: The till</p>
+  <div class="step"><span class="n">1</span><h2>Ringing up a sale</h2></div>
+  <p>Scan the item, or type its name, part number or barcode in the search box and pick it from the list. Prices in the list include VAT.</p>
+  <img class="shot" src="img/t1-search.png" alt="Searching for an item">
+  <ul>
+    <li><b>Two of the same?</b> Scan it again, or change the number in the basket.</li>
+    <li><b>Prices in the basket are ex VAT</b>, as in HireHop. The total at the top right includes VAT.</li>
+    <li><b>Only some free?</b> "Only 2 free (3 reserved for jobs)" means the rest are held for hires. Sell what's free.</li>
+    <li><b>Wrong item?</b> Tap <b>Remove</b> on its line.</li>
+  </ul>
+  <img class="shot" src="img/t2-basket-checkout.png" alt="A basket and the checkout panel">
+</section>
+
+<!-- ── 2. Who and how ─────────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">2</span><h2>Who it's for, and how they pay</h2></div>
+  <h3>Who's it for?</h3>
+  <ul>
+    <li><b>Walk-in</b>: anyone off the street, or a band paying there and then. The sale goes on the week's shop job.</li>
+    <li><b>A band in today</b>: bands in the rehearsal rooms today show as buttons. Pick one to put the sale on their own job.</li>
+    <li><b>Other job...</b>: search by job number or band name for any other live job.</li>
+  </ul>
+  <h3>Payment</h3>
+  <ul>
+    <li><b>Card reader</b>: the button says <b>Take £X on card reader</b>. The card is taken first and the sale is saved once it's approved. Keep the till open until it is.</li>
+    <li><b>Cash</b>: tap what they gave you (Exact, a note, or Other) and the till shows the <b>change to give</b>.</li>
+    <li><b>Bank transfer</b>: for money they've sent by transfer.</li>
+    <li><b>Put it on their bill</b>: only with a job picked. It goes on that job's invoice; nothing is paid now.</li>
+  </ul>
+  <h3>Receipt and note</h3>
+  <p>Type an email in <b>Email a receipt</b> to send one (a band's contacts are suggested). A <b>Note</b> is optional and shows on the sale. Then press <b>Take £X</b>.</p>
+  <div class="tip"><p>The till starts the next customer on the default payment method again, so check it every time.</p></div>
+</section>
+
+<!-- ── 3. Discounts and vouchers ──────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">3</span><h2>Discounts and vouchers</h2></div>
+  <h3>A discount</h3>
+  <p>Type a lower price (ex VAT) in the item's price box. The box turns amber and shows what it <b>was</b>. The panel shows the discount as a percentage of the whole sale.</p>
+  <ul>
+    <li>Everyone has a <b>limit</b>, as a percentage of the sale. Go over it and the till says so: ask a manager to ring it up.</li>
+    <li>A price can't go above the list price.</li>
+  </ul>
+  <h3>A voucher</h3>
+  <p>A voucher code looks like <b>K7QM-4XWP-C9TR</b>. The customer will usually have it in an email.</p>
+  <div class="cols">
+    <div>
+      <ol>
+        <li>Ring up the basket.</li>
+        <li>Tap <b>Voucher code</b>, type the code and tap <b>Apply</b>. Capitals and dashes don't matter.</li>
+        <li>The till takes the voucher off the prices and the total drops.</li>
+        <li>Take payment as normal.</li>
+      </ol>
+      <ul>
+        <li><b>Worth more than the basket?</b> The rest is lost; a voucher works once.</li>
+        <li><b>Changed the basket after applying it?</b> Tap <b>Remove</b> on the voucher, then apply it again.</li>
+        <li><b>The till says no?</b> It says why: already used, run out, or held for a hire. Don't sell at the discount; ask the office.</li>
+        <li>A voucher doesn't count against your discount limit.</li>
+      </ul>
+    </div>
+    <img class="shot" src="img/t3-voucher.png" alt="A voucher applied at the till">
+  </div>
+  <div class="tip"><p>Only take a code from the customer who has it, and never read one out to anyone.</p></div>
+</section>
+
+<!-- ── 4. Used for Ooosh ──────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">4</span><h2>Used for Ooosh</h2></div>
+  <p>For shop stock we use ourselves: tape for a job, strings for a hire guitar, batteries for a mic. It takes the stock off the shelf with no money involved.</p>
+  <ol>
+    <li>Tap <b>Used for Ooosh</b> at the top.</li>
+    <li>Scan or search the items, as for a sale.</li>
+    <li>Say what it was for (required), then press <b>Record use</b>.</li>
+  </ol>
+  <img class="shot" src="img/t5-used.png" alt="Recording stock used for Ooosh">
+  <div class="tip"><p>Never ring stock we've used as a sale at £0. A sale is money; this keeps the two apart, and the <b>What we've used</b> tab adds it up.</p></div>
+</section>
+
+<!-- ── 5. After the sale ──────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">5</span><h2>After the sale</h2></div>
+  <p>The tabs under the till show what's happened.</p>
+  <img class="shot" src="img/t4-recent.png" alt="Recent sales">
+  <ul>
+    <li><b>Recent sales</b>: the latest sales. <b>queued</b> means saved in OP and on its way; <b>in HireHop</b> means it's there.
+      <ul>
+        <li><b>Cancel</b>: while a sale is still queued (about two minutes), cancel a mistake and ring it again.</li>
+        <li><b>Receipt</b>: email a receipt, or send it again.</li>
+        <li><b>Refund</b> (managers): once a sale is in HireHop. Give a reason. Cash and card are done at the counter; a card reader sale goes back to the card. Anything else shows <b>Refund outstanding</b> until you press <b>Done, they have it</b>.</li>
+      </ul>
+    </li>
+    <li><b>Needs attention</b>: a sale that didn't reach HireHop. Press <b>Retry</b>, or tell the office.</li>
+    <li><b>Sitter sales</b>: bigger sales taken on a studio sitter's phone. Check each one and press <b>Reviewed</b>.</li>
+    <li><b>This week</b>: the week's takings and whether HireHop agrees with the till.</li>
+    <li><b>What we've used</b>: everything recorded as Used for Ooosh.</li>
+    <li><b>Reorder</b>: items at or below their reorder level.</li>
+  </ul>
+</section>
+
+<!-- ── 6. The front desk iPad ─────────────────────────────────────────── -->
+<section class="page">
+  <p class="part">Part 2: The front desk iPad</p>
+  <div class="step"><span class="n">6</span><h2>Signing in and who's selling</h2></div>
+  <p>The iPad on the front desk runs the same till, signed in with the warehouse PIN. It only works on that iPad.</p>
+  <ul>
+    <li><b>Who's selling?</b> Pick your name before your first sale. Every sale on the iPad is recorded against a name, and it remembers you for 30 minutes.</li>
+    <li><b>Cash, card reader, or put it on their bill.</b> Open jobs can have shop items put straight onto their own job: pick the job first, as on a laptop. Used for Ooosh is done on a laptop.</li>
+    <li><b>Vouchers work</b> just as on a laptop (section 3).</li>
+    <li><b>Last few sales</b> shows today's latest sales, to send a receipt again. Cancels and refunds are done on a laptop, signed in as yourself.</li>
+    <li><b>Collections</b> at the top goes back to warehouse collections.</li>
+  </ul>
+</section>
+
+<!-- ── 7. Scanning ────────────────────────────────────────────────────── -->
+<section class="page">
+  <div class="step"><span class="n">7</span><h2>Scanning an item</h2></div>
+  <p>The barcode scanner beside the iPad is connected to it by Bluetooth. Scanning is the safest way to ring something up: some strings and tapes look almost the same but cost very different amounts, and the scanner never mixes them up.</p>
   <p>Open the till, point the scanner at the barcode and press the trigger. It beeps, and the item goes straight into the basket.</p>
   <ul>
     <li><b>Two of the same?</b> Scan it twice, or change the number in the basket.</li>
@@ -55,13 +180,10 @@
     <li><b>Mid payment?</b> A scan while the card reader is waiting adds nothing. The till says so. Finish the payment, then scan again.</li>
   </ul>
   <div class="tip"><p>One line can hold up to <b>999</b> of an item. The till won't take more, so a barcode typed into a quantity box by accident can't ring up thousands.</p></div>
-</section>
 
-<!-- ── 2. Typing ──────────────────────────────────────────────────────── -->
-<section class="page">
-  <div class="step"><span class="n">2</span><h2>Typing with the scanner connected</h2></div>
+  <div class="step" style="margin-top: 26px;"><span class="n">8</span><h2>Typing with the scanner connected</h2></div>
   <p>The iPad treats the scanner as a keyboard. While it's connected, the iPad hides its own on-screen keyboard. That's normal, and nothing is broken.</p>
-  <p>To type something (a search, an email for a receipt, a note):</p>
+  <p>To type something (a search, a voucher code, an email for a receipt, a note):</p>
   <ol>
     <li>Tap the box you want to type in.</li>
     <li>Tap the <b>keyboard icon</b> at the bottom left of the screen.</li>
@@ -71,9 +193,9 @@
   <div class="tip"><p>The scanner is set never to go to sleep, so it stays connected all day. If scans stop arriving, check it's switched on and charged, then try again.</p></div>
 </section>
 
-<!-- ── 3. When a scan doesn't work ────────────────────────────────────── -->
+<!-- ── 9. When a scan doesn't work ────────────────────────────────────── -->
 <section class="page">
-  <div class="step"><span class="n">3</span><h2>When a scan doesn't add the item</h2></div>
+  <div class="step"><span class="n">9</span><h2>When a scan doesn't add the item</h2></div>
   <p>The till says what happened under the search box.</p>
   <ul>
     <li><b>No item has barcode</b>: the barcode isn't on any item in HireHop yet. Search for the item by name and sell it as normal. Then tell the office, or add the barcode to the item in HireHop yourself. The till picks it up within 15 minutes.</li>

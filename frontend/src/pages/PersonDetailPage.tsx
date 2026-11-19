@@ -427,7 +427,7 @@ function PersonDetailContent() {
             {/* Do Not Hire is set in Edit → Working Terms; Delete is rare, so it lives in ⋯ */}
             <RecordActionsMenu
               actions={[
-                ...(isAdmin ? [{ label: 'Offer goodwill credit…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setShowGoodwill(true) }] : []),
+                ...(isAdmin ? [{ label: 'Give a voucher…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setShowGoodwill(true) }] : []),
                 { label: 'Delete', danger: true, onClick: () => { if (confirm(`Delete ${person.first_name} ${person.last_name}?`)) handleDelete(); } },
               ]}
             />
@@ -507,7 +507,7 @@ function PersonDetailContent() {
           { key: 'held', label: heldCount ? `Held Items (${heldCount})` : 'Held Items', secondary: true, hasContent: tabPresence.held },
           { key: 'storage', label: 'Storage', secondary: true, hasContent: tabPresence.storage },
           ...(isFreelancer ? [{ key: 'pcn' as const, label: 'PCNs', secondary: true, hasContent: tabPresence.pcn }] : []),
-          { key: 'goodwill', label: 'Goodwill', secondary: true, hasContent: tabPresence.goodwill },
+          { key: 'goodwill', label: 'Vouchers', secondary: true, hasContent: tabPresence.goodwill },
         ]}
       />
 

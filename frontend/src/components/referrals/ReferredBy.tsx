@@ -2,8 +2,10 @@
  * "Referred by" on the job page (docs/BUSINESS-FIGURES-SPEC.md §8d). Shows who recommended
  * this client, or lets staff say so — picked from the address book, as a name they
  * mentioned or a referral card. Amber when "Heard about us" is Recommendation and nobody
- * is linked yet. Managers give the friend's welcome voucher from here (a goodwill credit with
- * a code, held for this hire) and can email them the code in Jon's words.
+ * is linked yet. The friend's welcome voucher is made automatically when the referral is
+ * linked (held for this hire, emailed in Jon's words while the referral emails are on); a
+ * manager can send the email by hand, or give the voucher for a referral linked before the
+ * offer had one. Taking a referral off withdraws its unused voucher.
  * Backend: routes/referrals.ts.
  */
 import { useCallback, useEffect, useState } from 'react';
@@ -19,6 +21,7 @@ interface Referral {
   status: string;
   stage: string;
   welcomeCreditRef: string | null;
+  welcomeVoucherCode: string | null;
   welcomeEmailSentAt: string | null;
   offer: { friendVoucherIncVat: number | null };
 }
@@ -96,7 +99,7 @@ export default function ReferredBy({ jobId, heardAbout, role }: { jobId: string;
         <span className="text-gray-400">({HOW[referral.how] || referral.how} · {referral.stage})</span>
         {referral.welcomeCreditRef && (
           <span className="text-gray-500">
-            · voucher {referral.welcomeCreditRef}{referral.welcomeEmailSentAt ? ' (emailed)' : ''}
+            · welcome voucher <span className="font-mono">{referral.welcomeVoucherCode || referral.welcomeCreditRef}</span>{referral.welcomeEmailSentAt ? ' (emailed)' : ''}
             {isManager && !referral.welcomeEmailSentAt && (
               <> · <button type="button" disabled={busy} className="text-ooosh-700 hover:underline disabled:opacity-50"
                 onClick={() => act(async () => { await api.post(`/referrals/${referral.id}/welcome-email`, {}); setNotice('Emailed.'); })}>Email them the code</button></>
@@ -110,9 +113,9 @@ export default function ReferredBy({ jobId, heardAbout, role }: { jobId: string;
           })} />
         )}
         {notice && <span className="text-amber-700">{notice}</span>}
-        {referral.status === 'open' && !referral.welcomeCreditRef && (
+        {referral.status === 'open' && (
           <button type="button" disabled={busy} title="Linked by mistake? Take it off"
-            onClick={() => { if (window.confirm(`Take ${referral.referrerName} off as the referrer?`)) act(() => api.delete(`/referrals/${referral.id}`)); }}
+            onClick={() => { if (window.confirm(`Take ${referral.referrerName} off as the referrer?${referral.welcomeCreditRef ? ' Their friend\'s welcome voucher is withdrawn too.' : ''}`)) act(() => api.delete(`/referrals/${referral.id}`)); }}
             className="text-gray-400 hover:text-red-600 disabled:opacity-50">✕</button>
         )}
         {error && <span className="text-red-600">{error}</span>}

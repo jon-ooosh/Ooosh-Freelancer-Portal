@@ -565,7 +565,7 @@ function IssueDetailContent() {
                 }}
                 className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm"
               >
-                {/* "Written Off" is a reason now, not a status (spec §23.1, migration 350) —
+                {/* "Written Off" is a reason now, not a status (spec §23.1, migration 354) —
                     only listed for a row that somehow still has it, so the select isn't blank. */}
                 {(Object.keys(STATUS_LABELS) as IssueStatus[]).filter(s => s !== 'written_off' || issue.status === 'written_off').map(s => (
                   <option key={s} value={s}>{STATUS_LABELS[s]}</option>

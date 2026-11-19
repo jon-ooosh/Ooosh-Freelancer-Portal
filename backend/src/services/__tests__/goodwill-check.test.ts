@@ -68,7 +68,7 @@ describe('decideGoodwill', () => {
 
   it('an approved credit note → used; one bigger than the credit + 20% is flagged', () => {
     expect(decideGoodwill(credit(), read([], approvedNote(96)), NOW)).toEqual({ outcome: 'used', how: 'credit_note', hhRef: 'OT-CRE-1223', problem: null });
-    expect(decideGoodwill(credit(), read([], approvedNote(96.02)), NOW).problem).toMatch(/more than the credit \(£80.00\+VAT\)/);
+    expect(decideGoodwill(credit(), read([], approvedNote(96.02)), NOW).problem).toMatch(/more than the voucher \(£80.00 \+ VAT\)/);
   });
 
   it('a DRAFT credit note never counts', () => {
@@ -116,5 +116,26 @@ describe('stored lines (phase 2, jon 17 Nov 2026 — no extra HireHop calls)', (
     const old = credit({ reserved_at: '2026-11-01T09:00:00Z' });
     expect(decideGoodwill(old, { lines: [], creditNotes: [] }, NOW, false)).toEqual({ outcome: 'waiting', problem: null });
     expect(decideGoodwill(old, { lines: [], creditNotes: [] }, NOW, true).problem).toMatch(/No line or credit note/);
+  });
+});
+
+describe('codesIn — voucher codes as well as old GW refs (spec §17)', () => {
+  it('finds a voucher code in a line note, any case', () => {
+    expect(codesIn('Hire discount · Voucher k7qm-4xwp-c9tr')).toEqual(['K7QM-4XWP-C9TR']);
+  });
+  it('still finds an old GW ref', () => {
+    expect(codesIn('Goodwill credit GW-0001 and Voucher K7QM-4XWP-C9TR')).toEqual(['GW-0001', 'K7QM-4XWP-C9TR']);
+  });
+  it('ignores look-alikes that cannot be a code (0/O/1/I/L)', () => {
+    expect(codesIn('Part ABC0-1234-XYZL')).toEqual([]);
+  });
+});
+
+describe('decideGoodwill — matches a credit by its voucher code', () => {
+  it('a line carrying the code marks it used', () => {
+    const g = { ref: 'GW-0002', voucher_code: 'K7QM-4XWP-C9TR', amount_ex_vat: 16.67, reserved_amount_ex_vat: 16.67, reserved_at: null };
+    const d = decideGoodwill(g, { lines: [{ id: 5, text: 'Van hire · Voucher K7QM-4XWP-C9TR', unitPrice: 100, price: 83.33 }], creditNotes: [] });
+    expect(d.outcome).toBe('used');
+    expect(d.problem).toBeNull();
   });
 });

@@ -27,7 +27,7 @@ import { withShopDrainLock } from './shop-drain';
 import { assertSellableJob } from './shop-routing';
 import { findVoucher, voucherProblem, useVoucherOnSale, noteVoucherUsedOnSale, giveVoucherBack } from './vouchers';
 import { lineGross } from './voucher-rules';
-import type { GoodwillCredit } from './goodwill-credits';
+import { creditCode, type GoodwillCredit } from './goodwill-credits';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -93,8 +93,8 @@ export interface CreateShopSaleInput {
    *  card-reader sale that nobody took. Stored so a Refund goes back to the card. */
   stripePaymentIntent?: string | null;
   /**
-   * A voucher code (GOODWILL-CREDIT-SPEC §16) — staff till only, never the kiosk or a
-   * sitter's phone. The lines already carry the voucher as lowered prices (the till asks
+   * A voucher code (GOODWILL-CREDIT-SPEC §16–17) — the staff till and the warehouse kiosk
+   * (front desk), never a sitter's phone. The lines already carry the voucher as lowered prices (the till asks
    * `POST /shop/voucher` to spread it); the code lets that much discount past the role's
    * ceiling and uses the voucher up with the sale.
    */
@@ -380,15 +380,19 @@ export interface SaleVoucher {
 }
 
 /**
- * A voucher on a sale: staff till only, a live voucher, and actually taking something
- * off. The discount it covers is measured inc VAT (a voucher's value is what the
+ * A voucher on a sale: the staff till or the kiosk (jon, 18 Nov 2026 — the code itself is
+ * the permission; the kiosk names who is selling), never the sitter till; a live voucher,
+ * and actually taking something off. The discount it covers is measured inc VAT (a voucher's value is what the
  * customer sees), so a zero-rated line is covered pound for pound.
  */
 async function checkVoucher(
   input: CreateShopSaleInput, user: ShopActor, priced: PricedLine[], totals: ShopSaleTotals,
 ): Promise<SaleVoucher> {
-  if (input.kind !== 'sale' || (input.recordedIn || 'staff_till') !== 'staff_till' || !user.id || user.via) {
-    throw new Error('Vouchers are taken on the staff till only.');
+  const till = input.recordedIn || 'staff_till';
+  const kioskOk = till === 'kiosk_till' && user.via === 'kiosk' && !!user.personId;
+  const staffOk = till === 'staff_till' && !!user.id && !user.via;
+  if (input.kind !== 'sale' || !(kioskOk || staffOk)) {
+    throw new Error('Vouchers are taken on the staff till or the front desk till, not the sitter till.');
   }
   const credit = await findVoucher(String(input.voucherCode));
   const problem = voucherProblem(credit);
@@ -397,7 +401,7 @@ async function checkVoucher(
   const off = penny(listGross - totals.gross);
   const value = credit!.voucher_value_inc_vat || 0;
   const takenOff = penny(Math.min(value, Math.max(off, 0)));
-  if (takenOff < 0.01) throw new Error(`Voucher ${credit!.ref} isn't taking anything off — apply it again.`);
+  if (takenOff < 0.01) throw new Error(`Voucher ${creditCode(credit!)} isn't taking anything off — apply it again.`);
   const extra = penny(off - takenOff);
   return { credit: credit!, takenOff, extraPct: listGross > 0 ? (extra / listGross) * 100 : 0 };
 }
@@ -446,8 +450,8 @@ export async function createShopSale(
         input.soldToPersonId || null,
         input.kind === 'sale' ? (input.soldToJobId || null) : null,
         needsReview,
-        // The voucher's GW ref rides on the sale's notes, so it reaches HireHop's payment memo.
-        [input.notes?.trim(), voucher ? `Voucher ${voucher.credit.ref}` : null].filter(Boolean).join(' · ') || null,
+        // The voucher's code rides on the sale's notes, so it reaches HireHop's payment memo.
+        [input.notes?.trim(), voucher ? `Voucher ${creditCode(voucher.credit)}` : null].filter(Boolean).join(' · ') || null,
         String(holdSeconds),
         user.personId || null,
         input.shiftId || null,

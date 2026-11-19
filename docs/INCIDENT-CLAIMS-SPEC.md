@@ -906,7 +906,7 @@ when linked; each linked cost has **unlink** (it stays in Costs). `GET /damage-m
 `PATCH /costs`, which fires a Xero push for any cost not yet in Xero. Logged on the Problem's timeline
 and its claim's.
 
-**"Written off" is a reason, not a status** (migration 350). Production had one Problem with the status;
+**"Written off" is a reason, not a status** (migration 354). Production had one Problem with the status;
 it moved to Resolved + reason "Written off" (a reason a person had already chosen is kept), logged on its
 timeline. The status stays valid in the data and in every "is it closed?" test; `PATCH /problems/:id` no
 longer accepts it and the status list no longer offers it.

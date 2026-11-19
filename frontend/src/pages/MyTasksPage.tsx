@@ -690,6 +690,7 @@ const SOURCE_LABEL: Record<string, string> = {
   quote_option: 'Quote options',
   marketing_placement: 'Marketing',
   referral: 'Referral',
+  marketing_post: 'Social post',
 };
 
 const SERIES = 'staff_task_series';

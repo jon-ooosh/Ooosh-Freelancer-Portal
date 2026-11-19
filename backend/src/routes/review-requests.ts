@@ -12,7 +12,7 @@
 import { Router, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
-import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, MANAGER_ROLES, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
   emailFromStopToken, getJobReviewState, recordOptOut, reviewOverview,
@@ -94,7 +94,8 @@ router.put('/job/:jobId/skip', authenticate, authorize(...STAFF_ROLES), validate
     }
   });
 
-router.get('/overview', authenticate, authorize('admin'), async (_req: AuthRequest, res: Response) => {
+// Managers see it (jon, 18 Nov 2026); turning the email on / off and the test stay admin.
+router.get('/overview', authenticate, authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await reviewOverview() });
   } catch (err) {

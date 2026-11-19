@@ -1,9 +1,9 @@
 /**
  * Goodwill read-back — docs/GOODWILL-CREDIT-SPEC.md §6, phase 2.
  *
- * OP never WRITES a goodwill credit to HireHop; staff apply it by hand with the
- * credit's code (GW-0012) in a line's Item Note / Item Memo or a credit note's
- * description. This READS HireHop to see that it happened:
+ * OP never WRITES a voucher to HireHop; staff apply it by hand with the voucher's
+ * code (K7QM-4XWP-C9TR — since §17; an old credit's GW-0012 still counts) in a line's
+ * Item Note / Item Memo or a credit note's description. This READS HireHop to see that it happened:
  *
  *   A. every RESERVED credit (hourly): the code on a line of its job, read from
  *      the lines the HireHop sync has ALREADY stored (jobs.line_items — Item Note,
@@ -31,7 +31,7 @@
 import { query } from '../config/database';
 import { hhBroker } from './hirehop-broker';
 import {
-  type GoodwillCredit, getGoodwillCredit, getGoodwillByRef, noteGoodwill, EFFECTIVE_STATUS_SQL, FREE_TO_RESERVE_SQL,
+  type GoodwillCredit, getGoodwillCredit, getGoodwillByAnyCode, noteGoodwill, creditCode, EFFECTIVE_STATUS_SQL, FREE_TO_RESERVE_SQL,
 } from './goodwill-credits';
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
@@ -39,9 +39,15 @@ const WAIT_BEFORE_FLAG_MS = 24 * 60 * 60 * 1000;
 
 // ── Pure: reading HireHop's answers and deciding ─────────────────────────────
 
-/** Every GW code in a piece of text, upper-cased, once each. */
+// A voucher code (voucher-rules.ts: no 0/O, 1/I/L) or an old GW ref.
+const CODE_RE = /\b(?:GW-\d{4,}|[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4})\b/gi;
+/** Every voucher code / GW ref in a piece of text, upper-cased, once each. */
 export function codesIn(text: string): string[] {
-  return Array.from(new Set((text.match(/\bGW-\d{4,}\b/gi) || []).map((c) => c.toUpperCase())));
+  return Array.from(new Set((text.match(CODE_RE) || []).map((c) => c.toUpperCase())));
+}
+/** Does this text carry this credit's code (or its old GW ref)? */
+function carries(codes: string[], g: { ref: string; voucher_code?: string | null }): boolean {
+  return codes.includes(g.ref) || (!!g.voucher_code && codes.includes(g.voucher_code));
 }
 
 /** A supply line: all its text joined, and its prices (null = not known — a line stored before
@@ -95,23 +101,24 @@ export type Decision =
 
 /** What a reserved credit's HireHop job says. Pure — the tests drive it directly. */
 export function decideGoodwill(
-  g: Pick<GoodwillCredit, 'ref' | 'amount_ex_vat' | 'reserved_amount_ex_vat' | 'reserved_at'>,
+  g: Pick<GoodwillCredit, 'ref' | 'amount_ex_vat' | 'reserved_amount_ex_vat' | 'reserved_at'> & { voucher_code?: string | null },
   read: { lines: SupplyLine[]; creditNotes: CreditNoteRow[] },
   now: Date = new Date(),
   /** False when this look can't tell "not there" from "not looked yet" (an enquiry the line
    *  sync skips, an invoice credit read without billing) — then "nothing yet" is never flagged. */
   canFlagMissing = true,
 ): Decision {
-  const lines = read.lines.filter((l) => codesIn(l.text).includes(g.ref));
+  const code = g.voucher_code || g.ref;
+  const lines = read.lines.filter((l) => carries(codesIn(l.text), g));
   if (lines.length > 0) {
     const unknown = lines.some((l) => l.unitPrice === null || l.price === null);
     const discounted = unknown || lines.some((l) => (l.unitPrice ?? 0) > 0 && (l.price ?? 0) < (l.unitPrice ?? 0) - 0.0001);
     return {
       outcome: 'used', how: 'line', hhRef: lines.map((l) => l.id).join(','),
-      problem: discounted ? null : `The HireHop line with ${g.ref} isn't discounted — check the goodwill came off`,
+      problem: discounted ? null : `The HireHop line with ${code} isn't discounted — check the voucher came off`,
     };
   }
-  const notes = read.creditNotes.filter((c) => codesIn(c.description).includes(g.ref));
+  const notes = read.creditNotes.filter((c) => carries(codesIn(c.description), g));
   const approved = notes.filter((c) => c.approved);
   if (approved.length > 0) {
     const net = g.reserved_amount_ex_vat ?? g.amount_ex_vat;
@@ -120,14 +127,14 @@ export function decideGoodwill(
     const tooBig = gross > net * 1.2 + 0.01;
     return {
       outcome: 'used', how: 'credit_note', hhRef: approved.map((c) => c.number || '(no number)').join(','),
-      problem: tooBig ? `The credit note (£${gross.toFixed(2)}) is more than the credit (£${net.toFixed(2)}+VAT)` : null,
+      problem: tooBig ? `The credit note (£${gross.toFixed(2)}) is more than the voucher (£${net.toFixed(2)} + VAT)` : null,
     };
   }
-  if (notes.length > 0) return { outcome: 'waiting', problem: `The credit note with ${g.ref} is still a draft in HireHop` };
+  if (notes.length > 0) return { outcome: 'waiting', problem: `The credit note with ${code} is still a draft in HireHop` };
   const reservedAt = g.reserved_at ? new Date(g.reserved_at).getTime() : now.getTime();
   return {
     outcome: 'waiting',
-    problem: canFlagMissing && now.getTime() - reservedAt > WAIT_BEFORE_FLAG_MS ? `No line or credit note with ${g.ref} in HireHop yet` : null,
+    problem: canFlagMissing && now.getTime() - reservedAt > WAIT_BEFORE_FLAG_MS ? `No line or credit note with ${code} in HireHop yet` : null,
   };
 }
 
@@ -223,8 +230,8 @@ async function applyDecision(g: GoodwillCredit, d: Decision, missingJudged: bool
     if (r.rows.length > 0) {
       const lapsed = g.amount_ex_vat - amount;
       await noteGoodwill(g,
-        `🎁 Goodwill credit ${g.ref} found in HireHop (${d.how === 'line' ? 'on a line' : `credit note ${d.hhRef}`}) — used: £${amount.toFixed(2)}+VAT off.`
-        + (lapsed > 0.004 ? ` The other £${lapsed.toFixed(2)}+VAT lapses.` : '')
+        `🎟️ Voucher ${creditCode(g)} found in HireHop (${d.how === 'line' ? 'on a line' : `credit note ${d.hhRef}`}) — used: £${amount.toFixed(2)} + VAT off.`
+        + (lapsed > 0.004 ? ` The other £${lapsed.toFixed(2)} + VAT lapses.` : '')
         + (d.problem ? ` ⚠ ${d.problem}.` : ''),
         SYSTEM_USER_ID, [g.reserved_job_id]);
     }
@@ -248,33 +255,36 @@ async function linkFreeCredit(g: GoodwillCredit, jobId: string, reservedFor: 'hi
     [g.id, jobId, reservedFor],
   );
   if (r.rows.length === 0) return false;
-  await noteGoodwill(g, `🎁 Goodwill credit ${g.ref} found on this job in HireHop without being reserved in OP — linked to it.`, SYSTEM_USER_ID, [jobId]);
+  await noteGoodwill(g, `🎟️ Voucher ${creditCode(g)} found on this job in HireHop without being held for it in OP — linked to it.`, SYSTEM_USER_ID, [jobId]);
   return true;
 }
 
 async function tellLinked(g: GoodwillCredit, after: GoodwillCredit | null, job: { id: string; hh_job_number: number }) {
-  await tellOfferer(g, `Goodwill ${g.ref} used on job ${job.hh_job_number}`,
-    `${g.ref} (${g.owner_name}) was put on job ${job.hh_job_number} in HireHop without being reserved in OP. OP has linked it`
-    + `${after?.status === 'used' ? ` and marked it used (recorded at the full £${g.amount_ex_vat.toFixed(2)}+VAT; whatever didn't come off lapses)` : ''}.`,
+  await tellOfferer(g, `Voucher ${creditCode(g)} used on job ${job.hh_job_number}`,
+    `${creditCode(g)} (${g.owner_name}) was put on job ${job.hh_job_number} in HireHop without being held for it in OP. OP has linked it`
+    + `${after?.status === 'used' ? ` and marked it used (recorded at the full £${g.amount_ex_vat.toFixed(2)} + VAT; whatever didn't come off lapses)` : ''}.`,
     job.id);
 }
 
 /** The same code somewhere it shouldn't be: flag it on the credit, and tell the offerer once. */
 async function flagElsewhere(g: GoodwillCredit, job: { id: string; hh_job_number: number }) {
-  const where = g.reserved_job_number ? `job ${g.reserved_job_number}` : 'another job';
+  const code = creditCode(g);
+  const where = g.used_how === 'shop' ? `the shop till${g.used_hh_ref ? ` (${g.used_hh_ref})` : ''}`
+    : g.reserved_job_number ? `job ${g.reserved_job_number}` : 'another job';
   const problem = g.status === 'reserved' || g.status === 'used'
-    ? `${g.ref} is also on job ${job.hh_job_number} in HireHop — it's ${g.status} on ${where} and can only be used once`
-    : `${g.ref} is on job ${job.hh_job_number} in HireHop, but the credit is ${g.status}`;
+    ? `${code} is also on job ${job.hh_job_number} in HireHop — it's ${g.status === 'reserved' ? 'held' : 'used'} on ${where} and can only be used once`
+    : `${code} is on job ${job.hh_job_number} in HireHop, but the voucher is ${g.status}`;
   if (g.check_problem === problem) return;
   await setProblem(g.id, problem);
-  await tellOfferer(g, `Goodwill ${g.ref}: check job ${job.hh_job_number}`, problem, job.id);
+  await tellOfferer(g, `Voucher ${code}: check job ${job.hh_job_number}`, problem, job.id);
 }
 
-/** B: a GW code on a job's stored lines that isn't reserved there. */
+/** B: a voucher code on a job's stored lines that isn't held there. */
 async function handleCodeOnJob(ref: string, job: { id: string; hh_job_number: number }) {
-  const g = await getGoodwillByRef(ref);
+  const g = await getGoodwillByAnyCode(ref);
   if (!g) {
-    console.warn(`[goodwill-check] ${ref} is on job ${job.hh_job_number} but no such goodwill credit exists`);
+    // A voucher-shaped string that isn't one of ours (a part number, say) — nothing to do.
+    console.warn(`[goodwill-check] ${ref} is on job ${job.hh_job_number} but no such voucher exists`);
     return;
   }
   if (g.reserved_job_id === job.id && (g.status === 'reserved' || g.status === 'used')) return; // A's job
@@ -306,7 +316,7 @@ export async function runGoodwillCheck(): Promise<{ checked: number; codesSeen: 
     const jobs = await query(
       `SELECT id, hh_job_number, line_items::text AS lines FROM jobs
         WHERE is_deleted = false AND pipeline_status NOT IN ('lost', 'cancelled')
-          AND line_items::text ~* 'GW-[0-9]{4}'`,
+          AND line_items::text ~* '(GW-[0-9]{4}|[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4})'`,
     );
     for (const j of jobs.rows) {
       for (const ref of codesIn(j.lines)) {
@@ -356,7 +366,7 @@ export async function applyGoodwillFromBilling(jobId: string, billingData: unkno
     const job = jr.rows[0];
     if (!job) return;
     for (const ref of refs) {
-      let g = await getGoodwillByRef(ref);
+      let g = await getGoodwillByAnyCode(ref);
       if (!g) continue;
       if (g.status === 'offered') {
         if (!(await linkFreeCredit(g, job.id, 'invoice'))) continue;

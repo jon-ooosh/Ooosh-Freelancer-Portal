@@ -3021,7 +3021,7 @@ const templates: Record<string, EmailTemplate> = {
         Thanks,<br>Jon<br>Director, Ooosh! Tours Ltd
       </p>
       {{#if refLink}}<p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
-        {{refBefore}}<a href="{{refLink}}" style="color:#7B5EA7;">{{refLinkText}}</a>{{refAfter}}
+        {{refBefore}}<a href="{{refLink}}" style="color:#7B5EA7;">{{refLinkText}}</a>{{refAfter}}<em>you</em>{{refTail}}
       </p>{{/if}}
       {{#if noRefLink}}<p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
         Know a band who needs vans, backline or rehearsal space? Send them our way and ask them to mention your name.

@@ -19,6 +19,7 @@
  * through the Money tab's pending refund, and the job is never completed.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
@@ -61,17 +62,19 @@ interface Props {
   onRequestComplete?: () => void;
   /** Something changed money-wise — the Money tab reloads its own figures. */
   onChanged?: () => void;
+  /** Opens the Money tab's "Hold on account" for the job's overpaid money (CREDIT-ON-ACCOUNT-SPEC.md). */
+  onHoldOnAccount?: () => void;
 }
 
 type Act = { label: string; onClick: () => void; kind: 'primary' | 'secondary' | 'link' | 'amber' };
 
-export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, onRequestComplete, onChanged }: Props) {
+export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, onRequestComplete, onChanged, onHoldOnAccount }: Props) {
   const user = useAuthStore(s => s.user);
   const isManager = hasManagerRole(user?.role);
 
   const [plan, setPlan] = useState<CloseOutPlan | null>(null);
   const [result, setResult] = useState<CloseOutResult | null>(null);
-  const [busy, setBusy] = useState<'plan' | 'run' | 'sent' | 'target' | null>(null);
+  const [busy, setBusy] = useState<'plan' | 'run' | 'sent' | 'target' | 'hold' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showWhy, setShowWhy] = useState(false);
   // Before the hire is back the panel starts collapsed — see `notBack` below.
@@ -256,6 +259,28 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     }
   };
 
+  // "Stop holding" — a manager. Only OP's note changes; the money is back to "to sort" here.
+  const stopHolding = async () => {
+    const hold = plan.onAccount;
+    if (!hold) return;
+    const reason = window.prompt(`Stop holding the ${money(hold.amount)} on account for ${hold.clientName}?`
+      + `${hold.reservedJobNumber ? `\n\nIt is put aside for job ${hold.reservedJobNumber} — that goes too.` : ''}`
+      + '\n\nNothing moves in HireHop or Xero. Say why (e.g. "refunding it instead"):');
+    if (reason == null) return;
+    if (!reason.trim()) { setError('Say why it is no longer being held.'); return; }
+    setBusy('hold');
+    setError(null);
+    try {
+      const r = await api.post<{ data: { plan: CloseOutPlan } }>(`/account-credit/${hold.id}/release`, { reason: reason.trim() });
+      publishCloseOutPlan(jobId, r.data.plan);
+      onChanged?.();
+    } catch (e) {
+      setError(apiError(e, 'Could not stop holding it.'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const copyLink = async () => {
     if (!portalUrl) return;
     try {
@@ -312,9 +337,9 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       if (isManager) acts.push({ label: 'Allocate', onClick: () => void run(), kind: 'primary' });
       break;
     case 'credit':
-      title = `${money(view.credit)} overpaid — refund it or move it to another job`;
-      why = 'The client has paid more than the invoices need. Use Refund or Apply to another job on that payment in Payment History below. OP never decides this for you.';
-      acts = [];
+      title = `${money(view.credit)} overpaid — refund it, move it to another job, or hold it on account`;
+      why = 'The client has paid more than the invoices need. Hold it on account to keep it for their next hire (nothing moves until that job is invoiced), or use Refund or Apply to another job from the ⋯ on that payment in Payment History below. OP never decides this for you.';
+      acts = onHoldOnAccount ? [{ label: 'Hold on account', onClick: onHoldOnAccount, kind: 'secondary' }] : [];
       break;
     case 'refund':
       title = `${money(view.credit)} to refund to the client`;
@@ -407,7 +432,10 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
         )}
         {isManager && (
           <div className={notBack ? '' : 'ml-auto'}>
-            <RecordActionsMenu actions={[{ label: 'Offer goodwill credit…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setOfferingGoodwill(true) }]} />
+            <RecordActionsMenu actions={[
+              { label: 'Give a voucher…', title: 'Money off their next hire or what they owe — not a refund', onClick: () => setOfferingGoodwill(true) },
+              ...(plan.onAccount ? [{ label: 'Stop holding on account…', title: 'Back to money to refund or move — nothing changes in HireHop or Xero', onClick: () => void stopHolding() }] : []),
+            ]} />
           </div>
         )}
       </div>
@@ -523,6 +551,23 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
         {error && <p className="text-sm text-red-700">{error}</p>}
       </div>
 
+      {/* Overpaid money kept for the client's next hire — still on this job's payments. */}
+      {plan.onAccount && (
+        <div className="border-t border-blue-200 bg-blue-50 px-5 py-2.5 text-sm text-blue-900 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <span>
+            <b>{money(view.onAccount)} held on account</b> for {plan.onAccount.clientName}
+            <span className="text-xs text-blue-800">
+              {' '}· {plan.onAccount.reservedJobId
+                ? <>put aside for <Link to={`/jobs/${plan.onAccount.reservedJobId}?tab=money`} className="underline">job {plan.onAccount.reservedJobNumber}</Link></>
+                : 'free to use on their next job'}
+            </span>
+          </span>
+          <span className="text-xs text-blue-800">
+            Still on this job's payments in HireHop{plan.onAccount.heldByName ? ` · ${plan.onAccount.heldByName}, ${fmtDay(plan.onAccount.heldAt)}` : ''}
+          </span>
+        </div>
+      )}
+
       {/* How the invoice total was reached */}
       {hasInv && (
         <div className="border-t border-gray-200 px-5 py-2 text-sm">
@@ -541,15 +586,15 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
           {goodwillHere.map(g => (
             <div key={g.id} className="flex justify-between gap-3 py-1.5 border-b border-gray-100" title={g.check_problem || undefined}>
               <span className={g.status === 'used' && !g.check_problem ? 'text-gray-800' : 'text-amber-800'}>
-                Goodwill {g.ref}{' '}
+                Voucher {g.voucher_code || g.ref}{' '}
                 <span className="text-xs text-gray-500">
                   {g.status === 'used'
                     ? (g.used_how === 'credit_note' ? `credit note ${g.used_hh_ref ?? ''}` : 'off the hire') + ' — already in the figures'
-                    : 'reserved — not in HireHop yet'}
+                    : 'held — not in HireHop yet'}
                 </span>
                 {g.check_problem && <span className="block text-xs">⚠ {g.check_problem}</span>}
               </span>
-              <span className="tabular-nums text-gray-600">{money(g.used_amount_ex_vat ?? g.reserved_amount_ex_vat ?? g.amount_ex_vat)}+VAT</span>
+              <span className="tabular-nums text-gray-600">{money(g.used_amount_ex_vat ?? g.reserved_amount_ex_vat ?? g.amount_ex_vat)} + VAT</span>
             </div>
           ))}
           {paidSoFar >= PENNY && (

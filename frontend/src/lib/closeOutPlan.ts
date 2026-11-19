@@ -56,6 +56,18 @@ export interface CloseOutPlan {
   paymentTarget: { invoiceId: number; number: string } | null;
   /** A cancelled job (CANCELLATION-SPEC.md, the money end): the invoice is the fee; null otherwise. */
   cancellation?: CancellationPlan | null;
+  /** This job's unallocated hire money is held on account for the client (CREDIT-ON-ACCOUNT-SPEC.md); null when not. */
+  onAccount?: PlanHold | null;
+}
+/** Money overpaid on a job and kept there for the client's next hire. It has not moved. */
+export interface PlanHold {
+  id: string;
+  amount: number;
+  clientName: string;
+  heldByName: string | null;
+  heldAt: string;
+  reservedJobId: string | null;
+  reservedJobNumber: number | null;
 }
 export interface CancellationPlan {
   /** The retained fee ex VAT (transport and crew included) and inc VAT. */
@@ -165,8 +177,10 @@ export interface CloseOutView {
   blockers: string[];
   /** Still owed across the job's approved invoices. */
   owing: number;
-  /** Hire money held beyond what the invoices need. */
+  /** Hire money held beyond what the invoices need, still to be sorted (0 once it is held on account). */
   credit: number;
+  /** That same money once someone has chosen to hold it on account — a decision made, so no longer "to sort". */
+  onAccount: number;
   /** Paid so far across the approved invoices. */
   paid: number;
   /** Of `owing`, what sits on charge invoices raised after completion (not in the Financial Summary). */
@@ -193,7 +207,12 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
   const hasInv = plan.invoices.length > 0;
   const needsInvoice = !plan.fromLog && (inv.netToInvoice >= PENNY || inv.draft != null);
   const owing = plan.invoices.reduce((s, i) => s + i.owing, 0);
-  const credit = plan.surplus.reduce((s, x) => s + x.amount, 0);
+  // Held on account is a decision, like a refund would be: the surplus stops being "money
+  // to sort" and the job carries on to sent / paid / completed. A Completed job's record
+  // has no HireHop read, so the hold's own figure stands in.
+  const spare = plan.surplus.reduce((s, x) => s + x.amount, 0);
+  const onAccount = plan.onAccount ? (plan.fromLog ? plan.onAccount.amount : spare) : 0;
+  const credit = plan.onAccount ? 0 : spare;
   const onlyNotReturned = inv.blockers.length === 1 && inv.notReturned;
   const stillOut = onlyNotReturned && opts.isManager && needsInvoice;
   const open = plan.invoices.filter(i => i.owing >= PENNY);
@@ -251,7 +270,7 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
   return {
     stage, tone: look[stage][0], pill: look[stage][1], steps,
     stepsDone: steps.filter(s => s === 'done').length,
-    blockers, owing, credit, paid, chargeOwing, stillOut, open, stepNames: STEP_NAMES,
+    blockers, owing, credit, onAccount, paid, chargeOwing, stillOut, open, stepNames: STEP_NAMES,
   };
 }
 
@@ -304,7 +323,7 @@ function cancellationView(plan: CloseOutPlan, c: CancellationPlan): CloseOutView
   return {
     stage, tone, pill, steps,
     stepsDone: steps.filter(s => s === 'done').length,
-    blockers, owing, credit,
+    blockers, owing, credit, onAccount: 0,
     paid: plan.invoices.reduce((s, i) => s + (i.gross - i.owing), 0),
     chargeOwing: 0, stillOut: false, open, stepNames: CANCEL_STEP_NAMES,
   };

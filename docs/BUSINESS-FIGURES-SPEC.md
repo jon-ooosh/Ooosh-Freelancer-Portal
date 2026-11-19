@@ -167,7 +167,10 @@ optional dropdown, and the Worker passing `attribution`, `attribution_last`, `he
 
 ### 8a. Marketing page — step 2 (BUILT Nov 2026, migration 342)
 
-Jobs › Marketing (`/jobs/marketing`), **admin only** (page, nav item and every `/api/marketing` route).
+Jobs › Marketing (`/jobs/marketing`). Built admin-only; **since 18 Nov 2026 (jon) the page is open to every
+staff login for the Content tab (§8e), and Adverts, Tracked links, Review emails and Referrals are manager-tier**
+(`/api/marketing` and the two `/overview` routes take `MANAGER_ROLES`). Turning the review / referral emails on or
+off, "Send me a test" and the referral offer stay admin-only.
 
 - **Adverts** (`marketing_placements`): name, type (print / online / social / search ads / event /
   sponsorship / other), who with, cost, runs from–until, status (planned / live / ended / cancelled —
@@ -211,9 +214,8 @@ Jobs › Marketing (`/jobs/marketing`), **admin only** (page, nav item and every
   destination is the review box counts the scans) and postcards.
 - **Referrals** — BUILT, §8d below, with real vouchers since 17 Nov (GOODWILL-CREDIT-SPEC §16). Still to do:
   the van / kit-case postcards (§8d, "Cards") — parked, in `docs/reference/BACKLOG.md`.
-- **Content library (later, jon):** a register of the photos / videos used on Instagram etc. — the
-  files stay in the shared Google Drive; OP holds the link, description, where and when each was used,
-  and who to credit. On the Marketing page.
+- **Content library** — BUILT with the social media planner, §8e. Still to do: the studio sitters sending
+  their photos / videos in from the portal (§8e "Next").
 
 ### 8c. Jon's review request email (BUILT 13 Nov 2026, migration 344)
 
@@ -278,37 +280,38 @@ Offers are plain text jon rotates; each referral keeps the offer that was live.
   `referralBlockReason()` is every rule: not internal; not the referrer's own booking (a contact on it, or a
   member of its client org); a NEW client by `returning-client.ts` at the time the enquiry arrived; and not
   already referred (same client org or a shared contact). The link path skips quietly; staff see the reason.
-- **Both rewards are VOUCHERS** — a goodwill credit with a code (`GOODWILL-CREDIT-SPEC.md` §16, source
-  `'referral'`), amounts **inc VAT** on the offer (`referral_offers.friend_voucher_inc_vat` /
-  `referrer_voucher_inc_vat`, mig 349; the old `friend_credit_ex_vat` is no longer read — jon had typed it
-  meaning inc VAT, so it was copied across as typed, and the referrer's £ figure was lifted out of the reward text).
-  - **The friend's:** a manager presses "Give the £20 voucher" on the job, with "Email them the code" ticked by
-    default. It's made for the job's band / client (the goodwill owner rule) and held for this hire, so whoever
-    quotes sees it. The email is `referral_welcome_voucher` — Jon's wording, 17 Nov 2026: "Hi {name}, thanks for
-    getting in touch - {Sam} recommended us! As a welcome, there's a £20 voucher waiting for you, already set
-    against your hire (on bookings over £100). Your voucher code is K7QM-4XWP-C9TR, valid until {date}. Any
-    questions, just reply to this email. Jon" — to the job's client via `resolveClientEmailTarget()` (never
-    info@: a job with no client email gets nothing and the manager is told), once (`referrals.welcome_email_sent_at`,
-    un-stamped if the send fails); "Email them the code" on the job sends it later. Not behind the email switch —
-    a manager presses it. Once per referral.
-  - **The referrer's:** "Thank-you given…" makes it (ticked when the offer has a referrer voucher; the amount can
-    be changed) and its code goes in email 3. Made once (`referrals.reward_credit_id`) — pressing again after a
-    failed email reuses it.
-- **Thank-you due**: daily 10:20 UK (`runReferralRewardsDue()`) — a referral whose job is now Completed becomes
-  `reward_due` with a To Do for each admin (`source_type = 'referral'`, links to Marketing › Referrals). "Thank-you
-  given…" there (managers) records what they got and can send email 3; "Decline" needs a reason. Both close the
-  To Dos. Before then a referral reads its stage off the job (Enquired / Booked / Didn't book) — never stored.
+- **Both rewards are VOUCHERS** (`GOODWILL-CREDIT-SPEC.md` §16–17, source `'referral'`), amounts **inc VAT** on the
+  offer (`referral_offers.friend_voucher_inc_vat` / `referrer_voucher_inc_vat`, mig 349 — the old
+  `friend_credit_ex_vat` is no longer read), and **both are automatic** (jon, 18 Nov 2026 — they replaced a manager's
+  "Give the voucher" and an admin's "Thank-you given…"):
+  - **The friend's welcome voucher** is made the moment a referral is linked (link or "Referred by"), for the job's
+    band / client and held for their enquiry; while the referral emails are on, `referral_welcome_voucher` goes to the
+    job's client (`resolveClientEmailTarget()`, never info@) in Jon's words: "Hi {name}, thanks for getting in touch -
+    {Sam} recommended us! As a welcome, there's a £20 voucher waiting for you, already set against your hire (on
+    bookings over £100). Your voucher code is K7QM-4XWP-C9TR, valid until {date}. Any questions, just reply to this
+    email. Jon". Once (`welcome_email_sent_at`, un-stamped if the send fails); "Email them the code" on the job sends
+    it by hand. "Over £100" is staff's check, never OP's. **Taking the referral off (✕), or declining it, withdraws
+    an unused welcome voucher.** "Give the £20 voucher" stays on the job only for a referral linked before the offer
+    had an amount.
+  - **The referrer's thank-you voucher** is made when the friend's hire is **Completed** — at once on OP's Completed
+    (`routes/pipeline.ts` → `rewardReferralForJob()`); the 10:20 run (`runReferralRewardsDue()`) catches a completion
+    from HireHop or a missed one. `rewardReferral()` claims the referral first (→ `rewarded`), makes the voucher for
+    the referrer person (`reward_credit_id`), and — while the emails are on — sends email 3 with its code; the timeline
+    says whether it was emailed. If the voucher can't be made the claim is undone and the next run tries again. No To
+    Do, no thank-you window; a manager **Declines** a referral that shouldn't count (Marketing › Referrals). Before then
+    a referral reads its stage off the job (Enquired / Booked / Didn't book) — never stored.
 - **Emails**, from "Jon at Ooosh Tours", replies to jon@, never naming the friend:
-  - the review email's referral line becomes their own link + the offer: "Know a band who needs vans, backline
-    or rehearsal space? Send them your link - go.oooshtours.co.uk/r/sam-7k2p - and they'll get £20 off their
-    first hire. If they book, we'll send you a Tour Store voucher to say thanks." (no person → "mention your name");
+  - the review email's referral line becomes their own link + the offer (jon, 18 Nov 2026): "Know a band who needs
+    vans, backline or rehearsal space? Send them your unique link - go.oooshtours.co.uk/r/sam-7k2p - and they'll get
+    a £20 discount voucher off their first hire worth over £100. If they book, we'll send *you* a £20 discount voucher
+    for shop sales or hires too, to say thanks." ("you" in italics; no person → "mention your name");
   - **email 2** `referral_enquiry_thanks` — "someone you recommended has just been in touch with us!", once per
     referral, only while the friend's job is still an enquiry, **OFF until Marketing › Referrals turns it on**
     (`referral_emails_enabled`). It promises "We'll keep you updated if they confirm and complete a booking";
   - **email 2b** `referral_booked` — "Good news - the person you recommended has booked with us! Once their hire is
     done, we'll send you {reward} as promised." Daily 10:20, once per referral (`booked_email_sent_at`, mig 348),
     while the job is booked and not finished; same switch as email 2;
-  - **email 3** `referral_reward_thanks` — the thank-you itself, only when a person marks it given, ending with
+  - **email 3** `referral_reward_thanks` — the thank-you itself, sent automatically when the friend's hire is Completed, ending with
     their referral link and "You can use the same link as many times as you like!". "Here's a little thank-you:
     {what they got}", then, with a voucher: "Your voucher code is H3MU-ZXCB-86TU - £20 off a hire with us or in
     our shop, valid until 17th Nov 2027. It's single use, so just quote the code when you book or pay."
@@ -318,3 +321,52 @@ Offers are plain text jon rotates; each referral keeps the offer that was live.
   "Recommended by: ______" line the client fills in; the friend's form "Who recommended us?" catches the name and
   staff link it with "Referred by" → "Referral card". Unique per-card codes were rejected (somebody would have to
   record which card went in which van).
+
+### 8e. The social media planner — Marketing › Content (BUILT 18 Nov 2026, migration 351)
+
+jon, 17–18 Nov 2026. **OP plans; Meta Business Suite schedules and posts** (OP can't post to Meta without an app
+review). Mostly Matt's; **every staff login** sees it (the other Marketing tabs are manager-tier, §8a). All logic in
+`services/marketing-content.ts`, routes `routes/marketing-content.ts` (`/api/marketing-content`, `STAFF_ROLES`),
+screens `frontend/src/components/marketing/` (`ContentPlanner.tsx`, `PostEditor.tsx`, words and colours
+`contentCopy.ts`).
+
+- **A post** (`marketing_posts`) is one entry with its channels ticked (Instagram, Facebook, Newsletter, Blog — IG + FB
+  are usually the same post): name, goes-out date and time (UK; stored as `publish_at`, default 18:00; **no date = an
+  idea**), format (Reel / carousel / image / story / video / text post / newsletter issue / blog article — the editor
+  offers the ones that fit the channels), caption with the call to action (Instagram's 2,200 counted), hashtags and
+  mentions (counted; Instagram allows 30), a theme (free text, suggestions from the themes used before), status, owner
+  (assignable staff, stored as their person), the band / job / credited person, a **tracked link** for the call to
+  action (picked from Marketing › Tracked links, `GET /marketing-content/links` — so staff can pick one without seeing
+  the Links tab), the live post link once it's up, notes, and its content. **Never deleted** — "Drop it" sets
+  `dropped` (off the calendar, board and ideas).
+- **Statuses:** Idea → In progress → Review → Approved → Scheduled (in Meta) → Published, plus Dropped. A new post with a
+  date starts In progress, without one Idea. Moving a card on the board is a status change.
+- **The owner's To Do:** two days before a post goes out (from `REMIND_DAYS_BEFORE` days ahead to the day itself), if it is
+  still Idea / In progress / Review, its owner gets ONE To Do — "Get it approved: "…" goes out Thu 19 Nov at 19:30", due
+  today, `source_type = 'marketing_post'`, linking to `/jobs/marketing?tab=content&post=<id>` (opens the post). It's
+  re-checked on every save and daily at **09:16** (`runPostReminders()`): cancelled once the post is approved /
+  scheduled / published / dropped, moved further out, made an idea, its owner changes (the new owner gets it), or its
+  day has gone by. Never fails a save.
+- **The content library** (`marketing_assets`): photos, videos and graphics as **Google Drive links** (the files stay in
+  the shared Drive; `https://` only), with a kind, notes, the band / job / who took it, who added it and how many posts
+  use it. Archived, never deleted. A post's content is `marketing_post_assets`; a Drive link added from a post carries
+  the post's band / job / credit. `source` is `staff` or `sitter` (the sitter intake, below; shown as "from a sitter").
+- **Saved hashtag sets** (`marketing_hashtag_sets`, a name + the tags; same name replaces) — "Add a saved set" appends
+  one to the post, "Save these as a set" saves the post's.
+- **Views:** a month calendar (Monday first, UK days, click a day to plan a post on it), a board by status (published
+  posts leave it after 30 days), the ideas (no date) and the content library. "Copy for Meta" puts the caption and
+  hashtags on the clipboard. The view is remembered per browser.
+- **On a phone** (under 640px, `hooks/useIsPhone.ts`; jon, 18 Nov 2026 — "it'll be used on a mobile a fair bit"): the
+  calendar is **Coming up** — a week at a time, a row per day (today marked, empty days one line with a "+"), ‹ › step
+  a week, "Show the week after too" adds the next week below, and each post card has its own "Copy for Meta". The board
+  is one status at a time (pills with counts). The library is a list. The post editor fills the screen with **Save,
+  Close and Copy for Meta pinned to the bottom** (pinned on a laptop too); owner, theme, band, job, credit, tracked
+  link, live link, notes and "Drop it" fold under **More details**, which says what's filled in while closed. "+ New"
+  is a round button in the corner. Same data and routes as the laptop — layout only.
+- **Not built, on purpose:** reach / likes typed in (jon: the tracked links show the enquiries, which is what counts),
+  posting or scheduling from OP, file uploads (Drive holds the files).
+
+**Next (agreed in outline, jon 18 Nov 2026):** the studio sitters make a lot of the content — let them send photos /
+videos in from the portal (a Drive link or an upload, with a line on what it is), landing in the library as
+`source = 'sitter'` with `added_by_person_id`. The table already carries both columns.
+

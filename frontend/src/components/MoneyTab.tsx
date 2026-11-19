@@ -20,7 +20,10 @@ import CardReaderPayment, { type CardReaderAccess } from './CardReaderPayment';
 import RecipientPicker, { type PickedRecipient } from './RecipientPicker';
 import { newPaymentMethodAllowed } from '../lib/paymentMethods';
 import CloseOutMoneyPanel from './CloseOutMoneyPanel';
-import { CloseOutInvoice, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
+import { CloseOutInvoice, CloseOutPlan, closeOutView, loadCloseOutPlan, subscribeCloseOutPlan } from '../lib/closeOutPlan';
+import RecordActionsMenu, { type RecordAction } from './RecordActionsMenu';
+import HoldOnAccountModal from './account-credit/HoldOnAccountModal';
+import { jobClientName } from '../lib/jobOrgName';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
 import type { JobExcess } from '../../../shared/types';
 import { requiredDeposit } from '../lib/depositRule';
@@ -85,6 +88,8 @@ interface FinancialData {
     } | null;
     required_deposit: number;
     deposit_paid: boolean;
+    /** Money on account put aside for this job (CREDIT-ON-ACCOUNT-SPEC.md) — not in HireHop's balance until invoicing. */
+    on_account?: { total: number; covers: number; to_pay: number; items: Array<{ id: string; amount: number; source_job_id: string; source_job_number: number | null }> } | null;
     deposit_percent: number;
     deposits: Array<{
       id: number; amount: number; date: string;
@@ -454,9 +459,16 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   // HireHop job, so the balance below can't see them — read them off the shared close-out
   // plan (the panel's own read; no second HireHop call).
   const [chargeInvoices, setChargeInvoices] = useState<CloseOutInvoice[]>([]);
+  // The same plan says whether money is overpaid here and still to sort, or already held
+  // on account (docs/CREDIT-ON-ACCOUNT-SPEC.md) — the payment rows' ⋯ menu reads it.
+  const [closePlan, setClosePlan] = useState<CloseOutPlan | null>(null);
+  const [showHoldOnAccount, setShowHoldOnAccount] = useState(false);
   useEffect(() => {
     if (job?.is_internal || !job?.hh_job_number) return;
-    const take = (p: { invoices: CloseOutInvoice[] }) => setChargeInvoices(p.invoices.filter(i => i.chargeOnly && i.owing >= 0.005));
+    const take = (p: CloseOutPlan) => {
+      setChargeInvoices(p.invoices.filter(i => i.chargeOnly && i.owing >= 0.005));
+      setClosePlan(p);
+    };
     const unsub = subscribeCloseOutPlan(jobId, take);
     loadCloseOutPlan(jobId).then(take).catch(() => undefined);
     return unsub;
@@ -467,6 +479,15 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   // Once the hire is back the close-out panel takes over; the pre-hire deposit prompts go.
   const hireIsBack = ['returned', 'returned_incomplete', 'completed'].includes(job?.pipeline_status);
   const canManage = hasManagerRole(role);
+  // Overpaid and nobody has decided yet → "Hold on account" is on offer; once held, Refund
+  // and Apply to another job ask first, because that money is promised.
+  const closeView = closePlan ? closeOutView(closePlan, { isManager: canManage }) : null;
+  const spareToHold = closeView?.stage === 'credit' ? closeView.credit : 0;
+  const heldOnAccount = closePlan?.onAccount ?? null;
+  const okWhileHeld = (doing: string) => !heldOnAccount || window.confirm(
+    `£${heldOnAccount.amount.toFixed(2)} on this job is held on account for ${heldOnAccount.clientName}`
+    + `${heldOnAccount.reservedJobNumber ? `, put aside for job ${heldOnAccount.reservedJobNumber}` : ''}.`
+    + `\n\n${doing} takes it from that. Carry on?`);
   const [showResolveBalance, setShowResolveBalance] = useState(false);
   const [balReason, setBalReason] = useState('xero_settled');
   const [balNotes, setBalNotes] = useState('');
@@ -1399,7 +1420,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
             <div className="flex items-center justify-between">
               <p className={`text-sm font-semibold ${financial.balance_override ? 'text-gray-400 line-through' : hasOutstanding(financial.balance_outstanding) ? 'text-red-600' : 'text-amber-700'}`}>
                 {!financial.balance_override && !hasOutstanding(financial.balance_outstanding)
-                  ? <>In credit: £{Math.abs(financial.balance_outstanding).toFixed(2)}</>
+                  ? <>In credit: £{Math.abs(financial.balance_outstanding).toFixed(2)}{heldOnAccount && <span className="font-normal text-blue-800"> · held on account for {heldOnAccount.clientName}</span>}</>
                   : <>Balance Outstanding: £{financial.balance_outstanding.toFixed(2)}</>}
               </p>
               {/* Admin: resolve a stray HH balance the business considers settled
@@ -1490,6 +1511,27 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
             )}
             {balError && <p className="text-xs text-red-600 mt-1">{balError}</p>}
 
+            {/* The client's own money from an earlier job, put aside for this one. HireHop
+                (and so the balance above) doesn't know about it until this job is invoiced —
+                this is the figure to ask the client for meanwhile. */}
+            {financial.on_account && !financial.balance_override && (
+              <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-900">
+                <p>
+                  <span className="font-semibold">£{financial.on_account.total.toFixed(2)} on account</span>{' '}
+                  from {financial.on_account.items.map((c, i) => (
+                    <span key={c.id}>{i > 0 && ', '}<Link to={`/jobs/${c.source_job_id}?tab=money`} className="underline">job {c.source_job_number ?? '—'}</Link></span>
+                  ))}
+                  {hasOutstanding(financial.balance_outstanding)
+                    ? <> comes off at invoicing. <span className="font-semibold">To pay now: £{financial.on_account.to_pay.toFixed(2)}</span></>
+                    : <> is put aside for this job; nothing is owed on it at the moment.</>}
+                </p>
+                {financial.on_account.total - financial.on_account.covers > 0.005 && hasOutstanding(financial.balance_outstanding) && (
+                  <p className="text-xs mt-0.5">More than this job owes: the other £{(financial.on_account.total - financial.on_account.covers).toFixed(2)} stays on account.</p>
+                )}
+                <p className="text-xs text-blue-800 mt-0.5">HireHop and the payment link still show the full balance until then.</p>
+              </div>
+            )}
+
             {/* Deposit to Secure info — a pre-hire prompt; noise once the hire is back. */}
             {!hireIsBack && financial.hire_value_inc_vat > 0 && !financial.deposit_paid && (
               <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
@@ -1498,7 +1540,8 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                   {financial.hire_value_inc_vat < 400
                     ? `Full payment required: £${financial.hire_value_inc_vat.toFixed(2)} (jobs under £400)`
                     : <>
-                        Minimum deposit (25%): <span className="font-bold">£{financial.required_deposit.toFixed(2)}</span>
+                        Minimum deposit (25%): <span className="font-bold">£{Math.max(0, financial.required_deposit - (financial.on_account?.total ?? 0)).toFixed(2)}</span>
+                        {financial.on_account && <> (£{financial.required_deposit.toFixed(2)} less what's on account)</>}
                         {' · '}Half: £{(financial.hire_value_inc_vat * 0.5).toFixed(2)}
                         {' · '}Full: £{financial.hire_value_inc_vat.toFixed(2)}
                       </>
@@ -1509,7 +1552,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
             {!hireIsBack && financial.deposit_paid && hasOutstanding(financial.balance_outstanding) && (
               <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
                 <p className="text-xs text-green-700">
-                  Deposit secured. Remaining balance: <span className="font-semibold">£{financial.balance_outstanding.toFixed(2)}</span>
+                  Deposit secured{financial.on_account ? ' (counting what\'s on account)' : ''}. Remaining balance: <span className="font-semibold">£{(financial.on_account ? financial.on_account.to_pay : financial.balance_outstanding).toFixed(2)}</span>
                 </p>
               </div>
             )}
@@ -1532,7 +1575,12 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
           onRecordPayment={() => setShowPaymentForm(true)}
           onRequestComplete={onRequestComplete}
           onChanged={loadData}
+          onHoldOnAccount={() => setShowHoldOnAccount(true)}
         />
+      )}
+      {showHoldOnAccount && (
+        <HoldOnAccountModal jobId={jobId} amount={spareToHold} clientName={jobClientName(job)}
+          onClose={() => setShowHoldOnAccount(false)} />
       )}
 
       {/* VAT Adjustment (international hires) */}
@@ -2145,24 +2193,25 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                     {/* Only a real HireHop payment (a deposit) can be refunded. The other
                         rows — "Excess applied to hire invoice", credit moved between jobs,
                         a payment typed straight onto an invoice — aren't money the client
-                        sent us here, and the refund route can't act on them (job 16491). */}
-                    {!dep.is_refund && dep.is_deposit && (
-                      <button
-                        onClick={() => openRefundModal(dep)}
-                        className="text-xs text-ooosh-600 hover:text-ooosh-700 underline"
-                      >
-                        Refund
-                      </button>
-                    )}
-                    {!dep.is_refund && dep.is_deposit && canManage && (
-                      <button
-                        onClick={() => openApplyModal(dep)}
-                        className="text-xs text-ooosh-600 hover:text-ooosh-700 underline whitespace-nowrap"
-                        title="Apply this credit to a same-client invoice on another job"
-                      >
-                        Apply to another job
-                      </button>
-                    )}
+                        sent us here, and the refund route can't act on them (job 16491).
+                        One ⋯ per row rather than a link each (jon, Nov 2026 — it crowded a
+                        phone). "Hold on account" is the JOB's whole overpaid amount, whichever
+                        row it is opened from, and only shows while there is some to decide on. */}
+                    {(() => {
+                      if (dep.is_refund || !dep.is_deposit) return null;
+                      const actions: RecordAction[] = [
+                        { label: 'Refund', onClick: () => { if (okWhileHeld('Refunding')) openRefundModal(dep); } },
+                      ];
+                      if (canManage) actions.push({
+                        label: 'Apply to another job', title: 'Apply this credit to a same-client invoice on another job',
+                        onClick: () => { if (okWhileHeld('Applying it to another job')) openApplyModal(dep); },
+                      });
+                      if (spareToHold >= 0.005) actions.push({
+                        label: 'Hold on account', title: `Keep the £${spareToHold.toFixed(2)} overpaid on this job for the client's next hire`,
+                        onClick: () => setShowHoldOnAccount(true),
+                      });
+                      return <RecordActionsMenu floating actions={actions} />;
+                    })()}
                   </div>
                 </div>
               ))}

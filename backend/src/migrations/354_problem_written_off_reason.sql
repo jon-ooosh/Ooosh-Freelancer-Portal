@@ -1,5 +1,5 @@
 -- ============================================================================
--- 350: "Written off" is a resolution REASON now, not a Problem status
+-- 354: "Written off" is a resolution REASON now, not a Problem status
 -- ============================================================================
 -- docs/INCIDENT-CLAIMS-SPEC.md §23.1. Since §23 a resolved Problem says how it
 -- was resolved (Repaired / Replaced / Found / Written off / No action / Other),
@@ -21,7 +21,7 @@
 INSERT INTO job_issue_events (issue_id, event_type, body, metadata, created_by)
 SELECT ji.id, 'status_change',
        'Written off is now a reason, not a status — moved to Resolved (written off)',
-       jsonb_build_object('from_status', 'written_off', 'to_status', 'resolved', 'migration', '350'),
+       jsonb_build_object('from_status', 'written_off', 'to_status', 'resolved', 'migration', '354'),
        '00000000-0000-0000-0000-000000000000'::uuid
 FROM job_issues ji
 WHERE ji.status = 'written_off'
