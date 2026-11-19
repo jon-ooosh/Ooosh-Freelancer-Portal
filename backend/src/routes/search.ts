@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, STAFF_ROLES, authorize, AuthRequest } from '../middleware/auth';
 import { optionCountSql } from '../services/job-groups';
+import { pureSupplierSql } from '../services/org-types';
 
 const router = Router();
 router.use(authenticate);
@@ -17,6 +18,10 @@ router.use(authorize(...STAFF_ROLES));
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const { q, limit = '20' } = req.query;
+    // New Enquiry's client picker: pure suppliers are left out of the
+    // organisations and listed apart ("1 supplier matches · show"). People are
+    // never hidden — searching a name means you want them (PREMISES-COMPLIANCE-SPEC §8).
+    const forClient = req.query.purpose === 'client';
     if (!q || (q as string).trim().length < 2) {
       res.json({ results: [] });
       return;
@@ -45,13 +50,23 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     // Search organisations
     // (no change to limit logic — perType applies per-entity-type)
     const orgResults = await query(
-      `SELECT id, name, type as subtitle, 'organisation' as type
-       FROM organisations
-       WHERE is_deleted = false AND name ILIKE $1
-       ORDER BY name
+      `SELECT o.id, o.name, o.type as subtitle, 'organisation' as type
+       FROM organisations o
+       WHERE o.is_deleted = false AND o.name ILIKE $1
+         ${forClient ? `AND NOT ${pureSupplierSql('o')}` : ''}
+       ORDER BY o.name
        LIMIT $2`,
       [searchTerm, perType]
     );
+    const hiddenSuppliers = forClient
+      ? (await query(
+          `SELECT o.id, o.name, o.type as subtitle, 'organisation' as type
+             FROM organisations o
+            WHERE o.is_deleted = false AND o.name ILIKE $1 AND ${pureSupplierSql('o')}
+            ORDER BY o.name LIMIT $2`,
+          [searchTerm, perType],
+        )).rows
+      : undefined;
 
     // Search venues
     const venueResults = await query(
@@ -130,6 +145,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         ...projectResults.rows,
         ...jobResults.rows,
       ],
+      ...(hiddenSuppliers ? { hidden_suppliers: hiddenSuppliers } : {}),
     });
   } catch (error) {
     console.error('Search error:', error);

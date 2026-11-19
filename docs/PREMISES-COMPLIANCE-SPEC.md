@@ -1,7 +1,7 @@
 # Premises & compliance — spec
 
-**Status: PHASE 1 BUILT (PR 1), 19 Nov 2026 — §12 is what shipped and where it differs from the plan; read it
-first.** Phase S (suppliers) and phases 2–3 are not built. Mockups (v1, before the decisions below):
+**Status: PHASE 1 BUILT (PR 1) and PHASE S BUILT (PR 2), 19 Nov 2026 — §12 and §13 are what shipped and where
+it differs from the plan; read them first.** Phases 2–3 are not built. Mockups (v1, before the decisions below):
 https://claude.ai/artifact/GnedY9eyyMDydPUKMg2tJK — Mockup A's place chips, visibility and "Book the next
 visit" are described here, not drawn there yet.
 
@@ -327,3 +327,25 @@ tests and renewals carry who recorded them.
 **Not built yet:** Phase S (suppliers out of the client pickers, `also_types`), phase 2 (meter readings, the
 fire-alarm call-point rotation), phase 3 (documents library, booking a visit onto the staff calendar,
 advisories → To Do, Costs links). The R2 file backup is in `BACKLOG.md`.
+
+---
+
+## §13 Phase S — what shipped (PR 2, 19 Nov 2026)
+
+**Suppliers out of the client pickers, and "Also" types.** Migration **356**: `organisations.also_types TEXT[]`
+(default empty). The two definitions live in `services/org-types.ts`: `orgHasTypeSql()` (main type OR an "Also"
+type) and `pureSupplierSql()` (main type Supplier and nothing else in "Also"); `cleanAlsoTypes()` tidies what a
+form sends (lower case, no duplicates, never the main type — changing the main type drops it from the list).
+
+- **Organisation form:** an "Also" row of type chips under Type; the org page header shows "also supplier" etc.
+- **Hidden from (pure suppliers only):** New Enquiry's client picker (`GET /search?purpose=client`) and a job's
+  client picker on Job Detail (`GET /organisations?client_picker=1`). Both answer the hidden ones separately as
+  `hidden_suppliers`; the picker shows "N suppliers match · show". A hidden supplier with the exact name typed
+  still stops "Create … as new client" (it would make a duplicate) and is never auto-linked.
+- **Still found everywhere else:** the top-bar search, the Organisations page, and the **linked organisations**
+  pickers on New Enquiry and Job Detail — "Supplier" is one of the roles there, so hiding suppliers would be wrong.
+  People are never hidden.
+- **Organisations page type filter** matches main OR "Also", so "Supplier" finds a promoter that also supplies us.
+
+**Where it differs from §8:** the linked-organisations pickers were in the original list and are left alone
+(above).

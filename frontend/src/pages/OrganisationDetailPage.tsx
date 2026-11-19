@@ -33,6 +33,8 @@ interface OrgDetail {
   id: string;
   name: string;
   type: string;
+  /** "Also" types beyond the main one (mig 356). */
+  also_types?: string[] | null;
   website: string | null;
   email: string | null;
   phone: string | null;
@@ -575,6 +577,11 @@ function OrganisationDetailContent() {
               <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${typeColors[org.type] || 'bg-gray-100 text-gray-700'}`}>
                 {org.type}
               </span>
+              {(org.also_types ?? []).map(t => (
+                <span key={t} className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${typeColors[t] || 'bg-gray-100 text-gray-700'}`}>
+                  also {t.replace(/_/g, ' ')}
+                </span>
+              ))}
             </div>
             {org.parent_name && org.parent_id && (
               <p className="mt-1 text-sm text-gray-500">
