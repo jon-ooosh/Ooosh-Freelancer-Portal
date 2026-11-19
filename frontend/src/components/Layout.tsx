@@ -53,6 +53,7 @@ const navItems: NavItem[] = [
       { path: '/operations/carnets', label: 'Carnets' },
       { path: '/operations/rehearsals', label: 'Rehearsals' },
       { path: '/operations/problems', label: 'Problems' },
+      { path: '/operations/premises', label: 'Premises & compliance' },
     ],
   },
   {

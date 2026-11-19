@@ -155,7 +155,8 @@ on an employee (`services/staff-doc-cycles.ts`). Same words, different people, d
 consequence. Never merge them.
 
 **`staff_record_files` objects live under the `staff-records/` R2 prefix, and that
-prefix (with `claims/` and, admin-only, `calls/`) is the ONLY one `GET /api/files/download` role-gates.** Every
+prefix (with `claims/`, admin-only `calls/`, and `premises/` — gated PER FILE by its check's visibility,
+`premises.ts` `canOpenPremisesFile()`) is the ONLY one `GET /api/files/download` role-gates.** Every
 other prefix it serves is readable by EVERY staff login whatever their role (the
 route is staff-only since Oct 2026; `backups/` is no longer on it). Never file
 anything private under `files/`.
@@ -395,12 +396,14 @@ Google Drive links, saved hashtag sets, a tracked link per post. **OP plans; Met
 post from OP. The owner gets ONE To Do two days before a post that isn't approved (`source_type = 'marketing_post'`,
 09:16 run + every save). Posts are dropped, content archived — never deleted. Next: studio sitters sending content in.
 
-**DRAFT, 19 Nov 2026:** `docs/PREMISES-COMPLIANCE-SPEC.md` — Operations › Premises & compliance: the checks that
-keep the two buildings, the yard and the company legal and serviced (visits, in-house tests, meter readings,
-renewals), a certificate kept against every visit, reminders as To Dos (`source_type = 'premises_check'`, one open
-per check, dates from `task-recurrence.ts`), per-check visibility (everyone / managers / admins), files under a new
-`premises/` prefix gated per file. §1 is settled, §8 keeps Supplier orgs out of the client pickers, §10 the open
-questions. Nothing built.
+**PHASE 1 BUILT, 19 Nov 2026:** `docs/PREMISES-COMPLIANCE-SPEC.md` — Operations › Premises & compliance
+(`/operations/premises`): the checks that keep Compass House, the Rear Unit, Beach Yard and the company legal and
+serviced (contractor visits, in-house tests, renewals; meter readings are phase 2), a record with its certificates
+every time one is done, reminders as To Dos (`source_type = 'premises_check'`, ONE open per check, daily 09:17;
+a Fail makes a `premises_fix` To Do), repeats from `task-recurrence.ts` (after the last one, or on a fixed date
+like every 1 Jan), a certificate's date wins, per-check visibility (everyone / managers / admins — a hidden
+check is a 404). All logic `services/premises.ts` + pure `premises-rules.ts`. **§12 is what shipped; read it
+first.** Not built: suppliers out of the client pickers (Phase S, §8), meters, documents library, calendar visits.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
@@ -588,6 +591,7 @@ existing definition:
 | A card-reader (S700) payment — sending, waiting, recording, test mode, who may use it | `services/stripe-terminal.ts` — `terminal_sessions` is the record AND the once-only gate; recorded through `recordPayment()` as `stripe_gbp` + `source = 'stripe_terminal'`; gated by `system_settings.stripe_terminal_roles` |
 | Which jobs belong to the same festival? Its value, lead, default dates | `services/job-projects.ts` (`getProject()` roll-ups; quote options inside count once) |
 | A referral — who recommended this client, does it count, the personal link, the thank-you, the friend's welcome voucher | `services/referrals.ts` — `referralBlockReason()` is every rule; both vouchers are automatic (`autoWelcomeVoucher()` on linking, `rewardReferral()` on Completed); wording / codes in `referral-rules.ts`; vouchers go through `goodwill-credits.ts`, never their own money path |
+| A premises check — who may see it, is it overdue, when is it next due once done, its owner's To Do, may this role open its file? | `services/premises-rules.ts` (pure: `canSee()`, `checkStatus()`, `nextDueAfterRecord()`, `reminderTitle()`) + `services/premises.ts` (`syncCheckReminder()` after every write, `canOpenPremisesFile()`); repeats are `task-recurrence.ts`, never a second date engine (`PREMISES-COMPLIANCE-SPEC.md`) |
 | A social post, its owner's To Do, the content library, hashtag sets | `services/marketing-content.ts` — `syncPostReminder()` keeps ONE open To Do per post (call it after any write); words and colours `frontend/src/components/marketing/contentCopy.ts`. OP never posts to Meta |
 | Jon's review email — who, when, why not, the "don't send" tick, opt-outs | `services/review-requests.ts` — one `review_requests` row per job, written before the send; `reviewDecision()` is every rule |
 | Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
@@ -716,7 +720,7 @@ Backups 02:00 · job financials 03:00 · Traccar backup + 12-month GPS purge 03:
 bill payment pull-back 07:50 · compliance 08:00 ·
 chase alerts 08:10 · auto-chase runner 08:10 · payroll report 08:20 (last month's, once, from the 1st) · lock-up chaser 08:45 · staff time digest
 08:45 · return-to-work chase 08:50 · stale-enquiry
-auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · social post reminders 09:16 · referral safety-net 09:18 · storage reminders
+auto-lose 09:00 · freelancer offer chase 09:05 · carnet forms 09:15 · social post reminders 09:16 · premises reminders 09:17 · referral safety-net 09:18 · storage reminders
 09:20 · claim client chase 09:21 · claim check dates + GPS capture 09:22 · holding reminders 09:25 · close-out chase 09:30 · staff documents 09:35 ·
 pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, list items to watchers, to-do follow-ups, record action dates, reviews due, absence-detail purge) · Stripe pre-auth discovery 09:50 · year-end cash-out reminder
 09:55 (sends 2 January) · company-days prompt 09:58 (November) · OOH reminders 10:00 (hirers) · Jon's review emails 10:15 (off until switched on, `review_requests_enabled`) · referral thank-yous due 10:20 · freelancer out-of-hours emails every 30 min 10:00–20:30 UK · sitter task summary 16:00 ·
