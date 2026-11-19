@@ -1140,6 +1140,33 @@ describe('a cancelled job (job 16739)', () => {
     expect(opWrites.some((w) => w.sql.includes('UPDATE job_requirements'))).toBe(false);   // not reconciled yet
   });
 
+  it('what is left can be HELD ON ACCOUNT instead of refunded: settled, no refund sentence, the reminder left alone', async () => {
+    await runHireCloseOut('16739', 'u-jon');
+    opWrites.length = 0;
+    mockHold.mockResolvedValue({ id: 'ac9', amount: 1485, clientName: 'The Band', heldByName: 'Jon', heldAt: 'now', reservedJobId: null, reservedJobNumber: null });
+    try {
+      const plan = await planHireCloseOut('16739');
+      expect(mockHold).toHaveBeenLastCalledWith(expect.any(String), 1485);   // the hold follows HireHop here too
+      expect(plan.surplus).toEqual([{ depositId: 9412, amount: 1485 }]);
+      expect(plan.sentences.join(' ')).toContain('held on account for The Band');
+      expect(plan.sentences.join(' ')).not.toContain('Refund £1485.00');
+      expect(plan.cancellation!.settled).toBe(true);
+      // Pressing the button again must not bring the refund reminder back.
+      const r = await runHireAllocation('16739', 'u-jon');
+      expect(r.message).toContain('£1485.00 is held on account for The Band');
+      expect(opWrites.filter((w) => w.sql.includes('job_payments'))).toEqual([]);
+      expect(posts('/frames/status_save.php')).toEqual([]);   // still never completed
+    } finally {
+      mockHold.mockResolvedValue(null);
+    }
+  });
+
+  it('before the fee is invoiced a hold is never refreshed from the plan — every payment looks spare then', async () => {
+    mockHold.mockClear();
+    await planHireCloseOut('16739');
+    expect(mockHold).toHaveBeenLastCalledWith(expect.any(String), null);
+  });
+
   it('settled once the rest is refunded', async () => {
     await runHireCloseOut('16739', 'u-jon');
     hh.deposits.find((d) => d.id === 9412)!.allocated = 1485;           // the refund (OWNER 0), with OP's record of it

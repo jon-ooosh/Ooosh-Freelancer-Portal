@@ -285,7 +285,11 @@ export function closeOutView(plan: CloseOutPlan, opts: { isManager: boolean }): 
 function cancellationView(plan: CloseOutPlan, c: CancellationPlan): CloseOutView {
   const inv = plan.invoice;
   const owing = plan.invoices.reduce((s, i) => s + i.owing, 0);
-  const credit = plan.surplus.reduce((s, x) => s + x.amount, 0);
+  // Held on account instead of refunded (the client asked us to keep it for their next
+  // booking): a decision made, so it stops being a refund due — as on a finished hire.
+  const spare = plan.surplus.reduce((s, x) => s + x.amount, 0);
+  const onAccount = plan.onAccount ? spare : 0;
+  const credit = plan.onAccount ? 0 : spare;
   const open = plan.invoices.filter(i => i.owing >= PENNY);
   const needsInvoice = inv.netToInvoice >= PENNY;
   const noFee = c.feeNet < PENNY;
@@ -325,7 +329,7 @@ function cancellationView(plan: CloseOutPlan, c: CancellationPlan): CloseOutView
   return {
     stage, tone, pill, steps,
     stepsDone: steps.filter(s => s === 'done').length,
-    blockers, owing, credit, onAccount: 0,
+    blockers, owing, credit, onAccount,
     paid: plan.invoices.reduce((s, i) => s + (i.gross - i.owing), 0),
     chargeOwing: 0, stillOut: false, open, stepNames: CANCEL_STEP_NAMES,
   };

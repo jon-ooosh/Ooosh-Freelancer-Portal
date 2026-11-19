@@ -347,7 +347,10 @@ close-out button applies it** — planned after the job's own payments as alloca
 source job's own unallocated payments, read back on both jobs, Xero through the existing `sourceJobRows()` path
 (**the application's description must start with the source job number**); the arrival hook never applies it.
 **PR 4 (§7): the payment portal** counts it as paid (`job-lookup` → `credit_on_account`), so the client is asked
-for the reduced balance and deposit.
+for the reduced balance and deposit. **§8: a CANCELLED job's refund due can be held the same way** (once its fee is
+invoiced; the pending refund is cleared as "Held on account for their next booking",
+`cancellation-close.ts` `clearRefundRemindersHeld()`, and comes back on Stop holding), and Money › Overview has a
+"Held on Account" card (`listAllHeld()`, oldest first, "Not on a job yet" in amber).
 
 **PHASES 1–3 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
 (Money › Cash forecast, `/money/cashflow`): the committed line by week and the next 14 days by day,

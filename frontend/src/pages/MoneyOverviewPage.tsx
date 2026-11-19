@@ -9,6 +9,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import type { AccountCredit } from '../lib/accountCredit';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { hasManagerRole } from '../lib/roles';
 import IncomingPaymentsPanel from '../components/IncomingPaymentsPanel';
@@ -55,7 +56,10 @@ interface OverviewData {
   excess_held: ExcessHeldRow[];
   pending_refunds: PendingRefundRow[];
   client_overpaid: ClientOverpaidRow[];
+  /** Clients' own money kept for their next hire (docs/CREDIT-ON-ACCOUNT-SPEC.md §9), oldest first. */
+  held_on_account?: AccountCredit[];
   totals: {
+    held_on_account?: number; held_on_account_count?: number;
     balance_outstanding: number; balances_count: number;
     balances_resolved_total: number; balances_resolved_count: number;
     deposits_pending_count: number;
@@ -76,7 +80,7 @@ const gbp = (n: number | string | null) =>
 // Filter prefs persist across navigation (localStorage) — staff set their view
 // once and it holds when they come back.
 type Timing = 'all' | 'finished' | 'upcoming';
-type Tab = 'balances' | 'deposits' | 'excess' | 'refunds';
+type Tab = 'balances' | 'deposits' | 'excess' | 'refunds' | 'onaccount';
 const PREFS_KEY = 'ooosh_money_overview_prefs';
 interface OverviewPrefs { tab: Tab; includeSpeculative: boolean; balancesTiming: Timing; excessTiming: Timing; groupByClient: boolean; showResolved: boolean }
 const DEFAULT_PREFS: OverviewPrefs = { tab: 'balances', includeSpeculative: false, balancesTiming: 'all', excessTiming: 'all', groupByClient: false, showResolved: false };
@@ -86,7 +90,7 @@ function loadPrefs(): OverviewPrefs {
     if (raw) {
       const p = { ...DEFAULT_PREFS, ...JSON.parse(raw) } as OverviewPrefs;
       // Guard against stale/garbage values from older builds.
-      if (!['balances', 'deposits', 'excess', 'refunds'].includes(p.tab)) p.tab = DEFAULT_PREFS.tab;
+      if (!['balances', 'deposits', 'excess', 'refunds', 'onaccount'].includes(p.tab)) p.tab = DEFAULT_PREFS.tab;
       if (!['all', 'finished', 'upcoming'].includes(p.balancesTiming)) p.balancesTiming = 'all';
       if (!['all', 'finished', 'upcoming'].includes(p.excessTiming)) p.excessTiming = 'all';
       return p;
@@ -875,6 +879,8 @@ export default function MoneyOverviewPage() {
   const filteredBalanceTotal = balancesFiltered.reduce((s, r) => s + parseFloat(r.balance_outstanding), 0);
   const balancesViewLabel = balancesTiming === 'all' ? '' : balancesTiming === 'finished' ? ' · finished only' : ' · upcoming only';
 
+  const heldRowsData = data.held_on_account ?? [];
+  const heldFree = heldRowsData.filter((c) => c.status === 'held');
   const cards: { key: typeof tab; label: string; value: string; sub: string; subNode?: React.ReactNode; accent: string }[] = [
     { key: 'balances', label: 'Balances Outstanding', value: gbp(filteredBalanceTotal), sub: `${balancesFiltered.length} owing${balancesViewLabel}${t.balances_resolved_count ? ` · ${t.balances_resolved_count} resolved` : ''}`, accent: 'text-red-700' },
     { key: 'deposits', label: 'Deposits Pending', value: String(t.deposits_pending_count), sub: 'confirmed, no deposit yet', accent: 'text-amber-700' },
@@ -910,6 +916,21 @@ export default function MoneyOverviewPage() {
             <> {' · '}<span className="text-amber-700 font-medium">{gbp(t.client_overpaid)} overpaid</span>
               <span className="text-gray-400"> ({t.client_overpaid_count})</span></>
           )}
+        </>
+      ),
+    },
+    {
+      // Not owed back and not income yet: the client's own money, overpaid on an earlier job
+      // (or left after a cancellation) and kept for their next one at their request.
+      key: 'onaccount',
+      label: 'Held on Account',
+      value: gbp(t.held_on_account ?? 0),
+      accent: 'text-blue-800',
+      sub: `${heldRowsData.length} client hold${heldRowsData.length === 1 ? '' : 's'}`,
+      subNode: (
+        <>
+          {heldRowsData.length} hold{heldRowsData.length === 1 ? '' : 's'}
+          {heldFree.length > 0 && <> {' · '}<span className="text-amber-700 font-medium">{gbp(heldFree.reduce((s, c) => s + c.amount, 0))} not on a job yet</span></>}
         </>
       ),
     },
@@ -998,6 +1019,23 @@ export default function MoneyOverviewPage() {
     ],
   }));
 
+  const heldRows: Row[] = heldRowsData.map((c) => ({
+    key: c.id, href: `/jobs/${c.source_job_id}?tab=money`,
+    search: `${c.source_job_number ?? ''} ${c.client_name} ${c.reserved_job_number ?? ''} ${c.note ?? ''}`,
+    sort: [c.client_name, c.source_job_number ?? 0, dateMs(c.held_at), c.reserved_job_number ?? 0, c.amount],
+    cells: [
+      c.client_name,
+      <JobRef hh={c.source_job_number} name={null} />,
+      <span className="whitespace-nowrap">{fmtDate(c.held_at)}<AgeBadge date={c.held_at} />
+        {c.held_by_name && <span className="block text-[11px] text-gray-400">{c.held_by_name}</span>}</span>,
+      c.reserved_job_id
+        ? <Link to={`/jobs/${c.reserved_job_id}?tab=money`} className="text-ooosh-700 hover:underline whitespace-nowrap">Job #{c.reserved_job_number}</Link>
+        : <span className="text-[11px] px-2 py-0.5 rounded bg-amber-100 text-amber-800 whitespace-nowrap">Not on a job yet</span>,
+      <span className="font-semibold text-blue-800">{gbp(c.amount)}</span>,
+      <span className="text-gray-500 text-xs line-clamp-2" title={c.note || undefined}>{c.note || '—'}</span>,
+    ],
+  }));
+
   const overpaidRows: Row[] = data.client_overpaid.map((r) => ({
     key: r.job_id, href: `/jobs/${r.job_id}?tab=money`,
     search: `${r.hh_job_number ?? ''} ${r.client_name ?? ''} ${r.job_name ?? ''}`,
@@ -1044,7 +1082,7 @@ export default function MoneyOverviewPage() {
       {/* Wise incoming payments that need a human (see services/wise-incoming.ts) */}
       <IncomingPaymentsPanel />
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-6">
         {cards.map((c) => (
           <button
             key={c.key}
@@ -1179,6 +1217,25 @@ export default function MoneyOverviewPage() {
               empty="No excess currently held."
               rows={excessRows}
               persistKey="excess"
+            />
+          </>
+        )}
+        {tab === 'onaccount' && (
+          <>
+            <p className="text-xs text-gray-500 px-4 pt-3">
+              Clients' own money, overpaid on an earlier job or left after a cancellation, kept for their next booking at their request.
+              It is still on the payments of the job shown, and it is not ours until it is applied to an invoice. Oldest first.
+              "Not on a job yet" is the one to watch: use it from that client's next job, or refund it from the job it sits on.
+            </p>
+            <Table
+              columns={[
+                { label: 'Client', sortable: true }, { label: 'Paid on job', sortable: true },
+                { label: 'Held since', sortable: true }, { label: 'For', sortable: true },
+                { label: 'Amount', sortable: true, align: 'right' }, { label: 'Note' },
+              ]}
+              empty="No client money is held on account."
+              rows={heldRows}
+              persistKey="onaccount"
             />
           </>
         )}

@@ -10,10 +10,12 @@ import { acMoney, acError } from '../../lib/accountCredit';
  * HireHop, the amount here is only what the page last saw. Nothing moves in HireHop or
  * Xero, so any staff role can do it.
  */
-export default function HoldOnAccountModal({ jobId, amount, clientName, onClose, onDone }: {
+export default function HoldOnAccountModal({ jobId, amount, clientName, cancelled = false, onClose, onDone }: {
   jobId: string;
   amount: number;
   clientName?: string | null;
+  /** A cancelled job: the money is the refund due after the fee, and its pending refund is cleared. */
+  cancelled?: boolean;
   onClose: () => void;
   onDone?: () => void;
 }) {
@@ -41,13 +43,18 @@ export default function HoldOnAccountModal({ jobId, amount, clientName, onClose,
       <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="px-5 pt-5 pb-3 border-b border-gray-100">
           <h3 className="text-lg font-semibold text-gray-900">Hold {acMoney(amount)} on account</h3>
-          <p className="text-sm text-gray-600 mt-1">Keep what {who} overpaid on this job for their next hire, instead of refunding it.</p>
+          <p className="text-sm text-gray-600 mt-1">
+            {cancelled
+              ? <>Keep what is due back to {who} after the cancellation fee for their next booking, instead of refunding it.</>
+              : <>Keep what {who} overpaid on this job for their next hire, instead of refunding it.</>}
+          </p>
         </div>
         <div className="px-5 py-4 space-y-4">
           <ul className="text-sm text-gray-700 space-y-1.5 list-disc pl-5">
             <li>The money stays where it is, on this job's payments. Nothing changes in HireHop or Xero.</li>
             <li>It shows on {who}'s other jobs and enquiries, with a "Use on this job" button.</li>
             <li>It comes off that job's invoice when it is invoiced. Whatever isn't needed stays on account.</li>
+            {cancelled && <li>The pending refund on this job is cleared, marked "held on account". It comes back if a manager stops holding it.</li>}
             <li>It can still be refunded at any time.</li>
           </ul>
           <div>

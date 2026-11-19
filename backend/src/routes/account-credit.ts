@@ -4,6 +4,7 @@ import { authenticate, AuthRequest, authorize, STAFF_ROLES, MANAGER_ROLES } from
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { planHireCloseOut, JOB_NOT_FOUND } from '../services/hire-close-out';
+import { clearRefundRemindersHeld, syncRefundReminder } from '../services/cancellation-close';
 import {
   holdOnAccount, releaseHold, reserveOnJob, unreserve, listForContext, listForOrganisation, AccountCreditError,
 } from '../services/account-credit';
@@ -50,6 +51,11 @@ router.post('/hold', validate(z.object({ job_id: uuid, note: z.string().max(500)
   try {
     const plan = await planHireCloseOut(req.body.job_id, { fresh: true });
     const credit = await holdOnAccount(plan, req.user?.id ?? null, req.body.note);
+    // A cancelled job: the refund that was due is now being kept, so its reminder goes.
+    if (plan.cancellation) {
+      await clearRefundRemindersHeld(plan.jobId, req.user?.id ?? null)
+        .catch((e) => console.warn('[account-credit] could not clear the refund reminder:', e));
+    }
     await logAudit(req.user!.id, 'account_credits', credit.id, 'create', null, { source_job_id: credit.source_job_id, amount: credit.amount });
     res.json({ data: { credit, plan: await planHireCloseOut(req.body.job_id, { fresh: true }) } });
   } catch (err) { fail(res, err, 'hold'); }
@@ -62,7 +68,15 @@ router.post('/:id/release', authorize(...MANAGER_ROLES), validate(z.object({ rea
     if (!isUuid(id)) { res.status(400).json({ error: 'Bad id' }); return; }
     const credit = await releaseHold(id, req.user?.id ?? null, req.body.reason);
     await logAudit(req.user!.id, 'account_credits', id, 'update', null, { status: 'released', reason: req.body.reason });
-    res.json({ data: { credit, plan: await planHireCloseOut(credit.source_job_id, { fresh: true }) } });
+    let plan = await planHireCloseOut(credit.source_job_id, { fresh: true });
+    // A cancelled job: no longer kept, so it is a refund due again — put its reminder back.
+    if (plan.cancellation && plan.blockers.length === 0) {
+      const due = Math.round(plan.surplus.reduce((s, x) => s + x.amount, 0) * 100) / 100;
+      await syncRefundReminder(plan.jobId, due, req.user?.id ?? null)
+        .catch((e) => console.warn('[account-credit] could not put the refund reminder back:', e));
+      plan = await planHireCloseOut(credit.source_job_id, { fresh: true });
+    }
+    res.json({ data: { credit, plan } });
   } catch (err) { fail(res, err, 'release'); }
 });
 
