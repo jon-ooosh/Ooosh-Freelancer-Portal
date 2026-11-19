@@ -33,6 +33,8 @@ for (const slug of readdirSync(DIR, { withFileTypes: true }).filter((d) => d.isD
     need(typeof s.text === 'string' && s.text.trim(), `step ${i + 1} has no text`);
     if (s.image) need(existsSync(path.join(DIR, slug, s.image)), `step ${i + 1}: picture ${s.image} is not in the guide's folder`);
   }
+  // House wording (help/README.md "Writing"): "manually", never "by hand".
+  need(!/\bby hand\b/i.test(JSON.stringify(g)), 'says "by hand" - the house word is "manually"');
 }
 const slugs = new Set(guides.map((g) => g.slug));
 for (const g of guides) {

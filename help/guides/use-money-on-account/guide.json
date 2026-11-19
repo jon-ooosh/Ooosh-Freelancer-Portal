@@ -35,8 +35,8 @@
       "detail": "The payment page already asks for the reduced balance and the reduced deposit, and lists \"Credit held from a previous booking\". You do not need to work anything out."
     },
     {
-      "text": "If the money on account is what confirms the booking, confirm it by hand.",
-      "detail": "Change the status to Confirmed and choose Credit on account as how it was confirmed. The note is filled in for you. OP never confirms a job on credit by itself.",
+      "text": "If the money on account is what confirms the booking, confirm it manually.",
+      "detail": "Change the status to Confirmed and choose Credit on account as how it was confirmed. The note is filled in for you. OP never confirms a job on credit automatically.",
       "image": "4-confirm-method.png"
     },
     {
