@@ -404,8 +404,10 @@ a Fail makes a `premises_fix` To Do), repeats from `task-recurrence.ts` (after t
 like every 1 Jan), a certificate's date wins, per-check visibility (everyone / managers / admins — a hidden
 check is a 404). All logic `services/premises.ts` + pure `premises-rules.ts`. **§12 is what shipped; read it
 first.** **Phase S BUILT (§13):** pure Supplier orgs are left out of the two "who is the client" pickers ("N suppliers
-match · show"), organisations take "Also" types (`also_types`, mig 356, `services/org-types.ts`). Not built: meters,
-documents library, calendar visits.
+match · show"), organisations take "Also" types (`also_types`, mig 356, `services/org-types.ts`). **Phase 2 BUILT
+(§14):** meter readings (`/operations/premises/readings`, each checked against its history — warn, never refuse),
+the fire alarm call-point rotation, and "Add past records" (one batch moves the date once, from the newest; never a
+"Get it fixed" To Do). Not built: documents library, calendar visits, Costs links.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**

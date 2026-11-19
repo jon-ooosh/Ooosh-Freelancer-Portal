@@ -12,7 +12,9 @@ import { useEffect, useState } from 'react';
 import { api } from '../../services/api';
 import { ukToday } from '../../lib/ukDate';
 import SearchPicker, { PickerOption } from '../SearchPicker';
-import { OUTCOME_LABEL, Outcome, PremisesCheck, TEST_OUTCOME_LABEL, fmtDate } from './premisesCopy';
+import {
+  OUTCOME_LABEL, Outcome, PremisesCheck, ReadingAssessment, TEST_OUTCOME_LABEL, fmtDate, fmtNumber, readingWarning,
+} from './premisesCopy';
 
 async function searchOrgs(q: string): Promise<PickerOption[]> {
   const res = await api.get<{ data: { id: string; name: string; type: string | null }[] }>(
@@ -54,6 +56,26 @@ export default function RecordModal({ check, onClose, onSaved }: {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [failedFiles, setFailedFiles] = useState<string[] | null>(null);
+  // A meter reading, and the server's view of it (a warning, never a refusal).
+  const [reading, setReading] = useState('');
+  const [replaced, setReplaced] = useState(false);
+  const [assessment, setAssessment] = useState<ReadingAssessment | null>(null);
+  // A rotating test: which call point (the next one along, unless changed).
+  const [point, setPoint] = useState(check.next_point ?? '');
+  const readingValue = reading.trim() === '' ? null : Number(reading);
+  const readingOk = readingValue !== null && Number.isFinite(readingValue);
+
+  useEffect(() => {
+    if (check.kind !== 'reading' || !readingOk || !/^\d{4}-\d{2}-\d{2}$/.test(doneOn)) { setAssessment(null); return; }
+    let live = true;
+    const t = setTimeout(() => {
+      api.get<{ data: ReadingAssessment }>(
+        `/premises/checks/${check.id}/reading-check?value=${readingValue}&done_on=${doneOn}&replaced=${replaced ? 1 : 0}`)
+        .then(res => { if (live) setAssessment(res.data); })
+        .catch(() => { if (live) setAssessment(null); });
+    }, 300);
+    return () => { live = false; clearTimeout(t); };
+  }, [check.id, check.kind, readingOk, readingValue, doneOn, replaced]);
 
   // Ask the server what the next due date becomes for this done date.
   useEffect(() => {
@@ -88,6 +110,9 @@ export default function RecordModal({ check, onClose, onSaved }: {
         done_by_org_id: check.kind === 'visit' ? doneBy?.value ?? null : null,
         notes: notes.trim() || null,
         next_due: certificateDate,
+        reading_value: check.kind === 'reading' ? readingValue : null,
+        meter_replaced: check.kind === 'reading' ? replaced : false,
+        point: check.kind === 'test' && point ? point : null,
       });
       const failed = files.length ? await uploadRecordFiles(res.data.id, files) : [];
       if (failed.length) { setFailedFiles(failed); setSaving(false); return; }
@@ -124,7 +149,8 @@ export default function RecordModal({ check, onClose, onSaved }: {
       <div className="absolute inset-0 bg-black/50" onClick={() => { if (!saving) onClose(); }} />
       <div className="relative bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6 max-h-[92vh] overflow-y-auto">
         <h3 className="text-lg font-semibold text-gray-900 mb-1">
-          {check.kind === 'renewal' ? 'Record the renewal' : check.kind === 'test' ? 'Record the test' : 'Record a visit'}
+          {check.kind === 'renewal' ? 'Record the renewal' : check.kind === 'test' ? 'Record the test'
+            : check.kind === 'reading' ? 'Enter the reading' : 'Record a visit'}
         </h3>
         <p className="text-sm text-gray-500 mb-4">{check.title}</p>
 
@@ -141,6 +167,36 @@ export default function RecordModal({ check, onClose, onSaved }: {
               </div>
             )}
           </div>
+
+          {check.kind === 'reading' && (
+            <div>
+              <label className={label} htmlFor="pr-reading">Reading{check.unit ? ` (${check.unit})` : ''}</label>
+              <input id="pr-reading" inputMode="decimal" value={reading} onChange={e => setReading(e.target.value.replace(/[^0-9.]/g, ''))}
+                placeholder="As it shows on the meter" className={`${input} text-lg tabular-nums tracking-wide`} autoFocus />
+              {assessment?.previous && !assessment.flag && assessment.used !== null && (
+                <p className="text-xs text-gray-500 mt-1">
+                  {fmtNumber(assessment.used)}{check.unit ? ` ${check.unit}` : ''} since {fmtDate(assessment.previous.done_on)}
+                </p>
+              )}
+              {readingWarning(assessment, check.unit) && (
+                <p className="text-xs mt-1 rounded bg-amber-50 text-amber-800 px-2 py-1.5">{readingWarning(assessment, check.unit)}</p>
+              )}
+              <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 mt-2">
+                <input type="checkbox" checked={replaced} onChange={e => setReplaced(e.target.checked)} />
+                The meter was replaced (its count starts again)
+              </label>
+            </div>
+          )}
+
+          {check.kind === 'test' && check.points.length > 0 && (
+            <div>
+              <label className={label} htmlFor="pr-point">Call point tested</label>
+              <select id="pr-point" value={point} onChange={e => setPoint(e.target.value)} className={input}>
+                {point && !check.points.includes(point) && <option value={point}>{point}</option>}
+                {check.points.map(p => <option key={p} value={p}>{p}{p === check.next_point ? ' (next in turn)' : ''}</option>)}
+              </select>
+            </div>
+          )}
 
           {needsOutcome && (
             <div>
@@ -163,8 +219,10 @@ export default function RecordModal({ check, onClose, onSaved }: {
 
           {check.kind !== 'test' && (
             <div>
-              <label className={label} htmlFor="pr-files">{check.kind === 'renewal' ? 'Policy, schedule or certificate' : 'Certificate or report'}</label>
-              <input id="pr-files" type="file" multiple
+              <label className={label} htmlFor="pr-files">
+                {check.kind === 'renewal' ? 'Policy, schedule or certificate' : check.kind === 'reading' ? 'Photo of the meter' : 'Certificate or report'}
+              </label>
+              <input id="pr-files" type="file" multiple accept={check.kind === 'reading' ? 'image/*' : undefined}
                 onChange={e => {
                   // Capture before resetting (frontend.md "File inputs").
                   const picked = Array.from(e.target.files ?? []);
@@ -219,7 +277,8 @@ export default function RecordModal({ check, onClose, onSaved }: {
           <button type="button" onClick={onClose} disabled={saving}
             className="px-3 py-1.5 text-sm rounded border border-gray-300 hover:bg-gray-50 disabled:opacity-40">Cancel</button>
           <button type="button" onClick={() => void save()}
-            disabled={saving || !doneOn || doneOn > today || (needsOutcome && !outcome) || dueBeforeDone}
+            disabled={saving || !doneOn || doneOn > today || (needsOutcome && !outcome) || dueBeforeDone
+              || (check.kind === 'reading' && !readingOk)}
             className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
             {saving ? (files.length ? 'Saving and uploading…' : 'Saving…') : 'Record it'}
           </button>

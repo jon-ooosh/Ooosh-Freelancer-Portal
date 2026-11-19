@@ -13,9 +13,11 @@ import { api } from '../services/api';
 import { openR2Key } from '../lib/openAuthedFile';
 import CheckFormModal from '../components/premises/CheckFormModal';
 import RecordModal, { uploadRecordFiles } from '../components/premises/RecordModal';
+import PastRecordsModal from '../components/premises/PastRecordsModal';
+import UsageChart from '../components/premises/UsageChart';
 import {
   KIND_LABEL, OUTCOME_CLASS, OUTCOME_LABEL, PremisesCheck, PremisesMeta, PremisesRecord, TEST_OUTCOME_LABEL,
-  VISIBILITY_LABEL, fmtDate, statusPill,
+  VISIBILITY_LABEL, fmtDate, fmtNumber, statusPill,
 } from '../components/premises/premisesCopy';
 
 export default function PremisesCheckPage() {
@@ -32,6 +34,7 @@ function PremisesCheckContent({ id }: { id: string }) {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [filingPast, setFilingPast] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -120,9 +123,14 @@ function PremisesCheckContent({ id }: { id: string }) {
               className="px-3 py-1.5 text-sm rounded border border-red-200 text-red-700 bg-white hover:bg-red-50 disabled:opacity-40">Delete</button>
           )}
           {!retired && (
+            <button type="button" disabled={busy} onClick={() => setFilingPast(true)}
+              className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40">Add past records</button>
+          )}
+          {!retired && (
             <button type="button" disabled={busy} onClick={() => setRecording(true)}
               className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700 disabled:opacity-40">
-              {check.kind === 'renewal' ? 'Record the renewal' : check.kind === 'test' ? 'Record the test' : 'Record a visit'}
+              {check.kind === 'renewal' ? 'Record the renewal' : check.kind === 'test' ? 'Record the test'
+                : check.kind === 'reading' ? 'Enter a reading' : 'Record a visit'}
             </button>
           )}
         </div>
@@ -158,9 +166,30 @@ function PremisesCheckContent({ id }: { id: string }) {
             )}
             {check.location_note && (<><dt className="text-gray-500">Where</dt><dd>{check.location_note}</dd></>)}
             {check.why_note && (<><dt className="text-gray-500">Why we do it</dt><dd>{check.why_note}</dd></>)}
+            {check.kind === 'reading' && (
+              <>
+                <dt className="text-gray-500">Meter</dt>
+                <dd>{check.unit ?? '—'}{check.meter_serial ? ` · serial ${check.meter_serial}` : ''}</dd>
+              </>
+            )}
+            {check.kind === 'test' && check.points.length > 0 && (
+              <>
+                <dt className="text-gray-500">Call points</dt>
+                <dd>
+                  {check.points.join(' · ')}
+                  {check.next_point && <span className="block text-xs text-gray-500">Next in turn: {check.next_point}</span>}
+                </dd>
+              </>
+            )}
             <dt className="text-gray-500">Who can see it</dt><dd>{VISIBILITY_LABEL[check.visibility]}</dd>
             {check.notes && (<><dt className="text-gray-500">Notes</dt><dd className="whitespace-pre-wrap">{check.notes}</dd></>)}
           </dl>
+          {check.kind === 'reading' && (
+            <div className="mt-4 pt-4 border-t border-gray-100">
+              <h3 className="text-sm font-semibold text-gray-900 mb-2">Use per week</h3>
+              <UsageChart usage={check.usage ?? []} unit={check.unit} />
+            </div>
+          )}
         </div>
 
         <div className="bg-white border border-gray-200 rounded-lg">
@@ -186,6 +215,10 @@ function PremisesCheckContent({ id }: { id: string }) {
         <RecordModal check={check} onClose={() => setRecording(false)}
           onSaved={() => { setRecording(false); void act(async () => undefined, 'Could not reload'); }} />
       )}
+      {filingPast && (
+        <PastRecordsModal check={check} onClose={() => setFilingPast(false)}
+          onSaved={() => { setFilingPast(false); void act(async () => undefined, 'Could not reload'); }} />
+      )}
     </div>
   );
 }
@@ -202,6 +235,8 @@ function RecordRow({ record: r, check, canManage, busy, onChanged, onError }: {
   const outcomeText = r.outcome
     ? (check.kind === 'test' ? TEST_OUTCOME_LABEL[r.outcome] ?? OUTCOME_LABEL[r.outcome] : OUTCOME_LABEL[r.outcome])
     : null;
+  // A reading's use since the one before (from the server's series, ending on this date).
+  const use = r.reading_value !== null ? (check.usage ?? []).find(u => u.to === r.done_on) : undefined;
 
   async function addFiles(files: File[]) {
     if (!files.length) return;
@@ -230,7 +265,16 @@ function RecordRow({ record: r, check, canManage, busy, onChanged, onError }: {
       <div className="text-sm font-semibold text-gray-900">{fmtDate(r.done_on)}</div>
       <div className="min-w-0 space-y-1.5">
         <div className="flex flex-wrap items-center gap-2">
+          {r.reading_value !== null && (
+            <span className="text-sm font-semibold text-gray-900 tabular-nums">
+              {fmtNumber(r.reading_value, 3)}{check.unit ? ` ${check.unit}` : ''}
+              {use && <span className="ml-1.5 text-xs font-normal text-gray-500">+{fmtNumber(use.used)} since {fmtDate(use.from)}</span>}
+            </span>
+          )}
+          {r.meter_replaced && <span className="text-xs text-amber-700">meter replaced</span>}
+          {r.point && <span className="text-xs text-gray-700 border border-gray-200 rounded px-1.5">{r.point}</span>}
           {r.outcome && outcomeText && <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${OUTCOME_CLASS[r.outcome]}`}>{outcomeText}</span>}
+          {r.backfilled && <span className="text-xs text-gray-500 border border-gray-200 rounded px-1.5">filed later</span>}
           {r.done_by_org_name && <span className="text-xs text-gray-600">{r.done_by_org_name}</span>}
           {r.recorded_by_name && <span className="text-xs text-gray-400">recorded by {r.recorded_by_name}</span>}
         </div>

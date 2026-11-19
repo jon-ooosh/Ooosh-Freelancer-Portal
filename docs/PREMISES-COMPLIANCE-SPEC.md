@@ -1,7 +1,7 @@
 # Premises & compliance — spec
 
-**Status: PHASE 1 BUILT (PR 1) and PHASE S BUILT (PR 2), 19 Nov 2026 — §12 and §13 are what shipped and where
-it differs from the plan; read them first.** Phases 2–3 are not built. Mockups (v1, before the decisions below):
+**Status: PHASES 1, S and 2 BUILT (PRs 1–3), 19 Nov 2026 — §12, §13 and §14 are what shipped and where it
+differs from the plan; read them first.** Phase 3 (documents library, calendar visits, Costs links) is not built. Mockups (v1, before the decisions below):
 https://claude.ai/artifact/GnedY9eyyMDydPUKMg2tJK — Mockup A's place chips, visibility and "Book the next
 visit" are described here, not drawn there yet.
 
@@ -349,3 +349,36 @@ form sends (lower case, no duplicates, never the main type — changing the main
 
 **Where it differs from §8:** the linked-organisations pickers were in the original list and are left alone
 (above).
+
+---
+
+## §14 Phase 2 — what shipped (PR 3, 19 Nov 2026)
+
+**Meter readings, the call-point rotation, and past records** (jon: "backfill historical certs … without firing off
+loads of erroneous dues"). Migration **357**: `premises_checks.unit`, `meter_serial`, `points`; `premises_records.point`,
+`backfilled`; a "Meters" heading with Gas, Electricity and Water meters (no owner, no date). The rules are pure in
+`premises-rules.ts` and tested: `usageSeries()`, `assessReading()`, `nextPoint()`, `cleanPoints()`.
+
+- **Meter readings** (kind `reading`, now offered on the check form with a unit and serial). A reading record needs the
+  number; "meter replaced" starts the count again. **Every reading is checked against the meter's history as it is
+  typed** (`GET /premises/checks/:id/reading-check`): lower than the last reading, or more than three times the usual
+  week (the median of the last 8 gaps, per week), is a WARNING — nothing is refused. The check page shows each
+  reading with "+N since …" and a use-per-week chart (`components/premises/UsageChart.tsx`).
+- **Operations › Premises & compliance › Meter readings** (`?tab=meters`, `GET /premises/meters`): a card per meter —
+  last reading, use since the one before, the usual week, the chart — and **Enter readings**
+  (`/operations/premises/readings`), the phone screen: one box per meter, a photo of the dial, one Save for all. **A
+  meter's To Do opens that screen** (`source_link` in `staff-tasks.ts`); each meter keeps its own To Do, ticked when
+  its reading is saved.
+- **Call points** (kind `test`): the check lists them in order; the record form offers the next one along
+  ("(next in turn)", changeable); the owner's To Do names it ("Fire alarm test: CP2 Warehouse (due …)"); the check page
+  shows "Next in turn". Last tested point off the list → back to the first.
+- **Add past records** (every check, `POST /premises/checks/:id/history`): several at once, in any order, an outcome
+  optional, a file per record. **One transaction; the due date moves once, from the newest, and only if it is newer than
+  anything already recorded; an old "Fail" never makes a "Get it fixed" To Do; marked "filed later"** in the history.
+  Recording and past records share one writer (`saveRecords()` in `premises.ts`).
+
+**Where it differs from §3:** "Read the meters" is one To Do per meter, not one per person per day — the reading screen
+gathers them all, so one visit to it ticks them all.
+
+**Not built yet (phase 3):** the documents library, "Book a visit" onto the staff calendar, advisories → To Do, Costs
+links. Readings against the supplier's bills and a smart-meter import are later still.
