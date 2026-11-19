@@ -14,7 +14,10 @@
  *   POST   /checks/:id/unretire
  *   DELETE /checks/:id                   only when nothing was ever recorded on it
  *   GET    /checks/:id/next-due?done_on= what recording on that day would set
+ *   GET    /checks/:id/reading-check?value=&done_on=&replaced=1   a meter reading against its history (warning only)
  *   POST   /checks/:id/records           record that it was done
+ *   POST   /checks/:id/history           { records: [...] } past records, filed later (spec §14)
+ *   GET    /meters                       every meter I can see, last reading and use
  *   POST   /records/:id/remove           { reason } — a mistake (manager)
  *   POST   /records/:id/files            multipart `file` — a certificate / report / photo
  *   POST   /files/:id/archive            take a file off (manager or whoever added it)
@@ -30,9 +33,9 @@ import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware
 import { validate, partialForUpdate } from '../middleware/validate';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import {
-  PremisesError, PREMISES_PREFIX, addFile, addTaxonomy, archiveFile, checkForRecord, createCheck, deleteCheck,
-  getCheck, getMeta, listChecks, previewNextDue, recordCheck, removeRecord, retireCheck, unretireCheck,
-  updateCheck, updateTaxonomy,
+  PremisesError, PREMISES_PREFIX, addFile, addPastRecords, addTaxonomy, archiveFile, checkForRecord, checkReading,
+  createCheck, deleteCheck, getCheck, getMeta, listChecks, listMeters, previewNextDue, recordCheck, removeRecord,
+  retireCheck, unretireCheck, updateCheck, updateTaxonomy,
 } from '../services/premises';
 
 const router = Router();
@@ -82,6 +85,10 @@ const checkSchema = z.object({
   location_note: optText(500),
   why_note: optText(1000),
   notes: optText(4000),
+  // Meter readings (phase 2): the unit and the meter's serial; a rotating test's call points.
+  unit: optText(20),
+  meter_serial: optText(60),
+  points: z.array(z.string().max(80)).max(50).nullable().optional(),
 });
 
 router.post('/checks', validate(checkSchema), async (req: AuthRequest, res: Response) => {
@@ -115,6 +122,19 @@ router.delete('/checks/:id', validate(idParam, 'params'), async (req: AuthReques
   try { await deleteCheck(String(req.params.id), caller(req)); res.json({ data: { deleted: true } }); } catch (err) { fail(res, 'delete', err); }
 });
 
+router.get('/meters', async (req: AuthRequest, res: Response) => {
+  try { res.json({ data: await listMeters(req.user!.role) }); } catch (err) { fail(res, 'meters', err); }
+});
+
+router.get('/checks/:id/reading-check', validate(idParam, 'params'), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({
+      data: await checkReading(String(req.params.id), Number(req.query.value), String(req.query.done_on || ''),
+        String(req.query.replaced || '') === '1', req.user!.role),
+    });
+  } catch (err) { fail(res, 'reading-check', err); }
+});
+
 router.get('/checks/:id/next-due', validate(idParam, 'params'), async (req: AuthRequest, res: Response) => {
   try {
     res.json({ data: await previewNextDue(String(req.params.id), String(req.query.done_on || ''), req.user!.role) });
@@ -131,23 +151,33 @@ const recordSchema = z.object({
   next_due: ymd.nullable().optional(),
   reading_value: z.number().finite().nullable().optional(),
   meter_replaced: z.boolean().optional(),
+  point: optText(80),
+});
+
+const toRecordInput = (b: z.infer<typeof recordSchema>) => ({
+  done_on: b.done_on,
+  outcome: b.outcome ?? null,
+  done_by_org_id: b.done_by_org_id ?? null,
+  notes: b.notes ?? null,
+  next_due: b.next_due ?? null,
+  reading_value: b.reading_value ?? null,
+  meter_replaced: b.meter_replaced ?? false,
+  point: b.point ?? null,
 });
 
 router.post('/checks/:id/records', validate(idParam, 'params'), validate(recordSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const b = req.body as z.infer<typeof recordSchema>;
-    res.status(201).json({
-      data: await recordCheck(String(req.params.id), {
-        done_on: b.done_on,
-        outcome: b.outcome ?? null,
-        done_by_org_id: b.done_by_org_id ?? null,
-        notes: b.notes ?? null,
-        next_due: b.next_due ?? null,
-        reading_value: b.reading_value ?? null,
-        meter_replaced: b.meter_replaced ?? false,
-      }, caller(req)),
-    });
+    res.status(201).json({ data: await recordCheck(String(req.params.id), toRecordInput(req.body), caller(req)) });
   } catch (err) { fail(res, 'record', err); }
+});
+
+const historySchema = z.object({ records: z.array(recordSchema).min(1).max(50) });
+
+router.post('/checks/:id/history', validate(idParam, 'params'), validate(historySchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const b = req.body as z.infer<typeof historySchema>;
+    res.status(201).json({ data: await addPastRecords(String(req.params.id), b.records.map(toRecordInput), caller(req)) });
+  } catch (err) { fail(res, 'history', err); }
 });
 
 router.post('/records/:id/remove', validate(idParam, 'params'), validate(reasonSchema), async (req: AuthRequest, res: Response) => {

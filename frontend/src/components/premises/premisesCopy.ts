@@ -25,6 +25,13 @@ export interface PremisesRecord {
   done_on: string;
   outcome: Outcome | null;
   notes: string | null;
+  /** A meter reading, and whether the meter was replaced (its count starts again). */
+  reading_value: number | null;
+  meter_replaced: boolean;
+  /** The call point a rotating test tried. */
+  point: string | null;
+  /** Filed later as a past record (spec §14). */
+  backfilled: boolean;
   next_due_set: string | null;
   next_due_source: 'computed' | 'certificate' | null;
   done_by_org_id: string | null;
@@ -67,8 +74,54 @@ export interface PremisesCheck {
   current_file_id: string | null;
   current_file_key: string | null;
   current_file_name: string | null;
+  /** Meter readings: the unit ("kWh", "m³") and the meter's serial. */
+  unit: string | null;
+  meter_serial: string | null;
+  /** A rotating test's call points, in order. */
+  points: string[];
   records?: PremisesRecord[];
   open_reminder?: { id: string; owner_name: string | null; due_date: string | null } | null;
+  /** A meter's use between readings, oldest first (check page). */
+  usage?: UsageInterval[];
+  /** The call point the next test should try (check page). */
+  next_point?: string | null;
+}
+
+export interface UsageInterval { from: string; to: string; days: number; used: number; per_week: number }
+export interface Reading { done_on: string; value: number; meter_replaced: boolean }
+
+/** A meter as the Meter readings tab and the reading screen show it. */
+export interface Meter extends PremisesCheck {
+  last_reading: Reading | null;
+  last_use: UsageInterval | null;
+  usual_per_week: number | null;
+  usage: UsageInterval[];
+}
+
+/** The server's view of a new reading — a warning, never a refusal. */
+export interface ReadingAssessment {
+  previous: Reading | null;
+  used: number | null;
+  days: number | null;
+  per_week: number | null;
+  usual_per_week: number | null;
+  flag: 'lower' | 'high' | null;
+}
+
+export const METER_UNITS = ['kWh', 'm³', 'ft³', 'litres'];
+
+/** "1,234.5" — readings and use, without trailing noise. */
+export function fmtNumber(n: number | null | undefined, maxDecimals = 1): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return '—';
+  return n.toLocaleString('en-GB', { maximumFractionDigits: maxDecimals });
+}
+
+/** The words for a reading's warning. */
+export function readingWarning(a: ReadingAssessment | null, unit: string | null): string | null {
+  if (!a || !a.flag) return null;
+  const u = unit ? ` ${unit}` : '';
+  if (a.flag === 'lower') return `That's lower than the last reading (${fmtNumber(a.previous?.value ?? null, 3)}${u}). Check the number — or tick "meter replaced" if it's a new meter.`;
+  return `That's ${fmtNumber(a.used)}${u} since the last reading — over three times a usual week (about ${fmtNumber(a.usual_per_week)}${u}). Check the number, or add a note if it's right.`;
 }
 
 export interface Taxon { id: string; name: string; sort_order: number; retired_at: string | null }
@@ -90,7 +143,7 @@ export const KIND_LABEL: Record<CheckKind, string> = {
 export const KIND_HINT: Record<CheckKind, string> = {
   visit: 'Someone comes in — gas, electrics, air con. Keep the certificate.',
   test: 'We do it ourselves — the weekly fire alarm test, first aid kits.',
-  reading: 'A number off a meter.',
+  reading: 'A number off a meter — gas, electric, water.',
   renewal: 'A date and a document — insurance, lease, licences.',
 };
 

@@ -28,6 +28,7 @@ import {
   CHECK_KINDS, VISIBILITIES, OUTCOMES, CheckKind, Visibility,
   canSee, canSetVisibility, visibleLevels, roleRank, checkStatus, daysBetween,
   reminderWanted, reminderTitle, nextDueAfterRecord, dateLabel,
+  nextPoint, cleanPoints, usageSeries, assessReading, Reading,
 } from './premises-rules';
 import { createTask, cancelTask, updateTask, listTasksForSource } from './staff-tasks';
 import { listAssignableStaff } from './assignable-staff';
@@ -60,7 +61,7 @@ const CHECK_SELECT = `
          c.owner_person_id, c.contractor_org_id, c.responsibility,
          c.repeat_mode, c.repeat_rule, c.repeat_anchor::text AS repeat_anchor,
          c.next_due::text AS next_due, c.next_due_source, c.remind_days_before,
-         c.location_note, c.why_note, c.notes,
+         c.location_note, c.why_note, c.notes, c.unit, c.meter_serial, c.points,
          c.retired_at, c.retired_reason, c.created_at, c.updated_at,
          h.name AS heading_name, h.sort_order AS heading_sort,
          p.name AS place_name, p.sort_order AS place_sort,
@@ -93,6 +94,7 @@ interface CheckRow {
   repeat_mode: Mode | null; repeat_rule: RecurrenceRule | null; repeat_anchor: string | null;
   next_due: string | null; next_due_source: string | null; remind_days_before: number;
   location_note: string | null; why_note: string | null; notes: string | null;
+  unit: string | null; meter_serial: string | null; points: string[];
   retired_at: string | null; retired_reason: string | null;
   owner_name: string | null; [k: string]: unknown;
 }
@@ -140,7 +142,8 @@ export async function getCheck(id: string, role: string | undefined) {
   const today = ukToday();
   const row = await visibleCheck(id, role);
   const records = await query(
-    `SELECT r.id, r.done_on::text AS done_on, r.outcome, r.reading_value, r.meter_replaced, r.notes,
+    `SELECT r.id, r.done_on::text AS done_on, r.outcome, r.reading_value::float8 AS reading_value, r.meter_replaced, r.notes,
+            r.point, r.backfilled,
             r.next_due_set::text AS next_due_set, r.next_due_source, r.created_at,
             r.done_by_org_id, o.name AS done_by_org_name,
             NULLIF(TRIM(COALESCE(NULLIF(rp.preferred_name, ''), rp.first_name, '') || ' ' || COALESCE(rp.last_name, '')), '') AS recorded_by_name,
@@ -162,7 +165,19 @@ export async function getCheck(id: string, role: string | undefined) {
   const open = (await listTasksForSource(REMINDER_SOURCE, id) as Array<{ id: string; status: string; owner_name: string | null; due_date: string | null }>)
     .filter(t => t.status === 'open')
     .map(t => ({ id: t.id, owner_name: t.owner_name, due_date: t.due_date }));
-  return { ...decorate(row, today), records: records.rows, open_reminder: open[0] ?? null };
+  const recs = records.rows as Array<{ done_on: string; reading_value: number | null; meter_replaced: boolean; point: string | null }>;
+  // Meter readings: use between readings, oldest first (the chart).
+  const usage = row.kind === 'reading' ? usageSeries(readingsOf(recs)) : [];
+  // The call point the next test should try (rotation, premises-rules.ts).
+  const next_point = nextPoint(row.points, recs.find(r => r.point)?.point ?? null);
+  return { ...decorate(row, today), records: records.rows, open_reminder: open[0] ?? null, usage, next_point };
+}
+
+/** A meter's readings from its records (records with no value are skipped). */
+function readingsOf(recs: Array<{ done_on: string; reading_value: number | null; meter_replaced: boolean }>): Reading[] {
+  return recs
+    .filter(r => r.reading_value !== null && r.reading_value !== undefined)
+    .map(r => ({ done_on: r.done_on, value: Number(r.reading_value), meter_replaced: !!r.meter_replaced }));
 }
 
 /** The best role any of a person's active logins has — what they could see. */
@@ -215,6 +230,19 @@ export interface CheckInput {
   location_note: string | null;
   why_note: string | null;
   notes: string | null;
+  /** Meter readings: the unit ("kWh", "m³") and the meter's serial. */
+  unit?: string | null;
+  meter_serial?: string | null;
+  /** A rotating test's call points, in order (premises-rules.ts nextPoint). */
+  points?: string[] | null;
+}
+
+/** The meter and call-point fields — written after the main insert / update. */
+async function saveExtras(id: string, unit: string | null | undefined, serial: string | null | undefined, points: unknown) {
+  await query(
+    `UPDATE premises_checks SET unit = $2, meter_serial = $3, points = $4 WHERE id = $1`,
+    [id, trimOrNull(unit ?? null)?.slice(0, 20) ?? null, trimOrNull(serial ?? null)?.slice(0, 60) ?? null, cleanPoints(points ?? [])],
+  );
 }
 
 /**
@@ -295,6 +323,7 @@ export async function createCheck(input: CheckInput, caller: Caller) {
      caller.userId],
   );
   const id = r.rows[0].id as string;
+  await saveExtras(id, input.unit, input.meter_serial, input.points);
   await syncCheckReminder(id);
   return getCheck(id, caller.role);
 }
@@ -347,6 +376,10 @@ export async function updateCheck(id: string, patch: Partial<CheckInput>, caller
      next.contractor_org_id, next.responsibility, mode, rule ? JSON.stringify(rule) : null, anchor, nextDue, source,
      next.remind_days_before, trimOrNull(next.location_note), trimOrNull(next.why_note), trimOrNull(next.notes)],
   );
+  await saveExtras(id,
+    patch.unit !== undefined ? patch.unit : cur.unit,
+    patch.meter_serial !== undefined ? patch.meter_serial : cur.meter_serial,
+    patch.points !== undefined ? patch.points : cur.points);
   await syncCheckReminder(id);
   return getCheck(id, caller.role);
 }
@@ -398,6 +431,8 @@ export interface RecordInput {
   next_due: string | null;
   reading_value: number | null;
   meter_replaced: boolean;
+  /** The call point tested (a rotating test). */
+  point?: string | null;
 }
 
 /** What next due date recording on `doneOn` would set — the record form's preview. */
@@ -417,24 +452,56 @@ async function latestDoneOn(checkId: string): Promise<string | null> {
 }
 
 export async function recordCheck(id: string, input: RecordInput, caller: Caller) {
+  const { ids } = await saveRecords(id, [input], false, caller);
+  return { id: ids[0] };
+}
+
+/**
+ * Past records (spec §14): several old certificates filed at once. They never
+ * make a "Get it fixed" To Do, an outcome is optional, and the due date moves
+ * once — from the newest of them, and only if it is newer than anything
+ * already recorded. Ids come back in the order sent, for the files.
+ */
+export async function addPastRecords(id: string, inputs: RecordInput[], caller: Caller) {
+  if (!inputs.length) throw new PremisesError('Add at least one record');
+  if (inputs.length > 50) throw new PremisesError('Fifty at a time, please');
+  return saveRecords(id, inputs, true, caller);
+}
+
+/**
+ * The one way records are written. In ONE transaction (the check locked, so
+ * two people recording at once can't both move the date): every record goes
+ * in, and the due date moves once, worked out from the newest of them —
+ * unless something newer is already recorded (an old certificate never winds
+ * the clock back).
+ */
+async function saveRecords(id: string, inputs: RecordInput[], backfilled: boolean, caller: Caller) {
   const today = ukToday();
   const c = await visibleCheck(id, caller.role);
   if (c.retired_at) throw new PremisesError('This check has been retired — bring it back first');
-  if (!DATE_RE.test(input.done_on)) throw new PremisesError('Say when it was done');
-  if (input.done_on > today) throw new PremisesError('It can’t have been done in the future');
-  if (input.outcome && !(OUTCOMES as readonly string[]).includes(input.outcome)) throw new PremisesError('Pick how it went');
-  if ((c.kind === 'visit' || c.kind === 'test') && !input.outcome) throw new PremisesError('Say how it went');
-  if (input.next_due !== null) {
-    if (!DATE_RE.test(input.next_due)) throw new PremisesError('The next due date must be a date');
-    if (input.next_due <= input.done_on) throw new PremisesError('The next due date must be after the day it was done');
+  for (const input of inputs) {
+    if (!DATE_RE.test(input.done_on)) throw new PremisesError('Say when it was done');
+    if (input.done_on > today) throw new PremisesError('It can’t have been done in the future');
+    if (input.outcome && !(OUTCOMES as readonly string[]).includes(input.outcome)) throw new PremisesError('Pick how it went');
+    if (!backfilled && (c.kind === 'visit' || c.kind === 'test') && !input.outcome) throw new PremisesError('Say how it went');
+    if (c.kind === 'reading' && (input.reading_value === null || !Number.isFinite(input.reading_value))) {
+      throw new PremisesError('Type the reading');
+    }
+    if (input.next_due !== null) {
+      if (!DATE_RE.test(input.next_due)) throw new PremisesError('The next due date must be a date');
+      if (input.next_due <= input.done_on) throw new PremisesError('The next due date must be after the day it was done');
+    }
   }
+  // The newest of the batch decides the date (the last one sent, if two share a day).
+  let newestIdx = 0;
+  inputs.forEach((r, i) => { if (r.done_on >= inputs[newestIdx].done_on) newestIdx = i; });
+  const newest = inputs[newestIdx];
 
-  let recordId = '';
+  const ids: string[] = [];
   let moved = false;
   const client = await getClient();
   try {
     await client.query('BEGIN');
-    // Lock the check so two people recording at once can't both move the date.
     const cur = await client.query(
       `SELECT next_due::text AS next_due, repeat_mode, repeat_rule, repeat_anchor::text AS repeat_anchor
          FROM premises_checks WHERE id = $1 FOR UPDATE`, [id]);
@@ -442,20 +509,26 @@ export async function recordCheck(id: string, input: RecordInput, caller: Caller
     const latest = await client.query(
       `SELECT MAX(done_on)::text AS d FROM premises_records WHERE check_id = $1 AND removed_at IS NULL`, [id]);
     const latestDone = latest.rows[0]?.d as string | null;
-    moved = !latestDone || input.done_on >= latestDone;
+    moved = !latestDone || newest.done_on >= latestDone;
     const next = moved
-      ? nextDueAfterRecord({ mode: row.repeat_mode, rule: row.repeat_rule, anchor: row.repeat_anchor }, input.done_on, row.next_due, input.next_due)
+      ? nextDueAfterRecord({ mode: row.repeat_mode, rule: row.repeat_rule, anchor: row.repeat_anchor }, newest.done_on, row.next_due, newest.next_due)
       : { date: null, source: null };
 
-    const ins = await client.query(
-      `INSERT INTO premises_records
-         (check_id, done_on, done_by_org_id, outcome, reading_value, meter_replaced, notes, next_due_set, next_due_source, recorded_by)
-       VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8::date, $9, $10)
-       RETURNING id`,
-      [id, input.done_on, input.done_by_org_id, input.outcome, input.reading_value, input.meter_replaced,
-       trimOrNull(input.notes), moved ? next.date : null, moved ? next.source : null, caller.userId],
-    );
-    recordId = ins.rows[0].id as string;
+    for (let i = 0; i < inputs.length; i++) {
+      const input = inputs[i];
+      const setsDate = moved && i === newestIdx;
+      const ins = await client.query(
+        `INSERT INTO premises_records
+           (check_id, done_on, done_by_org_id, outcome, reading_value, meter_replaced, notes, point,
+            next_due_set, next_due_source, recorded_by, backfilled)
+         VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12)
+         RETURNING id`,
+        [id, input.done_on, input.done_by_org_id, input.outcome, input.reading_value, input.meter_replaced,
+         trimOrNull(input.notes), trimOrNull(input.point ?? null)?.slice(0, 80) ?? null,
+         setsDate ? next.date : null, setsDate ? next.source : null, caller.userId, backfilled],
+      );
+      ids.push(ins.rows[0].id as string);
+    }
     if (moved) {
       await client.query(
         `UPDATE premises_checks SET next_due = $2::date, next_due_source = $3, updated_at = NOW() WHERE id = $1`,
@@ -470,8 +543,8 @@ export async function recordCheck(id: string, input: RecordInput, caller: Caller
     client.release();
   }
 
-  // It's done, so the reminder that asked for it is done too. Only when this
-  // record moved the date: typing in last year's visit answers nothing.
+  // It's done, so the reminder that asked for it is done too. Only when the
+  // date moved: typing in last year's visit answers nothing.
   if (moved) {
     for (const t of await listTasksForSource(REMINDER_SOURCE, id) as Array<{ id: string; status: string }>) {
       if (t.status !== 'open') continue;
@@ -480,8 +553,53 @@ export async function recordCheck(id: string, input: RecordInput, caller: Caller
     }
   }
   await syncCheckReminder(id);
-  if (input.outcome === 'fail') await makeFixTask(c, recordId, input, caller);
-  return { id: recordId };
+  // A failed check needs fixing — today's, never a filed-later one (history).
+  if (!backfilled && inputs[0].outcome === 'fail') await makeFixTask(c, ids[0], inputs[0], caller);
+  return { ids };
+}
+
+/** A new reading against the meter's history — the form's live warning (never a refusal). */
+export async function checkReading(id: string, value: number, doneOn: string, replaced: boolean, role: string | undefined) {
+  if (!DATE_RE.test(doneOn)) throw new PremisesError('done_on must be a date');
+  if (!Number.isFinite(value)) throw new PremisesError('Type the reading');
+  const c = await visibleCheck(id, role);
+  if (c.kind !== 'reading') throw new PremisesError('That check isn’t a meter');
+  return assessReading(await meterReadings(id), value, doneOn, replaced);
+}
+
+async function meterReadings(checkId: string): Promise<Reading[]> {
+  const r = await query(
+    `SELECT done_on::text AS done_on, reading_value::float8 AS reading_value, meter_replaced
+       FROM premises_records WHERE check_id = $1 AND removed_at IS NULL AND reading_value IS NOT NULL`, [checkId]);
+  return readingsOf(r.rows);
+}
+
+/**
+ * Every meter the caller can see, with its last reading and how much was used
+ * since the one before — Meter readings tab and the phone's reading screen.
+ */
+export async function listMeters(role: string | undefined) {
+  const today = ukToday();
+  const r = await query(
+    `${CHECK_SELECT} WHERE c.kind = 'reading' AND c.retired_at IS NULL AND c.visibility = ANY($1::text[])
+      ORDER BY p.sort_order, p.name, c.title`,
+    [visibleLevels(role)],
+  );
+  const meters = [];
+  for (const row of r.rows as CheckRow[]) {
+    const readings = (await meterReadings(row.id)).sort((a, b) => (a.done_on < b.done_on ? -1 : a.done_on > b.done_on ? 1 : 0));
+    const last = readings.length ? readings[readings.length - 1] : null;
+    const usage = usageSeries(readings);
+    const lastUse = last && usage.length && usage[usage.length - 1].to === last.done_on ? usage[usage.length - 1] : null;
+    meters.push({
+      ...decorate(row, today),
+      last_reading: last,
+      last_use: lastUse,
+      usual_per_week: assessReading(readings, last?.value ?? 0, today, false).usual_per_week,
+      usage: usage.slice(-12),
+    });
+  }
+  return meters;
 }
 
 /** A failed check makes a To Do straight away (spec §1.9) — to its owner, else whoever recorded it. */
@@ -618,11 +736,15 @@ export async function updateTaxonomy(kind: Taxonomy, id: string, patch: { name?:
 export async function syncCheckReminder(checkId: string): Promise<void> {
   try {
     const r = await query(
-      `SELECT id, title, kind, responsibility, visibility, owner_person_id, retired_at,
-              next_due::text AS next_due, remind_days_before, reminded_for_due::text AS reminded_for_due
-         FROM premises_checks WHERE id = $1`, [checkId]);
+      `SELECT c.id, c.title, c.kind, c.responsibility, c.visibility, c.owner_person_id, c.retired_at, c.points,
+              c.next_due::text AS next_due, c.remind_days_before, c.reminded_for_due::text AS reminded_for_due,
+              (SELECT r.point FROM premises_records r
+                WHERE r.check_id = c.id AND r.removed_at IS NULL AND r.point IS NOT NULL
+                ORDER BY r.done_on DESC, r.created_at DESC LIMIT 1) AS last_point
+         FROM premises_checks c WHERE c.id = $1`, [checkId]);
     const c = r.rows[0] as {
       title: string; kind: string; responsibility: string; visibility: string; owner_person_id: string | null;
+      points: string[] | null; last_point: string | null;
       retired_at: string | null; next_due: string | null; remind_days_before: number; reminded_for_due: string | null;
     } | undefined;
     const today = ukToday();
@@ -635,7 +757,7 @@ export async function syncCheckReminder(checkId: string): Promise<void> {
       for (const t of open) await cancelTask(t.id, SYSTEM_USER_ID, 'admin');
       return;
     }
-    const title = reminderTitle(c!.kind, c!.responsibility, c!.title, c!.next_due!);
+    const title = reminderTitle(c!.kind, c!.responsibility, c!.title, c!.next_due!, nextPoint(c!.points, c!.last_point));
     if (open.length === 1 && open[0].person_id === c!.owner_person_id && open[0].title === title) return;
     // Ticked (or dropped) by hand for this same due date: don't make it again.
     if (open.length === 0 && c!.reminded_for_due === c!.next_due) return;

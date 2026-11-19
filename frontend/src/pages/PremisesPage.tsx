@@ -11,14 +11,69 @@
  * Status, dates and who sees what all come from the server.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { openR2Key } from '../lib/openAuthedFile';
 import CheckFormModal from '../components/premises/CheckFormModal';
 import PlacesHeadingsModal from '../components/premises/PlacesHeadingsModal';
+import UsageChart from '../components/premises/UsageChart';
 import {
-  PremisesCheck, PremisesMeta, STATUS_ORDER, VISIBILITY_LABEL, fmtDate, statusPill,
+  Meter, PremisesCheck, PremisesMeta, STATUS_ORDER, VISIBILITY_LABEL, fmtDate, fmtNumber, statusPill,
 } from '../components/premises/premisesCopy';
+
+/** Meter readings tab: every meter, its last reading, its use, and the way to enter today's. */
+function MetersPanel() {
+  const [meters, setMeters] = useState<Meter[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.get<{ data: Meter[] }>('/premises/meters')
+      .then(res => setMeters(res.data))
+      .catch(err => setError(err instanceof Error ? err.message : 'Could not load the meters'));
+  }, []);
+  if (error) return <p className="text-sm text-red-700">{error}</p>;
+  if (!meters) return <p className="text-sm text-gray-500">Loading…</p>;
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-gray-600">Each meter's reminder opens the reading screen — or open it here.</p>
+        <Link to="/operations/premises/readings" className="px-3 py-1.5 text-sm rounded bg-ooosh-600 text-white hover:bg-ooosh-700">Enter readings</Link>
+      </div>
+      {meters.length === 0 ? (
+        <div className="bg-white border border-gray-200 rounded-lg p-6 text-sm text-gray-600">
+          No meters yet. Add one with "+ Add a check" and choose "Meter reading".
+        </div>
+      ) : (
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {meters.map(m => {
+            const pill = statusPill(m);
+            return (
+              <Link key={m.id} to={`/operations/premises/checks/${m.id}`}
+                className="bg-white border border-gray-200 rounded-lg p-4 hover:border-ooosh-300 space-y-2 block">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-gray-900">{m.title}</div>
+                    <div className="text-xs text-gray-500">{m.place_name} · {m.repeat_text}</div>
+                  </div>
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${pill.cls}`}>{pill.text}</span>
+                </div>
+                <div className="text-xl font-bold tabular-nums text-gray-900">
+                  {m.last_reading ? fmtNumber(m.last_reading.value, 3) : '—'}
+                  {m.unit && <span className="ml-1 text-sm font-normal text-gray-500">{m.unit}</span>}
+                </div>
+                <div className="text-xs text-gray-500">
+                  {m.last_reading ? `Read ${fmtDate(m.last_reading.done_on)}` : 'No readings yet'}
+                  {m.last_use && <> · +{fmtNumber(m.last_use.used)} since {fmtDate(m.last_use.from)}</>}
+                  {m.usual_per_week !== null && <> · usually {fmtNumber(m.usual_per_week)} a week</>}
+                </div>
+                <UsageChart usage={m.usage} unit={m.unit} height={90} />
+              </Link>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 type SortKey = 'title' | 'last_done' | 'next_due' | 'status';
 const SORT_KEYS: SortKey[] = ['title', 'last_done', 'next_due', 'status'];
@@ -57,6 +112,8 @@ function compare(a: PremisesCheck, b: PremisesCheck, key: SortKey, dir: 1 | -1):
 
 export default function PremisesPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab: 'checks' | 'meters' = searchParams.get('tab') === 'meters' ? 'meters' : 'checks';
   const [meta, setMeta] = useState<PremisesMeta | null>(null);
   const [checks, setChecks] = useState<PremisesCheck[]>([]);
   const [loading, setLoading] = useState(true);
@@ -161,6 +218,16 @@ export default function PremisesPage() {
         </div>
       </div>
 
+      <div className="flex gap-1 border-b border-gray-200 mb-4">
+        {([['checks', 'Checks'], ['meters', 'Meter readings']] as const).map(([id, label]) => (
+          <button key={id} type="button" onClick={() => setSearchParams(id === 'checks' ? {} : { tab: id }, { replace: true })}
+            className={`px-3 py-2 text-sm border-b-2 -mb-px ${tab === id ? 'border-ooosh-600 text-ooosh-700 font-semibold' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'meters' ? <MetersPanel /> : (<>
       {/* Places */}
       <div className="flex flex-wrap gap-2 mb-3">
         {[{ id: 'all', name: 'All' }, ...activePlaces].map(p => (
@@ -258,6 +325,7 @@ export default function PremisesPage() {
           </table>
         </div>
       )}
+      </>)}
 
       {adding && meta && (
         <CheckFormModal meta={meta} check={null} onClose={() => setAdding(false)}

@@ -138,10 +138,116 @@ export function dateLabel(ymd: string): string {
  *   test     → "Fire alarm test (due 20 Nov 2026)"
  *   landlord → "Get the landlord's copy: Gas safety inspection (due …)"
  */
-export function reminderTitle(kind: string, responsibility: string, title: string, nextDue: string): string {
+export function reminderTitle(
+  kind: string, responsibility: string, title: string, nextDue: string, point: string | null = null,
+): string {
   const due = `(due ${dateLabel(nextDue)})`;
   if (responsibility === 'landlord') return `Get the landlord's copy: ${title} ${due}`;
   if (kind === 'visit') return `Book: ${title} ${due}`;
   if (kind === 'renewal') return `Renew: ${title} ${due}`;
+  // A test that rotates through call points says which one is next.
+  if (point) return `${title}: ${point} ${due}`;
   return `${title} ${due}`;
+}
+
+// ── Call points (the weekly fire alarm test) ────────────────────────────────
+
+/**
+ * Which point is tested next: the one after the last one tested, round the
+ * list. Nothing tested yet (or the last one has since been taken off the
+ * list) starts at the first. No list = no rotation.
+ */
+export function nextPoint(points: string[] | null | undefined, lastPoint: string | null | undefined): string | null {
+  const list = (points ?? []).map(p => p.trim()).filter(Boolean);
+  if (!list.length) return null;
+  const i = lastPoint ? list.indexOf(lastPoint.trim()) : -1;
+  return list[(i + 1) % list.length];
+}
+
+/** A points list from a form: one per line or comma, trimmed, no blanks or repeats. */
+export function cleanPoints(raw: unknown): string[] {
+  const parts = Array.isArray(raw) ? raw.map(String) : String(raw ?? '').split(/[\n,]/);
+  const out: string[] = [];
+  for (const p of parts) {
+    const t = p.trim().slice(0, 80);
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out.slice(0, 50);
+}
+
+// ── Meter readings ──────────────────────────────────────────────────────────
+
+export interface Reading { done_on: string; value: number; meter_replaced: boolean }
+
+export interface UsageInterval {
+  from: string;
+  to: string;
+  days: number;
+  used: number;
+  /** Used per 7 days over the interval — so a 9-day gap compares with a 7-day one. */
+  per_week: number;
+}
+
+/**
+ * Use between consecutive readings (oldest first). A reading marked "meter
+ * replaced" starts the count afresh, so the gap before it is not a use; a
+ * same-day pair is skipped (no rate).
+ */
+export function usageSeries(readings: Reading[]): UsageInterval[] {
+  const sorted = [...readings].sort((a, b) => (a.done_on < b.done_on ? -1 : a.done_on > b.done_on ? 1 : 0));
+  const out: UsageInterval[] = [];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1], cur = sorted[i];
+    if (cur.meter_replaced) continue;
+    const days = daysBetween(prev.done_on, cur.done_on);
+    if (days <= 0) continue;
+    const used = cur.value - prev.value;
+    out.push({ from: prev.done_on, to: cur.done_on, days, used, per_week: (used / days) * 7 });
+  }
+  return out;
+}
+
+function median(xs: number[]): number | null {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+export interface ReadingAssessment {
+  previous: Reading | null;
+  used: number | null;
+  days: number | null;
+  per_week: number | null;
+  /** The usual week: the median of the last 8 intervals' use per week. */
+  usual_per_week: number | null;
+  flag: 'lower' | 'high' | null;
+}
+
+/** How many times the usual week counts as "looks high". */
+export const HIGH_READING_FACTOR = 3;
+
+/**
+ * A new reading against the meter's history — a warning, never a refusal
+ * (CLAUDE.md "warnings, not hard gates"):
+ *   lower — less than the reading before (a typo, or a replaced meter)
+ *   high  — more than three times the usual week
+ * A replaced meter is never flagged: its count starts again.
+ */
+export function assessReading(history: Reading[], value: number, doneOn: string, replaced: boolean): ReadingAssessment {
+  const before = history
+    .filter(r => r.done_on <= doneOn)
+    .sort((a, b) => (a.done_on < b.done_on ? -1 : a.done_on > b.done_on ? 1 : 0));
+  const previous = before.length ? before[before.length - 1] : null;
+  const usual = median(usageSeries(before).slice(-8).map(u => u.per_week).filter(x => x >= 0));
+  if (!previous || replaced) {
+    return { previous, used: null, days: null, per_week: null, usual_per_week: usual, flag: null };
+  }
+  const days = daysBetween(previous.done_on, doneOn);
+  const used = value - previous.value;
+  const perWeek = days > 0 ? (used / days) * 7 : null;
+  let flag: ReadingAssessment['flag'] = null;
+  if (used < 0) flag = 'lower';
+  else if (perWeek !== null && usual !== null && usual > 0 && perWeek > usual * HIGH_READING_FACTOR) flag = 'high';
+  return { previous, used, days, per_week: perWeek, usual_per_week: usual, flag };
 }

@@ -126,7 +126,12 @@ const SELECT_TASKS = `
          WHEN t.source_type = 'marketing_post' THEN '/jobs/marketing?tab=content&post=' || t.source_id
          -- A premises check's reminder, or the "get it fixed" after a failed one
          -- → the check's page (services/premises.ts).
-         WHEN t.source_type = 'premises_check' THEN '/operations/premises/checks/' || t.source_id
+         -- A meter's reminder opens the phone's reading screen, every other check its page.
+         WHEN t.source_type = 'premises_check' THEN (
+           SELECT CASE WHEN pc.kind = 'reading' THEN '/operations/premises/readings'
+                       ELSE '/operations/premises/checks/' || pc.id END
+             FROM premises_checks pc WHERE pc.id = t.source_id
+         )
          WHEN t.source_type = 'premises_fix' THEN (
            SELECT '/operations/premises/checks/' || pr.check_id
              FROM premises_records pr WHERE pr.id = t.source_id

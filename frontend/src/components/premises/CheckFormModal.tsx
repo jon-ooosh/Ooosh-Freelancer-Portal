@@ -15,7 +15,7 @@ import { ukToday } from '../../lib/ukDate';
 import SearchPicker, { PickerOption } from '../SearchPicker';
 import { RecurrenceFields, RepeatValue } from '../RecurrenceFields';
 import {
-  CheckKind, KIND_HINT, KIND_LABEL, PremisesCheck, PremisesMeta, VISIBILITY_LABEL, VISIBILITY_RANK, Visibility,
+  CheckKind, KIND_HINT, KIND_LABEL, METER_UNITS, PremisesCheck, PremisesMeta, VISIBILITY_LABEL, VISIBILITY_RANK, Visibility,
 } from './premisesCopy';
 
 interface FormState {
@@ -34,6 +34,11 @@ interface FormState {
   location_note: string;
   why_note: string;
   notes: string;
+  /** Meter readings. */
+  unit: string;
+  meter_serial: string;
+  /** A rotating test's call points — one per line. */
+  points: string;
 }
 
 const DEFAULT_REMIND: Record<CheckKind, number> = { visit: 30, renewal: 30, test: 0, reading: 0 };
@@ -58,6 +63,9 @@ function initialState(meta: PremisesMeta, check: PremisesCheck | null): FormStat
     location_note: check?.location_note ?? '',
     why_note: check?.why_note ?? '',
     notes: check?.notes ?? '',
+    unit: check?.unit ?? 'kWh',
+    meter_serial: check?.meter_serial ?? '',
+    points: (check?.points ?? []).join('\n'),
   };
 }
 
@@ -78,6 +86,9 @@ function toPayload(f: FormState) {
     location_note: f.location_note.trim() || null,
     why_note: f.why_note.trim() || null,
     notes: f.notes.trim() || null,
+    unit: f.kind === 'reading' ? (f.unit.trim() || null) : null,
+    meter_serial: f.kind === 'reading' ? (f.meter_serial.trim() || null) : null,
+    points: f.kind === 'test' ? f.points.split('\n').map(p => p.trim()).filter(Boolean) : [],
   };
 }
 
@@ -156,8 +167,8 @@ export default function CheckFormModal({ meta, check, onClose, onSaved }: {
 
           <div>
             <span className={label}>What kind of check</span>
-            <div className="grid sm:grid-cols-3 gap-2">
-              {(['visit', 'test', 'renewal'] as CheckKind[]).map(k => (
+            <div className="grid sm:grid-cols-2 gap-2">
+              {(['visit', 'test', 'renewal', 'reading'] as CheckKind[]).map(k => (
                 <button key={k} type="button" onClick={() => {
                   setF(prev => ({ ...prev, kind: k, remind_days_before: check ? prev.remind_days_before : DEFAULT_REMIND[k] }));
                 }}
@@ -167,7 +178,6 @@ export default function CheckFormModal({ meta, check, onClose, onSaved }: {
                 </button>
               ))}
             </div>
-            {f.kind === 'reading' && <p className="text-xs text-amber-700 mt-1">Meter readings arrive in the next update.</p>}
           </div>
 
           <div className="grid sm:grid-cols-2 gap-3">
@@ -228,6 +238,33 @@ export default function CheckFormModal({ meta, check, onClose, onSaved }: {
               </div>
             </div>
           </div>
+
+          {f.kind === 'reading' && (
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div>
+                <label className={label} htmlFor="pc-unit">Unit</label>
+                <select id="pc-unit" value={f.unit} onChange={e => set('unit', e.target.value)} className={input}>
+                  {!METER_UNITS.includes(f.unit) && <option value={f.unit}>{f.unit || '—'}</option>}
+                  {METER_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className={label} htmlFor="pc-serial">Meter serial number</label>
+                <input id="pc-serial" value={f.meter_serial} onChange={e => set('meter_serial', e.target.value)} maxLength={60}
+                  placeholder="Optional — it's on the meter" className={input} />
+              </div>
+            </div>
+          )}
+          {f.kind === 'test' && (
+            <div>
+              <label className={label} htmlFor="pc-points">Call points to rotate through</label>
+              <textarea id="pc-points" value={f.points} onChange={e => set('points', e.target.value)} rows={3}
+                placeholder={'One per line, in order — e.g.\nCP1 Front door\nCP2 Warehouse'} className={input} />
+              <p className="text-xs text-gray-500 mt-1">
+                Each test asks for the next one along, and the To Do says which. Leave empty if it doesn't rotate.
+              </p>
+            </div>
+          )}
 
           <div className="rounded border border-gray-200 p-3 space-y-3">
             <span className={label}>How often</span>

@@ -1,5 +1,6 @@
 import {
   canSee, visibleLevels, roleRank, checkStatus, reminderWanted, nextDueAfterRecord, reminderTitle,
+  nextPoint, cleanPoints, usageSeries, assessReading,
 } from '../premises-rules';
 
 describe('premises — who can see a check', () => {
@@ -90,5 +91,69 @@ describe('premises — the To Do title', () => {
     expect(reminderTitle('renewal', 'ours', 'Public liability insurance', '2027-01-01')).toBe('Renew: Public liability insurance (due 1 Jan 2027)');
     expect(reminderTitle('test', 'ours', 'Fire alarm test', '2026-11-20')).toBe('Fire alarm test (due 20 Nov 2026)');
     expect(reminderTitle('visit', 'landlord', 'EICR', '2027-03-03')).toBe("Get the landlord's copy: EICR (due 3 Mar 2027)");
+  });
+});
+
+describe('premises — call points', () => {
+  const points = ['CP1 Front door', 'CP2 Warehouse', 'CP3 Studio'];
+  it('rotates to the one after the last tested, round the list', () => {
+    expect(nextPoint(points, null)).toBe('CP1 Front door');
+    expect(nextPoint(points, 'CP1 Front door')).toBe('CP2 Warehouse');
+    expect(nextPoint(points, 'CP3 Studio')).toBe('CP1 Front door');
+  });
+  it('starts again when the last one is no longer on the list; no list, no rotation', () => {
+    expect(nextPoint(points, 'CP9 Gone')).toBe('CP1 Front door');
+    expect(nextPoint([], 'CP1')).toBeNull();
+  });
+  it('cleans a typed list', () => {
+    expect(cleanPoints('CP1, CP2\n\nCP1\n CP3 ')).toEqual(['CP1', 'CP2', 'CP3']);
+  });
+  it('names the point in the To Do', () => {
+    expect(reminderTitle('test', 'ours', 'Fire alarm test', '2026-11-26', 'CP2 Warehouse'))
+      .toBe('Fire alarm test: CP2 Warehouse (due 26 Nov 2026)');
+  });
+});
+
+describe('premises — meter readings', () => {
+  const weekly = [
+    { done_on: '2026-10-01', value: 1000, meter_replaced: false },
+    { done_on: '2026-10-08', value: 1400, meter_replaced: false },
+    { done_on: '2026-10-15', value: 1800, meter_replaced: false },
+    { done_on: '2026-10-22', value: 2200, meter_replaced: false },
+  ];
+  it('works out use per week between readings', () => {
+    const u = usageSeries(weekly);
+    expect(u).toHaveLength(3);
+    expect(u[0]).toEqual({ from: '2026-10-01', to: '2026-10-08', days: 7, used: 400, per_week: 400 });
+  });
+  it('a nine-day gap is scaled to a week', () => {
+    const u = usageSeries([{ done_on: '2026-10-01', value: 0, meter_replaced: false }, { done_on: '2026-10-10', value: 900, meter_replaced: false }]);
+    expect(u[0].per_week).toBe(700);
+  });
+  it('a replaced meter starts again — no use counted across it', () => {
+    const u = usageSeries([...weekly, { done_on: '2026-10-29', value: 5, meter_replaced: true }, { done_on: '2026-11-05', value: 405, meter_replaced: false }]);
+    expect(u.map(x => x.used)).toEqual([400, 400, 400, 400]);
+  });
+  it('an ordinary week is not flagged', () => {
+    const a = assessReading(weekly, 2610, '2026-10-29', false);
+    expect(a.flag).toBeNull();
+    expect(a.used).toBe(410);
+    expect(a.usual_per_week).toBe(400);
+  });
+  it('lower than last time is flagged, unless the meter was replaced', () => {
+    expect(assessReading(weekly, 2100, '2026-10-29', false).flag).toBe('lower');
+    expect(assessReading(weekly, 12, '2026-10-29', true).flag).toBeNull();
+  });
+  it('more than three times the usual week is flagged', () => {
+    expect(assessReading(weekly, 2200 + 1300, '2026-10-29', false).flag).toBe('high');
+    expect(assessReading(weekly, 2200 + 1100, '2026-10-29', false).flag).toBeNull();
+  });
+  it('the first reading has nothing to compare with', () => {
+    const a = assessReading([], 1234, '2026-11-19', false);
+    expect(a.previous).toBeNull();
+    expect(a.flag).toBeNull();
+  });
+  it('a reading dated before the latest compares with the one before it', () => {
+    expect(assessReading(weekly, 1500, '2026-10-10', false).previous?.done_on).toBe('2026-10-08');
   });
 });

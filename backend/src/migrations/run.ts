@@ -396,6 +396,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '354_problem_written_off_reason.sql',
         '355_premises_compliance.sql',
         '356_organisation_also_types.sql',
+        '357_premises_readings_points_history.sql',
       ];
 
       for (const migration of migrations) {
