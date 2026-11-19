@@ -11,6 +11,7 @@ import emailService from '../services/email-service';
 import { STAFF_RECORDS_PREFIX, STAFF_RECORD_ROLES } from './staff-records';
 import { CLAIMS_PREFIX } from './incident-claims';
 import { CALLS_PREFIX } from '../services/telephony';
+import { PREMISES_PREFIX, canOpenPremisesFile } from '../services/premises';
 
 const router = Router();
 router.use(authenticate);
@@ -230,6 +231,14 @@ router.get('/download', authorize(...STAFF_ROLES), async (req: AuthRequest, res:
       // Nov 2026: the aim is that nobody needs to listen; Claude reads them).
       if (req.user?.role !== 'admin') {
         res.status(403).json({ error: 'Not authorised to listen to call recordings' });
+        return;
+      }
+    } else if (key.startsWith(PREMISES_PREFIX)) {
+      // Premises & compliance certificates (docs/PREMISES-COMPLIANCE-SPEC.md
+      // §6) — the one prefix gated PER FILE: its check's visibility (everyone /
+      // managers / admins) decides, looked up by the key. No row, no file.
+      if (!(await canOpenPremisesFile(key, req.user?.role))) {
+        res.status(403).json({ error: 'Not authorised to view this file' });
         return;
       }
     } else if (!allowedPrefixes.some((p) => key.startsWith(p))) {

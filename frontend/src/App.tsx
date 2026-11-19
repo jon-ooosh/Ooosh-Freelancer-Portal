@@ -26,6 +26,8 @@ import CarnetDetailPage from './pages/CarnetDetailPage';
 import RehearsalsPage from './pages/RehearsalsPage';
 import ProblemsPage from './pages/ProblemsPage';
 import IssueDetailPage from './pages/IssueDetailPage';
+import PremisesPage from './pages/PremisesPage';
+import PremisesCheckPage from './pages/PremisesCheckPage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import MoneyOverviewPage from './pages/MoneyOverviewPage';
 import CashflowForecastPage from './pages/CashflowForecastPage';
@@ -313,6 +315,8 @@ export default function App() {
                 <Route path="/holding/lost-property" element={<HoldingPage defaultKind="lost_property" />} />
                 <Route path="/holding/receipt/:id" element={<HoldingReceiptPage />} />
                 <Route path="/operations/problems/:id" element={<IssueDetailPage />} />
+                <Route path="/operations/premises" element={<PremisesPage />} />
+                <Route path="/operations/premises/checks/:id" element={<PremisesCheckPage />} />
                 <Route path="/drivers" element={<DriversPage />} />
                 <Route path="/drivers/:id" element={<DriverDetailPage />} />
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />

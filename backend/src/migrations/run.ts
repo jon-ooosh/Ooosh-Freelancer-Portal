@@ -394,6 +394,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '352_account_credits.sql',
         '353_staff_document_minor_correction.sql',
         '354_problem_written_off_reason.sql',
+        '355_premises_compliance.sql',
       ];
 
       for (const migration of migrations) {

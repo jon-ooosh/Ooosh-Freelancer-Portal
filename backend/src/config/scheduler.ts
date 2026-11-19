@@ -1064,6 +1064,21 @@ export function startScheduler() {
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Social post reminders scheduled daily at 09:16');
 
+  // Premises & compliance (docs/PREMISES-COMPLIANCE-SPEC.md): each check's
+  // owner gets ONE To Do once it comes inside its reminder lead, and every open
+  // reminder is re-checked (retired, owner changed, date moved). Saves sync at
+  // once; this catches the days passing.
+  cron.schedule('17 9 * * *', async () => {
+    try {
+      const { runPremisesReminders } = await import('../services/premises');
+      const n = await runPremisesReminders();
+      if (n > 0) console.log(`Scheduler: premises reminders — ${n} checked`);
+    } catch (err) {
+      console.error('Scheduler: premises reminders failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Premises reminders scheduled daily at 09:17');
+
   cron.schedule('18 9 * * *', async () => {
     try {
       const { runReferralAlertScan } = await import('../services/referral-alert');

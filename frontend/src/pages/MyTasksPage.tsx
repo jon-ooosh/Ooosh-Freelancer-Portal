@@ -691,6 +691,9 @@ const SOURCE_LABEL: Record<string, string> = {
   marketing_placement: 'Marketing',
   referral: 'Referral',
   marketing_post: 'Social post',
+  // Premises & compliance: a check's reminder, and "get it fixed" after a failed one.
+  premises_check: 'Premises',
+  premises_fix: 'Premises',
 };
 
 const SERIES = 'staff_task_series';

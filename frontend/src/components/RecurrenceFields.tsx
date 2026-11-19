@@ -73,10 +73,12 @@ export function defaultRepeat(startsOn: string): RepeatValue {
  * The fields themselves — used by the create pop-up and the edit form.
  * Controlled: `value` in, `onChange` out. `startsOn` anchors the preview.
  */
-export function RecurrenceFields({ value, onChange, startsOn }: {
+export function RecurrenceFields({ value, onChange, startsOn, showEnds = true }: {
   value: RepeatValue;
   onChange: (v: RepeatValue) => void;
   startsOn: string;
+  /** Premises checks never end ("after 10 times") — they're retired instead. */
+  showEnds?: boolean;
 }) {
   const [dates, setDates] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -194,7 +196,7 @@ export function RecurrenceFields({ value, onChange, startsOn }: {
         </div>
       )}
 
-      <div className="space-y-1.5">
+      {showEnds && <div className="space-y-1.5">
         <p className="text-gray-700">Ends</p>
         <label className="flex items-center gap-2">
           <input type="radio" checked={endsKind === 'never'} onChange={() => onChange({ ...value, endsOn: null, endsAfter: null })} />
@@ -217,7 +219,7 @@ export function RecurrenceFields({ value, onChange, startsOn }: {
             className="w-20 px-2 py-1 border border-gray-300 rounded disabled:opacity-50" aria-label="How many times" />
           times
         </label>
-      </div>
+      </div>}
 
       <div className="rounded bg-gray-50 border border-gray-200 px-3 py-2">
         {error ? (

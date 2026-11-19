@@ -1,6 +1,7 @@
 # Premises & compliance — spec
 
-**Status: DRAFT, 19 Nov 2026. Nothing built.** Mockups (v1, before the decisions below):
+**Status: PHASE 1 BUILT (PR 1), 19 Nov 2026 — §12 is what shipped and where it differs from the plan; read it
+first.** Phase S (suppliers) and phases 2–3 are not built. Mockups (v1, before the decisions below):
 https://claude.ai/artifact/GnedY9eyyMDydPUKMg2tJK — Mockup A's place chips, visibility and "Book the next
 visit" are described here, not drawn there yet.
 
@@ -230,14 +231,21 @@ Free-text tags were considered and rejected: "supplier", "Supplier" and "supplie
 
 ---
 
-## §10 Open questions (for jon)
+## §10 Answers (jon, 19 Nov 2026)
 
-1. **`also_types`** (§8) — agree?
-2. **Who may add / edit / retire checks** — managers (admins for admin-only ones), recording by anyone who can
-   see the check (§5)?
-3. **The starting list** (§11) — which apply to Ooosh's buildings, which are the landlord's (ask for the copy
-   rather than do the work), and who owns each. Anything left blank seeds owned by jon.
-4. **Default reminder lead** — 30 days for visits and renewals; insurance perhaps 45 (the broker needs time)?
+1. **`also_types`** (§8) — yes. Phase S.
+2. **Who may add / edit / retire checks** — managers (admins for admin-only ones); recording by anyone who can
+   see the check. As proposed.
+3. **The starting list** (§11) — "start with your list, I'll amend once it's live", less the legionella risk
+   assessment and the LOLER forklift exam, with the weekly fire alarm test, and the music licence as "PRS & PPL
+   licence". The seeded checks have **no owner and no date**: nothing reminds anyone until each is set up.
+4. **Reminder lead** — 30 days, changeable per check once live.
+5. **Places** — Compass House, Rear Unit, Beach Yard (plus "Whole site" and "Company" from §1.3).
+6. **Repeats** — like van prep's periodic checks: every N days / weeks / months / years, OR on a fixed date
+   ("annually on 1 Jan"). Both are To Do's existing repeat modes (§12).
+7. **Sorting** — each heading's rows sort by the column clicked (name, last done, next due, status).
+8. **The To Do as a link** — the "Premises" chip on the To Do opens the check, the same way a van sale's or a
+   social post's does (`source_link` in `staff-tasks.ts`). Not a new kind of To Do.
 
 ---
 
@@ -250,7 +258,7 @@ the frequency. Each seeds as a check with the place, heading, kind and interval 
 |---|---|---|---|---|
 | Fire | Fire risk assessment (written, reviewed) | visit | 12 months, or on change | Whole site |
 | Fire | Fire alarm service | visit | 6 months | Whole site |
-| Fire | Fire alarm call-point test | test | weekly, rotate points | Whole site |
+| Fire | Fire alarm test | test | weekly | Whole site |
 | Fire | Emergency lighting flick test | test | monthly | per building |
 | Fire | Emergency lighting full-duration test | visit | 12 months | per building |
 | Fire | Extinguisher service | visit | 12 months | Whole site |
@@ -259,10 +267,7 @@ the frequency. Each seeds as a check with the place, heading, kind and interval 
 | Gas & electrical | PAT (office and studio kit — not hire stock) | visit | 12 months (risk-based) | Whole site |
 | Air & water | Air con service and F-gas leak check | visit | 12 months (depends on system size) | per building |
 | Air & water | Air con energy inspection (TM44, over 12 kW) | visit | 5 years | Whole site |
-| Air & water | Legionella risk assessment | visit | about 2 years | Whole site |
-| Air & water | Water temperature checks | test | monthly, if the assessment asks | Whole site |
 | Building & equipment | Asbestos register (pre-2000 building) | renewal | review yearly — often the landlord's | Whole site |
-| Building & equipment | Forklift thorough examination (LOLER) | visit | 12 months | Yard |
 | Building & equipment | Pallet racking inspection | visit | 12 months | per building |
 | Building & equipment | Roller shutter / powered doors | visit | 6–12 months | per building |
 | Building & equipment | Intruder alarm and CCTV | visit | 12 months | Whole site |
@@ -273,6 +278,52 @@ the frequency. Each seeds as a check with the place, heading, kind and interval 
 | Lease & legal | Lease breaks and rent reviews | renewal | one-off dates | per building / Yard |
 | Lease & legal | EPC | renewal | 10 years | per building |
 | Licences & registrations | ICO data protection fee | renewal | yearly | Company |
-| Licences & registrations | Music licence for the studios (if needed) | renewal | yearly | Company |
+| Licences & registrations | PRS & PPL licence | renewal | yearly | Company |
 | Licences & registrations | Waste transfer notes (keep 2 years) | renewal | yearly | Whole site |
-| Meters | Gas, electric, water readings | reading | weekly | per building |
+| Meters | Gas, electric, water readings | reading | weekly | per building — seeded in phase 2 |
+
+---
+
+## §12 Phase 1 — what shipped (PR 1, 19 Nov 2026)
+
+**Where:** Operations › Premises & compliance (`/operations/premises`, a check at
+`/operations/premises/checks/:id`). Migration **355** (`premises_places`, `premises_headings`, `premises_checks`,
+`premises_records`, `premises_files` + the seed). Backend `services/premises.ts` (all the logic),
+`services/premises-rules.ts` (pure: who sees what, status, next due, the To Do's words — tested in
+`__tests__/premises-rules.test.ts`), `routes/premises.ts` (`/api/premises`). Frontend `pages/PremisesPage.tsx`,
+`pages/PremisesCheckPage.tsx`, `components/premises/` (`CheckFormModal`, `RecordModal`, `PlacesHeadingsModal`,
+`premisesCopy.ts`).
+
+**Built:**
+- The register: place chips, heading groups, sort by the column clicked within each heading (name / last done /
+  next due / status — the place and the sort remembered per browser), search, "Overdue or due soon", "Mine",
+  "Show retired" (managers), counts, the current certificate opens from the row.
+- A check's page: about, history (each record's outcome, notes, files, the next due date it set), Record,
+  Change, Retire / Bring it back, Delete (only with nothing recorded), "+ Add a file" on any record, remove a
+  record (manager; the due date is left alone) or a file (manager or whoever added it).
+- Three kinds: **visit**, **test**, **renewal**. Reading is in the table's CHECK but not offered (phase 2).
+- **Repeats are the To Do engine's own** (`task-recurrence.ts`), on the form through the shared
+  `RecurrenceFields` (now with `showEnds={false}`): "After the last one is done" (every N days / weeks / months /
+  years from the day it was done) or "On a schedule" (every year on 1 Jan, every Thursday …), counting from the
+  check's next due date. **Done early for a fixed date counts as that one:** a 1 Jan check done on 19 Nov is next
+  due the 1 Jan after (`nextAfterClose`, the rule repeating to-dos already keep).
+- **A date from the certificate wins** (`next_due_source = 'certificate'`); a record older than the latest one
+  goes into the history without moving the date.
+- **Reminders** (`syncCheckReminder()`, after every write + daily **09:17**): ONE open To Do per check
+  (`source_type = 'premises_check'`) to its owner once inside the lead — "Book: …", "Renew: …", "Get the
+  landlord's copy: …", or the test's own name, each with its due date. Recording it ticks that To Do done. A To
+  Do ticked by hand without recording isn't made again for the same due date (`reminded_for_due`). A **Fail**
+  makes "Get it fixed: …" (`source_type = 'premises_fix'`, a week out) for the owner, else whoever recorded it.
+  Both link back to the check from To Do's "Premises" chip.
+- **Visibility** everyone / managers / admins, enforced on every read (a hidden check is a 404); nobody sets a
+  level they can't see; an owner must be able to see their check. Files under `premises/<check>/<record>/`, gated
+  per file in `GET /api/files/download` by `canOpenPremisesFile()` — the first prefix gated by a row.
+- Places and headings: admins rename, reorder, add, retire (refused while a live check is under it).
+
+**Where it differs from the plan:** owners are optional (no owner = no reminders, shown amber); the seed puts
+building checks on "Whole site" (move each as it is set up); "Who did it" is an organisation for visits only —
+tests and renewals carry who recorded them.
+
+**Not built yet:** Phase S (suppliers out of the client pickers, `also_types`), phase 2 (meter readings, the
+fire-alarm call-point rotation), phase 3 (documents library, booking a visit onto the staff calendar,
+advisories → To Do, Costs links). The R2 file backup is in `BACKLOG.md`.
