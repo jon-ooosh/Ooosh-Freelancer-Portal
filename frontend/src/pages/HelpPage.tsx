@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
-import { GUIDES, type Guide, guideBySlug, guideDate, guideImage, searchGuides, stepLink } from '../lib/helpGuides';
+import { useAuthStore } from '../hooks/useAuthStore';
+import { GUIDES, type Guide, canSeeHelp, guideBySlug, guideDate, guideImage, searchGuides, stepLink } from '../lib/helpGuides';
 
 /**
  * Help — the staff "How do I…?" guides (help/README.md). `/help` is the list with a
@@ -11,6 +12,12 @@ import { GUIDES, type Guide, guideBySlug, guideDate, guideImage, searchGuides, s
  */
 export default function HelpPage() {
   const { slug } = useParams<{ slug: string }>();
+  const role = useAuthStore((s) => s.user?.role);
+  // Not released to everyone yet (helpGuides.ts canSeeHelp) - a link somebody was sent
+  // lands here rather than on a half-written set of guides.
+  if (!canSeeHelp(role)) {
+    return <div className="max-w-xl mx-auto p-6 text-sm text-gray-600">The Help guides are not open to everyone yet. Ask Jon if you need one.</div>;
+  }
   return slug ? <GuideView key={slug} slug={slug} /> : <GuideList />;
 }
 

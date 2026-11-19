@@ -49,10 +49,12 @@ job's Money tab), or a path beginning `/`.
 - Say what to press and what you then see. Leave out how it works underneath.
 - One action per step. A picture only where it shows where to look.
 - Hyphens, not long dashes. No emoji.
+- **"Manually", never "by hand"** (jon, Nov 2026): "confirm it manually". And "automatically" for
+  what OP does without anybody pressing anything. The check refuses "by hand" in a guide.
 
 ## Pictures
 
-Pictures are taken by a script, never by hand, so they can be taken again when a screen
+Pictures are taken by a script, never manually, so they can be taken again when a screen
 changes.
 
 - **Made-up data only**: "The Demo Band", jobs 90001 and up. Never a real client, never production.

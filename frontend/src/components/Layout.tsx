@@ -7,6 +7,7 @@ import { api } from '../services/api';
 import GlobalSearch from './GlobalSearch';
 import NotificationBell from './NotificationBell';
 import HelpButton from './HelpButton';
+import { canSeeHelp } from '../lib/helpGuides';
 import LoginSecurityModal from './LoginSecurityModal';
 
 interface NavItem {
@@ -371,7 +372,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </div>
             <div className="flex items-center gap-2">
               <GlobalSearch />
-              <HelpButton />
+              {canSeeHelp(user?.role) && <HelpButton />}
               <NotificationBell />
               <UserMenu />
               {/* Mobile hamburger */}

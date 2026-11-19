@@ -442,7 +442,8 @@ folder in the repo** (`help/guides/<slug>/guide.json` + pictures), bundled by `f
 `help/shots/*.js` from made-up data ("The Demo Band"), never by hand and never from production. **A PR that
 changes a file a guide `covers` must update that guide or re-date its `checked`** — CI fails otherwise
 (`scripts/check-help-coverage.mjs`). House rules and anything signed stay in Staff Documents. "Tell us" on a
-guide bells the admins (`routes/help.ts`). Not built: the Help chat, "Report a problem".
+guide bells the admins (`routes/help.ts`). **Admins only for now** (`helpGuides.ts` `canSeeHelp()`) until jon
+releases it. Wording: "manually", never "by hand" (the check refuses it). Not built: the Help chat, "Report a problem".
 
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access|absence`. The person is

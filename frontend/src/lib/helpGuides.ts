@@ -50,6 +50,12 @@ export const GUIDES: Guide[] = Object.entries(files)
   .map(([path, g]) => ({ ...g, slug: slugOf(path) }))
   .sort((a, b) => a.area.localeCompare(b.area) || a.title.localeCompare(b.title));
 
+// Who sees Help (the ? in the header and the /help pages). Admins only while the first
+// guides are written (jon, 19 Nov 2026); to release it to everyone, list the staff roles
+// here or return true. Nothing in a guide is private - this is "not ready", not a lock.
+const HELP_ROLES = ['admin'];
+export const canSeeHelp = (role: string | null | undefined): boolean => !!role && HELP_ROLES.includes(role);
+
 export const guideBySlug = (slug: string | undefined): Guide | null => GUIDES.find((g) => g.slug === slug) ?? null;
 
 export function guideImage(slug: string, file: string | undefined): string | null {
