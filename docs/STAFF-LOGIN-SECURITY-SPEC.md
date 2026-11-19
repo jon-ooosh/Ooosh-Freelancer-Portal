@@ -189,7 +189,7 @@ session — a second tab, not a second login.
 |---|---|
 | `GET /shop/stock/search`, `/stock/barcode/:code`, `/stock/:id`, `POST /stock/availability` | `/shop/sales/:id/cancel`, `/reverse`, `/refund-settled`, `/retry` |
 | `GET /shop/jobs/today`, `GET /shop/jobs/search` (today's bookings only) | `/shop/period*`, `/week*`, `/consumption`, `/drain`, `/sales/review` |
-| `POST /shop/quote`, `POST /shop/sales` (cash or card reader) | `GET /shop/sales` list (the till shows its own last five only) |
+| `POST /shop/quote`, `POST /shop/sales` (cash or card reader; "their bill" since 19 Nov 2026 — §8.4) | `GET /shop/sales` list (the till shows its own last five only) |
 | `POST /shop/sales/:id/receipt`, `GET …/receipt/suggestions`, `/jobs/:jobId/receipt-contacts` | everything outside `/shop` and `/warehouse` |
 | The card-reader start / poll calls, when `system_settings.stripe_terminal_kiosk = 'true'` | refunds to the card |
 
@@ -332,6 +332,11 @@ editable on Settings › Login security & kiosk ("Second factor required from").
   `recorded_in = 'kiosk_till'`, `recorded_by = NULL`, the person set; the discount ceiling is the
   plain-staff one whoever is picked; `kind = 'sale'` and `till_cash` / `card_reader` only. The
   receipt route only sends for a kiosk sale, in the seller's name.
+  **Since 19 Nov 2026 (jon) also `invoice_later` — "put it on their bill"**: a band in from
+  rehearsals buys strings at the front desk and they go on their own job, without fetching a
+  laptop (the sitter till already could). The usual rules apply — a job must be picked and open
+  (`assertSellableJob()`), the seller is named. NB the iPad's job search is every open job
+  (`searchSellableJobs()`), not only today's bookings as §4.2's table first said.
 - **The reader on the kiosk**: `stripe_terminal_kiosk` (seeded `false`) admits the till to
   `KIOSK_TERMINAL_ALLOW` on `routes/stripe-terminal.ts`; a session it asks about must be one a
   kiosk sale started (`shop_payload.actor.via = 'kiosk'`, `sessionStartedByKiosk()`).

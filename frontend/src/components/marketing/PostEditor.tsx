@@ -180,7 +180,6 @@ export default function PostEditor({ postId, startDate, onClose, onSaved }: {
         ))}
         {owner && !staff.some((u) => u.person_id === owner) && <option value={owner}>Someone else</option>}
       </select>
-      <p className="text-[11px] text-gray-500 mt-0.5">Gets a To Do two days before, if it isn't approved.</p>
     </div>
   );
   const themeField = (

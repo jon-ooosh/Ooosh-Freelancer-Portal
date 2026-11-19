@@ -448,6 +448,9 @@ export function DocFormModal({ doc, users, canPublish = true, tagSuggestions = [
 
 // ── New version modal ─────────────────────────────────────────────────────────
 export function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: () => void; onSaved: () => void }) {
+  // Admin only: a small correction (typos) that doesn't ask anyone to read / sign again (jon, 19 Nov 2026).
+  const isAdmin = useAuthStore((st) => st.user?.role) === 'admin';
+  const [minor, setMinor] = useState(false);
   const [body, setBody] = useState('');
   const [file, setFile] = useState<{ file_r2_key: string; file_name: string } | null>(null);
   const [changeNote, setChangeNote] = useState('');
@@ -484,9 +487,11 @@ export function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: 
       const res = await api.post<{ reflagged: number }>(`/staff-documents/${doc.id}/versions`, {
         body: body.trim() || null, file_r2_key: file?.file_r2_key || null, file_name: file?.file_name || null,
         change_note: changeNote.trim() || null,
+        ...(minor ? { minor_correction: true } : {}),
       });
       onSaved();
-      if (res.reflagged > 0) alert(`New version published. ${res.reflagged} person(s) will be asked to review/re-sign.`);
+      if (minor) alert('Correction published. Nobody is asked to read or sign it again.');
+      else if (res.reflagged > 0) alert(`New version published. ${res.reflagged} person(s) will be asked to review/re-sign.`);
     } catch (e) { setErr(e instanceof Error ? e.message : 'Failed.'); setSaving(false); }
   };
 
@@ -499,10 +504,21 @@ export function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: 
         </div>
         <div className="p-5 overflow-y-auto space-y-3">
           {err && <div className="p-3 rounded bg-red-50 text-red-700 text-sm">{err}</div>}
+          {isAdmin && (
+            <label className="flex items-start gap-2 rounded border border-gray-200 p-2 text-sm">
+              <input type="checkbox" className="mt-0.5" checked={minor} onChange={(e) => setMinor(e.target.checked)} />
+              <span><span className="font-medium text-gray-900">Small correction — don&rsquo;t ask anyone to read or sign it again</span>
+                <span className="block text-xs text-gray-500">For typos and wording that doesn&rsquo;t change what anyone has agreed to. Sign-offs and freelancers&rsquo; &ldquo;read it&rdquo; ticks stay as they are; the version is marked as a correction.</span></span>
+            </label>
+          )}
+          {minor ? (
+            <p className="text-xs text-gray-600 bg-gray-50 rounded p-2">A correction: nobody is re-flagged and no one gets a bell. Edit the current text below.</p>
+          ) : (<>
           <p className="text-xs text-amber-700 bg-amber-50 rounded p-2">Publishing a new version re-flags everyone who completed the previous one to review/re-sign. Edit the current text below.</p>
           {doc.freelancer_read_required && (
             <p className="text-xs text-amber-700 bg-amber-50 rounded p-2">Freelancers will be asked to read it again too: it shows as &ldquo;To read&rdquo; in their portal until they confirm the new version.</p>
           )}
+          </>)}
           {loadingRaw ? <div className="text-sm text-gray-500">Loading current version…</div>
             : <ContentEditor body={body} setBody={setBody} file={file} setFile={setFile} />}
           <label className="text-sm block">Change note
@@ -512,7 +528,7 @@ export function VersionModal({ doc, onClose, onSaved }: { doc: DocRow; onClose: 
         <div className="px-5 py-3 border-t flex justify-end gap-2">
           <button onClick={attemptClose} className="px-4 py-2 text-sm text-gray-600">Cancel</button>
           <button onClick={submit} disabled={saving} className="px-5 py-2 rounded-md bg-purple-700 text-white text-sm font-medium disabled:opacity-50">
-            {saving ? 'Publishing…' : 'Publish version'}
+            {saving ? 'Publishing…' : minor ? 'Publish correction' : 'Publish version'}
           </button>
         </div>
       </div>

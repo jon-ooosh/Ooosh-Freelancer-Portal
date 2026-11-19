@@ -366,8 +366,8 @@ export default function ShopTillPage({ kiosk = false }: { kiosk?: boolean } = {}
   }, []);
   const tenderOptions = TENDERS.filter(t => (!t.needsJob || route)
     && (t.key !== 'card_reader' || readerAccess?.enabled)
-    // The kiosk takes cash or the reader — never "their bill" (§4.2).
-    && (!kiosk || t.key === 'till_cash' || t.key === 'card_reader')
+    // The kiosk takes cash, the reader, or "their bill" (§4.2; their bill since 19 Nov 2026).
+    && (!kiosk || t.key === 'till_cash' || t.key === 'card_reader' || t.key === 'invoice_later')
     && newPaymentMethodAllowed(t.key, user?.role));
 
   // A band's job: offer its contacts in the receipt box (THE contact pool, server-side).
