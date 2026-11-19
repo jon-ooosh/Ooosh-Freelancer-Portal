@@ -7,7 +7,9 @@
  * - A document asks for a read when it is shared with freelancers, live
  *   (active + approved) and `freelancer_read_required` is on.
  * - A read belongs to a VERSION: "New version" on the Staff Documents page asks
- *   everyone again; an edit to the title or settings doesn't.
+ *   everyone again; an edit to the title or settings doesn't, and nor does an
+ *   admin's "Small correction" version (the reads are copied onto it — routes/
+ *   staff-documents.ts, STAFF-DOCUMENTS-SPEC "Small corrections").
  * - Who is asked: approved freelancers with a portal login (not the office's
  *   shared portal account, which is staff).
  * - Nothing is blocked by an unread document. The portal reminds; staff see who.

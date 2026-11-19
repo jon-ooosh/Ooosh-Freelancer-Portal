@@ -253,6 +253,12 @@ anything's outstanding — kept a nudge, not a lockout.
      numbered/bullet lists, links), rendered by `frontend/src/components/
      MarkdownLite.tsx` (also used for the admin editor's live preview). Best for
      text policies/agreements; minor tweaks = edit → publish new version.
+     **Small corrections (jon, 19 Nov 2026, mig 353):** an ADMIN can tick "Small correction —
+     don't ask anyone to read or sign it again" on New version. Completed sign-offs stay
+     completed, freelancers' read-confirmations are copied onto the new version, no bells go
+     out and the review clock is left alone. The version row carries `minor_correction = true`,
+     so the record shows that people signed the wording before the correction. For typos only —
+     anything that changes what someone agreed to is a real new version.
   2. **Uploaded file** — a finished PDF authored anywhere (Google Docs, etc.)
      uploaded as the version (`file_r2_key` + `file_name`). Best for anything
      graphic-heavy or laid-out — no fighting an editor.

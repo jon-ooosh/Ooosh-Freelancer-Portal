@@ -620,10 +620,15 @@ const versionSchema = z.object({
   file_r2_key: z.string().nullable().optional(),
   file_name: z.string().max(200).nullable().optional(),
   change_note: z.string().max(1000).nullable().optional(),
+  /** Admin only: a small correction (typos) — nobody is asked to read or sign it again. */
+  minor_correction: z.boolean().optional(),
 });
 
 // POST /api/staff-documents/:id/versions — publish a new version (supersedes).
 // Managers: any. Non-managers: only their own draft/pending document.
+// `minor_correction` (admin only, jon 19 Nov 2026): a typo fix. Completed sign-offs stay
+// completed, freelancers' reads carry over to the new version, no bells, and the review
+// clock is left alone (a typo fix isn't a content review). Marked on the version row.
 router.post('/:id/versions', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   const client = await getClient();
   try {
@@ -631,6 +636,11 @@ router.post('/:id/versions', authorize(...STAFF_ROLES), async (req: AuthRequest,
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const v = parse.data;
     if (!v.body && !v.file_r2_key) { res.status(400).json({ error: 'Provide a body or an uploaded file' }); return; }
+    const minor = v.minor_correction === true;
+    if (minor && req.user!.role !== 'admin') {
+      res.status(403).json({ error: 'Only an admin can publish a correction without asking people to read it again.' });
+      return;
+    }
 
     const docRes = await query(`SELECT id, completion_mode, created_by, approval_status, content_review_interval_months FROM staff_documents WHERE id = $1`, [req.params.id]);
     if (!docRes.rows.length) { res.status(404).json({ error: 'Document not found' }); return; }
@@ -647,31 +657,47 @@ router.post('/:id/versions', authorize(...STAFF_ROLES), async (req: AuthRequest,
       [req.params.id],
     );
     const nextVersion = nextRes.rows[0].next;
+    const prevRes = await client.query(
+      `SELECT id FROM staff_document_versions WHERE document_id = $1 AND is_current = true LIMIT 1`, [req.params.id]);
+    const prevVersionId = prevRes.rows[0]?.id as string | undefined;
     await client.query(`UPDATE staff_document_versions SET is_current = false WHERE document_id = $1`, [req.params.id]);
     const insRes = await client.query(
-      `INSERT INTO staff_document_versions (document_id, version, body, file_r2_key, file_name, change_note, is_current, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,true,$7) RETURNING *`,
-      [req.params.id, nextVersion, v.body || null, v.file_r2_key || null, v.file_name || null, v.change_note || null, req.user!.id],
+      `INSERT INTO staff_document_versions (document_id, version, body, file_r2_key, file_name, change_note, is_current, created_by, minor_correction)
+       VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8) RETURNING *`,
+      [req.params.id, nextVersion, v.body || null, v.file_r2_key || null, v.file_name || null, v.change_note || null, req.user!.id, minor],
     );
-    // Re-flag completed assignments back to pending — the document changed.
-    const reflag = await client.query(
-      `UPDATE staff_document_assignments
-          SET status = 'pending', expires_at = NULL, current_completion_id = NULL,
-              chase_sent_at = NULL, escalated_at = NULL, review_reminder_sent_at = NULL
-        WHERE document_id = $1 AND status = 'completed'
-        RETURNING user_id`,
-      [req.params.id],
-    );
-    // A new version IS a content review (a significant change) — advance the
-    // owner review clock so it isn't flagged for review again immediately.
-    const newDue = addMonthsToTodayStr(docRes.rows[0].content_review_interval_months);
-    await client.query(
-      `UPDATE staff_documents
-          SET content_reviewed_at = NOW(), content_reviewed_by = $2, content_review_due_date = $3,
-              content_review_chased_at = NULL, content_review_escalated_at = NULL
-        WHERE id = $1`,
-      [req.params.id, req.user!.id, newDue],
-    );
+    let reflag: { rows: Array<{ user_id: string }> } = { rows: [] };
+    if (minor) {
+      // A correction: everyone who read the last version has read this one.
+      if (prevVersionId) {
+        await client.query(
+          `INSERT INTO freelancer_document_reads (document_id, version_id, person_id, read_at)
+           SELECT document_id, $2, person_id, read_at FROM freelancer_document_reads WHERE version_id = $1
+           ON CONFLICT (version_id, person_id) DO NOTHING`,
+          [prevVersionId, insRes.rows[0].id],
+        );
+      }
+    } else {
+      // Re-flag completed assignments back to pending — the document changed.
+      reflag = await client.query(
+        `UPDATE staff_document_assignments
+            SET status = 'pending', expires_at = NULL, current_completion_id = NULL,
+                chase_sent_at = NULL, escalated_at = NULL, review_reminder_sent_at = NULL
+          WHERE document_id = $1 AND status = 'completed'
+          RETURNING user_id`,
+        [req.params.id],
+      );
+      // A new version IS a content review (a significant change) — advance the
+      // owner review clock so it isn't flagged for review again immediately.
+      const newDue = addMonthsToTodayStr(docRes.rows[0].content_review_interval_months);
+      await client.query(
+        `UPDATE staff_documents
+            SET content_reviewed_at = NOW(), content_reviewed_by = $2, content_review_due_date = $3,
+                content_review_chased_at = NULL, content_review_escalated_at = NULL
+          WHERE id = $1`,
+        [req.params.id, req.user!.id, newDue],
+      );
+    }
     await client.query('COMMIT');
 
     // Notify re-flagged users (best-effort).
@@ -684,7 +710,7 @@ router.post('/:id/versions', authorize(...STAFF_ROLES), async (req: AuthRequest,
          req.params.id],
       ).catch(() => {});
     }
-    await logAudit(req.user!.id, 'staff_documents', String(req.params.id), 'update', null, { version: nextVersion }).catch(() => {});
+    await logAudit(req.user!.id, 'staff_documents', String(req.params.id), 'update', null, { version: nextVersion, minor_correction: minor }).catch(() => {});
     await retireDocumentBells(String(req.params.id));
     res.status(201).json({ data: insRes.rows[0], reflagged: reflag.rows.length });
   } catch (error) {

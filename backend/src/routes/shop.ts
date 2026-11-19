@@ -277,12 +277,13 @@ router.post('/voucher', async (req: AuthRequest, res: Response) => {
 router.post('/sales', async (req: AuthRequest, res: Response) => {
   try {
     // The kiosk till (§4.3): no login behind it, so the sale names the person
-    // from the dropdown and takes cash or the reader only — never "their bill",
-    // never consumption (a stock write-off wants a name AND a login).
+    // from the dropdown and takes cash, the reader, or "their bill" (a client who
+    // pops down from rehearsals — jon, 19 Nov 2026; the sitter till already could).
+    // Never consumption (a stock write-off wants a name AND a login).
     if (req.kiosk) {
       if (req.body?.kind !== 'sale') { res.status(403).json({ error: 'The kiosk till records sales only.' }); return; }
-      if (!['till_cash', 'card_reader'].includes(String(req.body?.tender))) {
-        res.status(403).json({ error: 'The kiosk takes cash or the card reader.' });
+      if (!['till_cash', 'card_reader', 'invoice_later'].includes(String(req.body?.tender))) {
+        res.status(403).json({ error: 'The kiosk takes cash, the card reader, or puts it on their bill.' });
         return;
       }
       const personId = await assertKioskSeller(req.body?.soldByPersonId);

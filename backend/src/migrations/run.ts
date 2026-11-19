@@ -392,6 +392,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '350_one_voucher_system.sql',
         '351_marketing_content.sql',
         '352_account_credits.sql',
+        '353_staff_document_minor_correction.sql',
       ];
 
       for (const migration of migrations) {
