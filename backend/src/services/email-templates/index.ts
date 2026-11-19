@@ -1030,12 +1030,25 @@ const templates: Record<string, EmailTemplate> = {
   hire_form: {
     variant: 'client' as const,
     preheader: 'Your vehicle hire agreement from Ooosh Tours',
-    subject: 'Your vehicle hire agreement for {{vehicleReg}} (job #{{jobNumber}})',
+    // updatedNote: the "Update hire forms" button on Job Detail, after the
+    // hire's dates changed (routes/hire-forms.ts sendUpdatedAgreement).
+    subject: '{{#if updatedNote}}Updated: {{/if}}Your vehicle hire agreement for {{vehicleReg}} (job #{{jobNumber}})',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Vehicle Hire Agreement</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
         Hi {{driverName}},
       </p>
+      {{#if updatedNote}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef3c7;border-radius:8px;border:1px solid #fde68a;">
+            <p style="margin:0;font-size:14px;color:#92400e;line-height:1.6;">
+              <strong>Your hire dates have changed.</strong> This updated agreement replaces the one we sent you before.
+            </p>
+          </td>
+        </tr>
+      </table>
+      {{/if}}
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         Please find attached your vehicle hire agreement for your current hire (job <strong>#{{jobNumber}}</strong>):
       </p>

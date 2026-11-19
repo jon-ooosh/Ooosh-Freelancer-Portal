@@ -1806,28 +1806,37 @@ function JobDetailContent() {
     };
   };
   const [allocationConflicts, setAllocationConflicts] = useState<AllocationConflict[]>([]);
-  // Date drift between job_date/job_end and an active assignment's hire_start
-  // /hire_end. Populated from /assignments/date-mismatches/:jobId. Banner on
-  // Drivers & Vehicles tab offers one-click "match dates" to push the
-  // assignment back in line with the job — uses the overlap helper to refuse
-  // if the new window collides with another hire on the same van.
-  type DateMismatch = {
-    assignmentId: string;
-    vehicleReg: string | null;
-    driverName: string | null;
-    assignmentStatus: string;
-    assignmentStart: string | null;
-    assignmentEnd: string | null;
+  // "Hire dates have changed" — drivers whose hire paperwork no longer
+  // matches the job's dates (an extension, usually), from
+  // GET /hire-forms/job/:jobId/date-check (services/hire-agreement-dates.ts is
+  // THE rule). Shown as a banner at the top of the page and on Drivers &
+  // Vehicles, both with the one "Update hire forms" button. Never automatic:
+  // dates are often changed only to price a change, then put back — and the
+  // warning then goes away by itself.
+  type HireDateCheck = {
     jobStart: string | null;
     jobEnd: string | null;
-    kind: 'extension' | 'shortening' | 'start_drift';
+    rows: Array<{
+      assignmentId: string;
+      vehicleReg: string | null;
+      driverName: string | null;
+      storedDrift: boolean;
+      ownStale: boolean;
+      staleOtherVanDocs: Array<{ docId: string; vehicleId: string; vehicleReg: string | null }>;
+      wasStart: string | null;
+      wasEnd: string | null;
+      afterStart: string | null;
+      afterEnd: string | null;
+    }>;
+    ve103b: Array<{ certificateNumber: string; vehicleReg: string | null; hireEnd: string }>;
   };
-  const [dateMismatches, setDateMismatches] = useState<DateMismatch[]>([]);
-  // Per-session dismissal of date-mismatch banners. Staff can hide a
-  // mismatch they don't want to act on right now (e.g. comms about it
-  // are in flight, or the dates will be reverted shortly). Refreshing
-  // the page brings the banner back so it's not lost permanently.
-  const [dismissedMismatches, setDismissedMismatches] = useState<Set<string>>(new Set());
+  const [hireDateCheck, setHireDateCheck] = useState<HireDateCheck | null>(null);
+  const [updatingHireForms, setUpdatingHireForms] = useState(false);
+  // Per-session dismissal of the Drivers & Vehicles "hire dates have changed"
+  // banner. Staff can hide it while they don't want to act (e.g. the client is
+  // only being given a price, or the dates will be reverted shortly).
+  // Refreshing the page brings it back so it's not lost permanently.
+  const [hireDatesBannerDismissed, setHireDatesBannerDismissed] = useState(false);
 
   // ── Inline editing state ──────────────────────────────────────────────────
   const [editingName, setEditingName] = useState(false);
@@ -2403,7 +2412,7 @@ function JobDetailContent() {
       setUnsignedDrivers([]);
       setDispatchCheck(null);
       setAllocationConflicts([]);
-      setDateMismatches([]);
+      setHireDateCheck(null);
       setJobOrgs([]);
       setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0, allVanAndDriver: false, rehearsalGap: null });
       setLoading(true);
@@ -2427,6 +2436,16 @@ function JobDetailContent() {
     loadVehicleAssignments();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, job?.id, job?.hh_job_number]);
+
+  // "Hire dates have changed" also needs re-reading when the job's own dates
+  // change on this page (an inline date edit, a HireHop sync) — the effect
+  // above only re-runs on a new job. The first run duplicates the read in
+  // loadVehicleAssignments; it's one small query.
+  useEffect(() => {
+    if (!id || !job || job.id !== id) return;
+    loadHireDateCheck();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.job_date, job?.job_end]);
 
   // Re-run loadVehicleAssignments when V&D slot info arrives — the first
   // fetch on page load races the HH sync that populates vehicle_slots, so
@@ -3132,16 +3151,9 @@ function JobDetailContent() {
         setAllocationConflicts([]);
       }
 
-      // Date mismatch detection — surface "extend assignment to match job?"
-      // banner when job_end has shifted past the assignment's locked hire_end.
-      try {
-        const mismatchResp = await api.get<{ data: { mismatches: DateMismatch[] } }>(
-          `/assignments/date-mismatches/${id}`
-        );
-        setDateMismatches(mismatchResp.data?.mismatches || []);
-      } catch {
-        setDateMismatches([]);
-      }
+      // "Hire dates have changed" — also re-read whenever the job's dates
+      // change on the page (the effect after loadVehicleAssignments' own).
+      await loadHireDateCheck();
     } catch {
       console.error('Failed to load vehicle assignments');
     } finally {
@@ -3149,17 +3161,76 @@ function JobDetailContent() {
     }
   }
 
-  async function matchAssignmentDatesToJob(assignmentId: string, vehicleReg: string | null) {
-    const ok = confirm(
-      `Update hire form dates for ${vehicleReg || 'this hire'} to match the job dates?\n\nThis adjusts the hire window. If the new window clashes with another hire on the same van you'll get an error and need to reassign one of them.`
-    );
-    if (!ok) return;
+  async function loadHireDateCheck() {
+    if (!id) return;
     try {
-      await api.post(`/assignments/${assignmentId}/match-job-dates`, {});
+      const resp = await api.get<{ data: HireDateCheck }>(`/hire-forms/job/${id}/date-check`);
+      setHireDateCheck(resp.data || null);
+    } catch {
+      setHireDateCheck(null);
+    }
+  }
+
+  // The one "Update hire forms" button (both banners). Moves any stored hire
+  // dates to the job's and emails each driver an UPDATED agreement — per
+  // driver, every van they hold one for. A held-back driver (referral / ID
+  // check) gets their dates moved but no agreement.
+  async function updateHireFormsToJobDates() {
+    const check = hireDateCheck;
+    if (!check || check.rows.length === 0) return;
+    const emailed = check.rows.filter(r => r.ownStale || r.staleOtherVanDocs.length > 0);
+    const lines: string[] = [
+      `Update the hire forms to ${formatDate(check.jobStart)} – ${formatDate(check.jobEnd)}?`,
+      '',
+    ];
+    if (emailed.length > 0) {
+      lines.push('These drivers will be emailed an updated hire agreement:');
+      for (const r of emailed) {
+        const vans = [r.ownStale ? r.vehicleReg : null, ...r.staleOtherVanDocs.map(d => d.vehicleReg)]
+          .filter(Boolean)
+          .join(', ');
+        lines.push(`  • ${r.driverName || 'Driver'}${vans ? ` (${vans})` : ''}`);
+      }
+    } else {
+      lines.push('No agreement needs re-sending — only the hire dates will be updated.');
+    }
+    for (const c of check.ve103b) {
+      lines.push(
+        '',
+        `⚠ VE103B ${c.certificateNumber}${c.vehicleReg ? ` (${c.vehicleReg})` : ''} ends ${formatDate(c.hireEnd)}. ` +
+          `It can't be extended — if they're abroad on the extra days, they're not covered.`,
+      );
+    }
+    if (!confirm(lines.join('\n'))) return;
+
+    setUpdatingHireForms(true);
+    try {
+      type Result = {
+        driverName: string | null;
+        heldBack: boolean;
+        busy: boolean;
+        agreements: Array<{ vehicleReg: string | null; status: 'sent' | 'no_recipient' | 'failed' }>;
+      };
+      const resp = await api.post<{ data: { results: Result[] } }>(`/hire-forms/job/${id}/update-dates`, {});
+      const problems: string[] = [];
+      for (const r of resp.data?.results || []) {
+        const who = r.driverName || 'A driver';
+        if (r.busy) problems.push(`${who}: already being updated — try again in a few minutes.`);
+        if (r.heldBack) problems.push(`${who}: agreement held back (referral or ID check not cleared).`);
+        for (const a of r.agreements) {
+          if (a.status === 'no_recipient') problems.push(`${who} (${a.vehicleReg || 'van'}): no email address — agreement filed but not sent.`);
+          if (a.status === 'failed') problems.push(`${who} (${a.vehicleReg || 'van'}): the agreement couldn't be made or emailed — use Hire form ▾ to retry.`);
+        }
+      }
+      if (problems.length > 0) alert(`Hire forms updated, with exceptions:\n\n${problems.join('\n')}`);
+      setHireDatesBannerDismissed(false);
       loadVehicleAssignments();
+      loadInteractions();
     } catch (err: any) {
-      const msg = err?.response?.data?.error || err?.message || 'Failed to match dates';
-      alert(msg);
+      // A 409 names the clashing hire on the same van; nothing was changed.
+      alert(err?.message || 'Failed to update hire forms');
+    } finally {
+      setUpdatingHireForms(false);
     }
   }
 
@@ -3929,6 +4000,19 @@ function JobDetailContent() {
                 action={{
                   label: 'Mark as Checking In',
                   onClick: () => initiateStatusChange('returned_incomplete' as PipelineStatus),
+                }}
+              />
+            )}
+            {hireDateCheck && hireDateCheck.rows.length > 0 && (
+              <JobAlertBanner
+                severity="amber"
+                message={`Hire dates have changed — ${hireDateCheck.rows.length} ${
+                  hireDateCheck.rows.length === 1 ? 'hire form still shows' : 'hire forms still show'
+                } the old dates${hireDateCheck.ve103b.length > 0 ? ', and a VE103B ends before the hire now does' : ''}.`}
+                action={{
+                  label: 'Update hire forms',
+                  onClick: updateHireFormsToJobDates,
+                  loading: updatingHireForms,
                 }}
               />
             )}
@@ -4912,48 +4996,51 @@ function JobDetailContent() {
             )}
           </div>
 
-          {/* Hire date drift — job dates moved post-book-out, hire form dates disagree */}
-          {dateMismatches.filter(m => !dismissedMismatches.has(m.assignmentId)).length > 0 && (
-            <div className="space-y-2">
-              {dateMismatches.filter(m => !dismissedMismatches.has(m.assignmentId)).map((m) => {
-                const reg = m.vehicleReg || 'this hire';
-                const drv = m.driverName ? ` (${m.driverName})` : '';
-                const headline =
-                  m.kind === 'extension'
-                    ? `Job extended to ${m.jobEnd}, but hire form for ${reg}${drv} ends ${m.assignmentEnd}.`
-                    : m.kind === 'shortening'
-                      ? `Job shortened to ${m.jobEnd}, but hire form for ${reg}${drv} ends ${m.assignmentEnd}.`
-                      : `Hire form start for ${reg}${drv} (${m.assignmentStart}) no longer matches job start (${m.jobStart}).`;
-                const action =
-                  m.kind === 'extension' ? 'Extend hire form'
-                  : m.kind === 'shortening' ? 'Shorten hire form'
-                  : 'Match job dates';
-                return (
-                  <div
-                    key={m.assignmentId}
-                    className="flex flex-wrap items-center gap-2 px-4 py-3 rounded-lg text-sm bg-amber-50 border border-amber-200 text-amber-900"
-                  >
-                    <span aria-hidden>📅</span>
-                    <span className="flex-1">{headline}</span>
-                    <button
-                      type="button"
-                      onClick={() => matchAssignmentDatesToJob(m.assignmentId, m.vehicleReg)}
-                      className="px-3 py-1 rounded-md bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-medium border border-amber-300"
-                    >
-                      {action}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setDismissedMismatches(s => new Set(s).add(m.assignmentId))}
-                      title="Hide this warning until next refresh"
-                      className="px-2 py-1 rounded-md hover:bg-amber-100 text-amber-700 text-xs"
-                      aria-label="Dismiss"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                );
-              })}
+          {/* Hire dates have changed — drivers' paperwork no longer matches the
+              job's dates. One button updates them all (updateHireFormsToJobDates). */}
+          {hireDateCheck && hireDateCheck.rows.length > 0 && !hireDatesBannerDismissed && (
+            <div className="px-4 py-3 rounded-lg text-sm bg-amber-50 border border-amber-200 text-amber-900">
+              <div className="flex flex-wrap items-center gap-2">
+                <span aria-hidden>📅</span>
+                <span className="flex-1 font-medium">
+                  Hire dates have changed — now {formatDate(hireDateCheck.jobStart)} to {formatDate(hireDateCheck.jobEnd)}.
+                </span>
+                <button
+                  type="button"
+                  onClick={updateHireFormsToJobDates}
+                  disabled={updatingHireForms}
+                  className="px-3 py-1 rounded-md bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-medium border border-amber-300 disabled:opacity-50"
+                >
+                  {updatingHireForms ? 'Updating…' : 'Update hire forms'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHireDatesBannerDismissed(true)}
+                  title="Hide this warning until next refresh"
+                  className="px-2 py-1 rounded-md hover:bg-amber-100 text-amber-700 text-xs"
+                  aria-label="Dismiss"
+                >
+                  ✕
+                </button>
+              </div>
+              <ul className="mt-2 ml-6 list-disc space-y-0.5 text-amber-800">
+                {hireDateCheck.rows.map((r) => (
+                  <li key={r.assignmentId}>
+                    {r.driverName || 'Driver'}{r.vehicleReg ? ` (${r.vehicleReg})` : ''}: hire form shows{' '}
+                    {formatDate(r.wasStart)} to {formatDate(r.wasEnd)}
+                    {r.ownStale || r.staleOtherVanDocs.length > 0 ? ' — will be emailed an updated agreement' : ''}
+                  </li>
+                ))}
+              </ul>
+              {hireDateCheck.ve103b.map((c) => (
+                <p key={c.certificateNumber} className="mt-2 text-amber-900">
+                  ⚠ VE103B {c.certificateNumber}{c.vehicleReg ? ` (${c.vehicleReg})` : ''} ends {formatDate(c.hireEnd)}.
+                  {' '}It can't be extended — if they're abroad on the extra days, they're not covered.
+                </p>
+              ))}
+              <p className="mt-2 text-xs text-amber-700">
+                Only giving the client a price? Leave this — put the dates back and it goes away by itself.
+              </p>
             </div>
           )}
 

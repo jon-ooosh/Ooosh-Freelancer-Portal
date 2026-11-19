@@ -470,6 +470,7 @@ existing definition:
 | Is this driver identity-authorised? | `services/identity-review.ts` `isIdentityAuthorised()` |
 | Is this driver cleared for paperwork? | `hire-forms.ts` `isDriverAuthorisedForAgreement()` |
 | Is this driver signed for THIS hire? | `services/driver-hire-progress.ts` |
+| Are this job's hire agreements out of date with its dates (an extended hire)? | `services/hire-agreement-dates.ts` `getHireDateCheck()` — compares the dates each agreement PRINTED (`agreement_hire_*`, mig 358, stamped wherever a PDF is made) and any stored row dates with the job's; the one "Update hire forms" button is `POST /hire-forms/job/:jobId/update-dates`. A person presses it, never automatic (dates are often changed only to price a change) |
 | Something went wrong for a driver on the hire form — record it, email info@? | `services/hire-form-errors.ts` (`POST /driver-verification/telemetry/client-error`, table `hire_form_error_events`). Critical only emails, one per driver per page per hour, 10 an hour in all; there is deliberately no screen |
 | Who receives this client email? | `services/money-emails.ts` `resolveClientEmailTarget()` |
 | Who receives a PCN email? | `services/pcn-recipient.ts` |

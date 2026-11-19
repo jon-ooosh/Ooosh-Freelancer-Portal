@@ -54,6 +54,13 @@ Every Claude gets this wrong on first pass. A hire can have multiple drivers on 
 - **A signature never expires, so `signature_date` cannot answer "are they on the hire in front of them?"** The only thing joining a driver to a hire is the `vehicle_hire_assignments` row, created at exactly one moment: the Signature step.
 - **`services/driver-hire-progress.ts` `unsignedJobNumberSql(alias)` is THE derivation.** Every "is this driver joined to the hire" surface reads `unsigned_job_number`; **never re-derive from `signature_date`**.
 
+## Hire dates changed (an extended hire)
+
+- **`services/hire-agreement-dates.ts` is THE rule** for "this driver's paperwork no longer matches the job's dates"; the top-of-Job banner and the Drivers & Vehicles banner both read `GET /hire-forms/job/:jobId/date-check`, and ONE button (`POST /hire-forms/job/:jobId/update-dates`) moves stored dates, re-arms the out-of-hours reminder and emails each driver an "Updated" agreement (own van + other vans).
+- **Every place that makes an agreement PDF must stamp `agreement_hire_start` / `agreement_hire_end`** (mig 358) with the dates it printed — that is the only record of what the driver holds. A new generation path that skips it makes its agreements unjudgeable. Agreements made before mig 358 have NULL there and are only flagged when the row's stored dates drifted.
+- **Never automatic.** Staff change a job's dates in HireHop just to price a change for the client and then put them back; emailing on a date change would spam drivers. Revert the dates and the warning clears itself.
+- **A VE103B can't be extended** (a physical certificate) — the warning only says so.
+
 ## Referrals
 
 - **`services/referral-alert.ts` `sendReferralAlert` is the single sender** — fired from three paths, deduped by an atomic claim on `referral_alert_sent_at` (released on failure). **Do NOT add a local referral-alert sender** anywhere else.

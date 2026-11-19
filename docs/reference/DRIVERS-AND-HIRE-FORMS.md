@@ -915,3 +915,53 @@ run; rewriting untested legacy code for an inert bug is churn.
 
 **No migration.** Every column already existed — `dvla_check_date`,
 `dvla_check_code`, `licence_points`, `licence_endorsements`.
+
+---
+
+**Hire dates changed — "Update hire forms" ✅ SHIPPED (Nov 2026)**
+
+**Motivation incident (HH 16892, Nov 2026).** A hire was extended by two days
+while the van was out and nothing on the job said the driver's agreement now
+carried the wrong end date. The old banner ("Extend hire form",
+`GET /assignments/date-mismatches`) compared only a driver row's STORED
+`hire_start` / `hire_end` with the job's — and that row stored none (it
+followed the job), so there was nothing to compare. Its button
+(`match-job-dates`) moved the stored dates but never sent an agreement, though
+its comment said it did; staff then had to find Hire form ▾ → Generate + Email.
+
+**What shipped:**
+- **Migration 358** — `agreement_hire_start` / `agreement_hire_end` on
+  `vehicle_hire_assignments` (own van) and `hire_form_documents` (a multi-van
+  driver's other vans): the dates the agreement on file PRINTED. Stamped at
+  every generation path — book-out auto-send, the manual Generate / Generate +
+  Email, the cross-van fan-out, and the new button.
+- **`services/hire-agreement-dates.ts`** — `planAgreementRow()` (pure, tested)
+  and `getHireDateCheck(jobId)`. A live self-drive driver row needs attention
+  when its stored dates differ from the job's, or an agreement on file printed
+  other dates than it would print now. `hireDateYmd()` is the PDF's own date
+  reader (shared with `loadHireFormData()`), so "printed" and "would print"
+  can't disagree with themselves. The job's dates are read as UK calendar dates.
+- **`GET /hire-forms/job/:jobId/date-check`** feeds two banners on Job Detail:
+  one at the top (with the other amber job alerts) and one on Drivers &
+  Vehicles listing each driver and what their form shows. Re-read when the
+  job's dates change on the page.
+- **`POST /hire-forms/job/:jobId/update-dates`** — the one button: refuses
+  (409, nothing changed) on a clash with another hire on the same van; moves
+  only STORED dates (an unstored one keeps following the job); clears
+  `ooh_reminder_sent_at` when the end is more than a day away so the reminder
+  goes again for the new end; regenerates + emails each out-of-date agreement
+  through the `hire_form` template with `updatedNote` ("Updated:" subject, an
+  amber "your hire dates have changed" box). Gated by
+  `isDriverAuthorisedForAgreement` (held-back drivers get dates only). Uses the
+  10-minute `hire_form_email_claimed_at` claim so a double press can't email
+  twice. Writes a 📅 timeline note saying what went to whom.
+- **VE103B** — a certificate issued for the hire that ends before the job now
+  does is named in the banner and the confirmation. Warning only: it's a
+  physical certificate and OP can't extend it.
+
+**Deliberately not built:** sending automatically on a date change (jon: staff
+change a job's dates in HireHop just to price a change and put them back — the
+warning clears itself on revert, nothing is sent); re-checking driver
+documents for the longer hire (the insurer only needs them valid before the
+hire starts). Agreements made before mig 358 can't be judged unless the row's
+stored dates drifted.
