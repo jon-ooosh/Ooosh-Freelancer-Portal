@@ -315,6 +315,10 @@ function ClientPicker({
   onCreateNew?: (name: string) => void;
 }) {
   const [results, setResults] = useState<SearchResult[]>([]);
+  // Pure suppliers matching the search — left out of a client pick unless asked
+  // for (docs/PREMISES-COMPLIANCE-SPEC.md §8). People are never hidden.
+  const [hiddenSuppliers, setHiddenSuppliers] = useState<SearchResult[]>([]);
+  const [showSuppliers, setShowSuppliers] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
   const [searching, setSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
@@ -332,13 +336,17 @@ function ClientPicker({
   }, []);
 
   const doSearch = useCallback(async (term: string) => {
-    if (term.length < 2) { setResults([]); setShowDropdown(false); setHasSearched(false); return; }
+    if (term.length < 2) { setResults([]); setHiddenSuppliers([]); setShowDropdown(false); setHasSearched(false); return; }
     setSearching(true);
     try {
-      const data = await api.get<{ results: SearchResult[] }>(`/search?q=${encodeURIComponent(term)}&limit=10`);
+      const data = await api.get<{ results: SearchResult[]; hidden_suppliers?: SearchResult[] }>(
+        `/search?q=${encodeURIComponent(term)}&limit=10&purpose=client`);
       // Only show people and organisations (not venues)
       const filtered = data.results.filter(r => r.type === 'person' || r.type === 'organisation');
+      const hidden = data.hidden_suppliers ?? [];
       setResults(filtered);
+      setHiddenSuppliers(hidden);
+      setShowSuppliers(false);
       setHasSearched(true);
       // If the user typed an exact-name match for exactly one organisation,
       // auto-link it. Avoids the "I typed the right thing but forgot to click
@@ -352,10 +360,11 @@ function ClientPicker({
         setShowDropdown(false);
       } else {
         const hasExactOrgMatch = exactOrgMatches.length > 0;
-        setShowDropdown(filtered.length > 0 || (!hasExactOrgMatch && onCreateNew != null));
+        setShowDropdown(filtered.length > 0 || hidden.length > 0 || (!hasExactOrgMatch && onCreateNew != null));
       }
     } catch {
       setResults([]);
+      setHiddenSuppliers([]);
       setHasSearched(true);
       if (term.length >= 2 && onCreateNew) setShowDropdown(true);
     } finally {
@@ -380,8 +389,12 @@ function ClientPicker({
 
   // Determine whether to show "Create new" option
   const trimmedValue = value.trim();
-  const hasExactOrgMatch = results.some(r => r.type === 'organisation' && r.name.toLowerCase() === trimmedValue.toLowerCase());
+  // A hidden supplier with exactly this name still counts — offering "Create"
+  // would make a duplicate of it.
+  const hasExactOrgMatch = [...results, ...hiddenSuppliers]
+    .some(r => r.type === 'organisation' && r.name.toLowerCase() === trimmedValue.toLowerCase());
   const showCreateNew = onCreateNew && hasSearched && trimmedValue.length >= 2 && !hasExactOrgMatch && !searching;
+  const shown = showSuppliers ? [...results, ...hiddenSuppliers] : results;
 
   return (
     <div ref={wrapperRef} className="relative">
@@ -389,7 +402,7 @@ function ClientPicker({
         type="text"
         value={value}
         onChange={(e) => handleChange(e.target.value)}
-        onFocus={() => { if (results.length > 0 || showCreateNew) setShowDropdown(true); }}
+        onFocus={() => { if (results.length > 0 || hiddenSuppliers.length > 0 || showCreateNew) setShowDropdown(true); }}
         placeholder="Search people or organisations..."
         className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
       />
@@ -400,7 +413,7 @@ function ClientPicker({
       )}
       {showDropdown && (
         <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
-          {results.map((r) => (
+          {shown.map((r) => (
             <button
               key={`${r.type}-${r.id}`}
               onClick={() => handleSelect(r)}
@@ -424,9 +437,15 @@ function ClientPicker({
               </div>
             </button>
           ))}
+          {hiddenSuppliers.length > 0 && !showSuppliers && (
+            <button type="button" onClick={() => setShowSuppliers(true)}
+              className="w-full text-left px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-50 border-t border-gray-100">
+              {hiddenSuppliers.length === 1 ? '1 supplier matches' : `${hiddenSuppliers.length} suppliers match`} · show
+            </button>
+          )}
           {showCreateNew && showDropdown && (
             <>
-              {results.length > 0 && <div className="border-t border-gray-100" />}
+              {shown.length > 0 && <div className="border-t border-gray-100" />}
               <button
                 onClick={() => {
                   onCreateNew!(trimmedValue);

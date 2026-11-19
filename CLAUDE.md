@@ -403,7 +403,9 @@ every time one is done, reminders as To Dos (`source_type = 'premises_check'`, O
 a Fail makes a `premises_fix` To Do), repeats from `task-recurrence.ts` (after the last one, or on a fixed date
 like every 1 Jan), a certificate's date wins, per-check visibility (everyone / managers / admins — a hidden
 check is a 404). All logic `services/premises.ts` + pure `premises-rules.ts`. **§12 is what shipped; read it
-first.** Not built: suppliers out of the client pickers (Phase S, §8), meters, documents library, calendar visits.
+first.** **Phase S BUILT (§13):** pure Supplier orgs are left out of the two "who is the client" pickers ("N suppliers
+match · show"), organisations take "Also" types (`also_types`, mig 356, `services/org-types.ts`). Not built: meters,
+documents library, calendar visits.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**
@@ -591,6 +593,7 @@ existing definition:
 | A card-reader (S700) payment — sending, waiting, recording, test mode, who may use it | `services/stripe-terminal.ts` — `terminal_sessions` is the record AND the once-only gate; recorded through `recordPayment()` as `stripe_gbp` + `source = 'stripe_terminal'`; gated by `system_settings.stripe_terminal_roles` |
 | Which jobs belong to the same festival? Its value, lead, default dates | `services/job-projects.ts` (`getProject()` roll-ups; quote options inside count once) |
 | A referral — who recommended this client, does it count, the personal link, the thank-you, the friend's welcome voucher | `services/referrals.ts` — `referralBlockReason()` is every rule; both vouchers are automatic (`autoWelcomeVoucher()` on linking, `rewardReferral()` on Completed); wording / codes in `referral-rules.ts`; vouchers go through `goodwill-credits.ts`, never their own money path |
+| Is this org of type X (main or "Also")? Is it a supplier and nothing else (kept out of client pickers)? | `services/org-types.ts` — `orgHasTypeSql()`, `pureSupplierSql()`, `cleanAlsoTypes()`; `organisations.type` stays the ONE main type everywhere else (`PREMISES-COMPLIANCE-SPEC.md` §13) |
 | A premises check — who may see it, is it overdue, when is it next due once done, its owner's To Do, may this role open its file? | `services/premises-rules.ts` (pure: `canSee()`, `checkStatus()`, `nextDueAfterRecord()`, `reminderTitle()`) + `services/premises.ts` (`syncCheckReminder()` after every write, `canOpenPremisesFile()`); repeats are `task-recurrence.ts`, never a second date engine (`PREMISES-COMPLIANCE-SPEC.md`) |
 | A social post, its owner's To Do, the content library, hashtag sets | `services/marketing-content.ts` — `syncPostReminder()` keeps ONE open To Do per post (call it after any write); words and colours `frontend/src/components/marketing/contentCopy.ts`. OP never posts to Meta |
 | Jon's review email — who, when, why not, the "don't send" tick, opt-outs | `services/review-requests.ts` — one `review_requests` row per job, written before the send; `reviewDecision()` is every rule |

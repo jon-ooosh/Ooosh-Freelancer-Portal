@@ -7,6 +7,8 @@ import { displayFullName } from '../lib/displayName';
 interface OrgFormData {
   name: string;
   type: string;
+  /** Further types beyond the main one — "Also: Supplier" (mig 356). */
+  also_types: string[];
   parent_id: string;
   website: string;
   email: string;
@@ -35,6 +37,7 @@ const orgTypes = [
 const emptyForm: OrgFormData = {
   name: '',
   type: 'band',
+  also_types: [],
   parent_id: '',
   website: '',
   email: '',
@@ -83,6 +86,7 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
       setForm({
         name: (data.name as string) || '',
         type: (data.type as string) || 'band',
+        also_types: Array.isArray(data.also_types) ? (data.also_types as string[]) : [],
         parent_id: (data.parent_id as string) || '',
         website: (data.website as string) || '',
         email: (data.email as string) || '',
@@ -182,13 +186,34 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
         <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Type *</label>
         <select
           value={form.type}
-          onChange={e => set('type', e.target.value)}
+          onChange={e => setForm(prev => ({ ...prev, type: e.target.value, also_types: prev.also_types.filter(t => t !== e.target.value) }))}
           className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
         >
           {orgTypes.map(t => (
             <option key={t} value={t}>{t.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}</option>
           ))}
         </select>
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Also</label>
+        <div className="flex flex-wrap gap-1.5">
+          {orgTypes.filter(t => t !== form.type).map(t => {
+            const on = form.also_types.includes(t);
+            return (
+              <button key={t} type="button" aria-pressed={on}
+                onClick={() => set('also_types', on ? form.also_types.filter(x => x !== t) : [...form.also_types, t])}
+                className={`px-2 py-0.5 rounded-full text-xs border ${on
+                  ? 'bg-ooosh-600 border-ooosh-600 text-white' : 'bg-white border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
+                {t.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-1 text-xs text-gray-500">
+          When it's more than one thing — a promoter who also supplies us. Only a Supplier with nothing else ticked is
+          left out of the client pickers.
+        </p>
       </div>
 
       <Field label="Email" type="email" value={form.email} onChange={v => set('email', v)} emailValidation />

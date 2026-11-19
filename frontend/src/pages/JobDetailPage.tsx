@@ -1852,6 +1852,10 @@ function JobDetailContent() {
   const [editingClient, setEditingClient] = useState(false);
   const [clientSearch, setClientSearch] = useState('');
   const [clientSearchResults, setClientSearchResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  // Pure suppliers matching the client search — left out unless asked for
+  // (docs/PREMISES-COMPLIANCE-SPEC.md §8).
+  const [clientHiddenSuppliers, setClientHiddenSuppliers] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [showClientSuppliers, setShowClientSuppliers] = useState(false);
   const [creatingClient, setCreatingClient] = useState(false);
   const [inlineEditSaving, setInlineEditSaving] = useState(false);
   const [pushingToHH, setPushingToHH] = useState(false);
@@ -2232,13 +2236,18 @@ function JobDetailContent() {
 
   // Search orgs for client picker
   useEffect(() => {
-    if (!editingClient || clientSearch.length < 2) { setClientSearchResults([]); return; }
+    if (!editingClient || clientSearch.length < 2) { setClientSearchResults([]); setClientHiddenSuppliers([]); return; }
     const timeout = setTimeout(async () => {
       try {
-        const data = await api.get<{ data: Array<{ id: string; name: string; type: string }> }>(
-          `/organisations?search=${encodeURIComponent(clientSearch)}&limit=10`
+        const data = await api.get<{
+          data: Array<{ id: string; name: string; type: string }>;
+          hidden_suppliers?: Array<{ id: string; name: string; type: string }>;
+        }>(
+          `/organisations?search=${encodeURIComponent(clientSearch)}&limit=10&client_picker=1`
         );
         setClientSearchResults(data.data);
+        setClientHiddenSuppliers(data.hidden_suppliers ?? []);
+        setShowClientSuppliers(false);
       } catch { /* ignore */ }
     }, 250);
     return () => clearTimeout(timeout);
@@ -4526,9 +4535,9 @@ function JobDetailContent() {
                         className="w-full border-b border-gray-200 px-3 py-2 text-sm focus:ring-0 focus:outline-none rounded-t-lg"
                         autoFocus
                       />
-                      {clientSearchResults.length > 0 && (
+                      {(clientSearchResults.length > 0 || showClientSuppliers) && (
                         <div className="max-h-48 overflow-y-auto">
-                          {clientSearchResults.map((o) => (
+                          {(showClientSuppliers ? [...clientSearchResults, ...clientHiddenSuppliers] : clientSearchResults).map((o) => (
                             <button
                               key={o.id}
                               onClick={() => selectClient(o)}
@@ -4540,10 +4549,17 @@ function JobDetailContent() {
                           ))}
                         </div>
                       )}
+                      {clientHiddenSuppliers.length > 0 && !showClientSuppliers && (
+                        <button type="button" onClick={() => setShowClientSuppliers(true)}
+                          className="w-full text-left px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-50 border-t border-gray-100">
+                          {clientHiddenSuppliers.length === 1 ? '1 supplier matches' : `${clientHiddenSuppliers.length} suppliers match`} · show
+                        </button>
+                      )}
                       {(() => {
                         const trimmed = clientSearch.trim();
                         if (trimmed.length < 2) return null;
-                        const exactMatch = clientSearchResults.some(
+                        // A hidden supplier with this exact name counts — "Create" would duplicate it.
+                        const exactMatch = [...clientSearchResults, ...clientHiddenSuppliers].some(
                           (o) => o.name.toLowerCase() === trimmed.toLowerCase()
                         );
                         if (exactMatch) return null;

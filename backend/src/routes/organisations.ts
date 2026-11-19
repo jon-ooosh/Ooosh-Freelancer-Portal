@@ -10,6 +10,7 @@ import { logAudit } from '../middleware/audit';
 import { JOB_OUTCOME_SQL, JOB_LOST_OR_CANCELLED_SQL } from '../services/job-outcomes';
 import { ukToday } from '../services/uk-date';
 import { notAltQuoteLossSql, optionCountSql } from '../services/job-groups';
+import { orgHasTypeSql, pureSupplierSql, cleanAlsoTypes } from '../services/org-types';
 
 const router = Router();
 router.use(authenticate);
@@ -33,6 +34,8 @@ const fileSchema = z.object({
 const createOrgSchema = z.object({
   name: z.string().min(1).max(500),
   type: z.string().min(1), // band, management, label, agency, promoter, venue, festival, supplier, hire_company, booking_agent, unknown, other
+  // Further types beyond the main one — "Also: Supplier" (mig 356, services/org-types.ts).
+  also_types: z.array(z.string().max(50)).max(10).optional(),
   parent_id: z.string().guid().optional().nullable(),
   website: z.string().url().optional().nullable(),
   email: z.string().email().optional().nullable(),
@@ -59,6 +62,9 @@ const updateOrgSchema = partialForUpdate(createOrgSchema);
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const { search, type, page = '1', limit = '50', tag, has_email, has_people, missing_email, missing_phone, location, sort, owner } = req.query;
+    // A "who is the client" picker (a job's client) leaves pure suppliers out and
+    // lists them separately, so it can say "1 supplier matches · show".
+    const clientPicker = req.query.client_picker === '1';
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     // "Last contacted" = most recent GENUINE contact-type interaction (call/email/meeting —
@@ -128,9 +134,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
 
     if (type) {
-      sql += ` AND o.type = $${paramIndex}`;
+      // Main type OR an "Also" type (mig 356) — "Supplier" finds a promoter that also supplies us.
+      sql += ` AND ${orgHasTypeSql('o', `$${paramIndex}`)}`;
       params.push(type);
       paramIndex++;
+    }
+
+    if (clientPicker) {
+      sql += ` AND NOT ${pureSupplierSql('o')}`;
     }
 
     if (tag) {
@@ -188,8 +199,21 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     const result = await query(sql, params);
 
+    // The suppliers a client picker left out, by name — shown only when asked for.
+    let hiddenSuppliers: unknown[] | undefined;
+    if (clientPicker && typeof search === 'string' && search.trim()) {
+      const hidden = await query(
+        `SELECT o.id, o.name, o.type, o.also_types FROM organisations o
+          WHERE o.is_deleted = false AND ${pureSupplierSql('o')} AND o.name ILIKE $1
+          ORDER BY o.name LIMIT 10`,
+        [`%${search.trim()}%`],
+      );
+      hiddenSuppliers = hidden.rows;
+    }
+
     res.json({
       data: result.rows,
+      ...(hiddenSuppliers ? { hidden_suppliers: hiddenSuppliers } : {}),
       pagination: {
         page: parseInt(page as string),
         limit: parseInt(limit as string),
@@ -348,7 +372,7 @@ router.post('/', validate(createOrgSchema), async (req: AuthRequest, res: Respon
   try {
     const {
       name, type, parent_id, website, email, phone, address, location, notes, tags, files,
-      working_terms_type, working_terms_credit_days, working_terms_notes, account_owner_user_id,
+      working_terms_type, working_terms_credit_days, working_terms_notes, account_owner_user_id, also_types,
     } = req.body;
 
     // Default working terms to 'usual' when not explicitly set
@@ -357,13 +381,15 @@ router.post('/', validate(createOrgSchema), async (req: AuthRequest, res: Respon
     const result = await query(
       `INSERT INTO organisations (
         name, type, parent_id, website, email, phone, address, location, notes, tags, files,
-        working_terms_type, working_terms_credit_days, working_terms_notes, created_by, account_owner_user_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        working_terms_type, working_terms_credit_days, working_terms_notes, created_by, account_owner_user_id,
+        also_types
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        RETURNING *`,
       [
         name, type, parent_id, website, email?.toLowerCase(), phone, address, location, notes, tags, JSON.stringify(files),
         effectiveWorkingTerms, working_terms_credit_days ?? null, working_terms_notes ?? null,
         req.user!.id, account_owner_user_id ?? null,
+        cleanAlsoTypes(also_types, type),
       ]
     );
 
@@ -386,6 +412,11 @@ router.put('/:id', validate(updateOrgSchema), async (req: AuthRequest, res: Resp
     }
 
     const clientVersion = req.body.version;
+    // "Also" types never repeat the main type; a new main type drops itself from the list.
+    if (req.body.also_types !== undefined || req.body.type !== undefined) {
+      const mainType = req.body.type ?? current.rows[0].type;
+      req.body.also_types = cleanAlsoTypes(req.body.also_types ?? current.rows[0].also_types ?? [], mainType);
+    }
     const fields = Object.entries(req.body).filter(([k, v]) => v !== undefined && k !== 'version');
     if (fields.length === 0) {
       res.json(current.rows[0]);
