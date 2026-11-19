@@ -217,21 +217,30 @@ export function ProjectPanel({ projectId, jobId, onChanged }: {
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-ooosh-200 p-4">
-      <div className="flex items-start justify-between gap-2">
+      {/* The whole header row opens / closes the panel — the arrow alone was too small a target (jon, Nov 2026). */}
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={!collapsed}
+        title={collapsed ? C.panelExpand : C.panelCollapse}
+        onClick={toggle}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
+        className="group flex items-start justify-between gap-2 cursor-pointer select-none"
+      >
         <div className="min-w-0">
           <div className="text-[10px] font-semibold uppercase tracking-wide text-ooosh-600">{C.panelHeading}</div>
-          <h3 className="text-sm font-semibold text-gray-900 break-words">{project.name}</h3>
+          <h3 className="text-sm font-semibold text-gray-900 break-words group-hover:text-ooosh-700">{project.name}</h3>
           <div className="text-[11px] text-gray-500">{C.jobCount(r.job_count)}</div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {!collapsed && (
-            <button type="button" onClick={() => setEditing(true)} className="text-xs text-ooosh-600 hover:text-ooosh-800">
+            <button type="button" onClick={(e) => { e.stopPropagation(); setEditing(true); }} className="text-xs text-ooosh-600 hover:text-ooosh-800">
               {C.edit}
             </button>
           )}
-          <button type="button" onClick={toggle} className="text-xs text-gray-400 hover:text-gray-600" title={collapsed ? C.panelExpand : C.panelCollapse}>
+          <span aria-hidden="true" className="text-base leading-none text-gray-400 group-hover:text-gray-600">
             {collapsed ? '▸' : '▾'}
-          </button>
+          </span>
         </div>
       </div>
 
