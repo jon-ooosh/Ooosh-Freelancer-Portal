@@ -351,3 +351,27 @@ export async function hasLiveHold(jobId: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Close-out has just applied money held on account to a job's invoice, in HireHop
+ * (CREDIT-ON-ACCOUNT-SPEC.md §6). The hold's amount has already been re-read from HireHop;
+ * this takes it off the job (it is used, or what is left is free for the client's other
+ * jobs) and writes both timelines. Never throws — the money has moved; a note must not undo that.
+ */
+export async function afterCreditApplied(id: string, applied: { amount: number; jobId: string; hhJobNumber: number; userId: string | null }): Promise<void> {
+  try {
+    await query(
+      `UPDATE account_credits SET reserved_job_id = NULL, reserved_by = NULL, reserved_at = NULL, updated_at = NOW()
+        WHERE id = $1 AND reserved_job_id = $2`,
+      [id, applied.jobId],
+    );
+    const c = await getRow(id);
+    if (!c) return;
+    const left = c.status === 'held' && c.amount >= PENNY ? ` ${gbp(c.amount)} is still on account for ${c.client_name}.` : '';
+    await note([applied.jobId, c.source_job_id],
+      `On account: ${gbp(applied.amount)} held from job ${c.source_job_number ?? ''} was applied to job ${applied.hhJobNumber}'s invoice in HireHop.${left}`,
+      applied.userId);
+  } catch (e) {
+    console.warn('[account-credit] could not tidy the hold after applying it:', e);
+  }
+}

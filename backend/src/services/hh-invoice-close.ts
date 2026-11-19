@@ -213,13 +213,15 @@ export async function postApproveInvoice(invoiceId: number, dateTime: string): P
  */
 export async function postAllocation(input: {
   depositId: number; bankId: number; amount: number; invoiceId: number;
+  /** Only for a payment that sits on ANOTHER job: HireHop shows it on both, so it says where it came from. */
+  desc?: string; memo?: string;
 }): Promise<any> {
   return hhBroker.post<any>('/php_functions/billing_payments_save.php', {
     id: 0,                 // a new application
     date: londonDate(new Date()),
-    desc: '',
+    desc: input.desc ?? '',
     paid: input.amount,
-    memo: '',
+    memo: input.memo ?? '',
     bank: input.bankId,    // the PAYMENT's bank, not the invoice's
     OWNER: input.invoiceId,
     deposit: input.depositId,

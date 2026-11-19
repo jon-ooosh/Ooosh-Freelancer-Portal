@@ -321,7 +321,8 @@ async function getMoneyPosition(job: JobRow): Promise<MoneyPosition> {
     hireValueIncVat,
     depositsPaid,
     remaining,
-    requiredDeposit: Math.min(requiredDeposit, remaining),
+    // The portal asks for the deposit less what is on account (and the bank reference follows it).
+    requiredDeposit: Math.min(Math.max(0, requiredDeposit - onAccount.covers), remaining),
     half: Math.round(hireValueIncVat * 0.5),
     halfExact: hireValueIncVat * 0.5,
     depositPaid,

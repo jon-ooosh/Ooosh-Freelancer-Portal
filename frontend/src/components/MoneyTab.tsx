@@ -24,6 +24,7 @@ import { CloseOutInvoice, CloseOutPlan, closeOutView, loadCloseOutPlan, subscrib
 import RecordActionsMenu, { type RecordAction } from './RecordActionsMenu';
 import HoldOnAccountModal from './account-credit/HoldOnAccountModal';
 import { jobClientName } from '../lib/jobOrgName';
+import { ukToday } from '../lib/ukDate';
 import { ReceiptThumb, ReceiptPreview } from './costs/CostReceipt';
 import type { JobExcess } from '../../../shared/types';
 import { requiredDeposit } from '../lib/depositRule';
@@ -1528,7 +1529,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                 {financial.on_account.total - financial.on_account.covers > 0.005 && hasOutstanding(financial.balance_outstanding) && (
                   <p className="text-xs mt-0.5">More than this job owes: the other £{(financial.on_account.total - financial.on_account.covers).toFixed(2)} stays on account.</p>
                 )}
-                <p className="text-xs text-blue-800 mt-0.5">HireHop and the payment link still show the full balance until then.</p>
+                <p className="text-xs text-blue-800 mt-0.5">The payment link already asks the client for the reduced amount. HireHop itself shows the full balance until this job is invoiced.</p>
               </div>
             )}
 
@@ -2148,9 +2149,11 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
         {showResendModal && (
           <ResendConfirmationModal
             jobId={jobId}
-            amount={data.financial.total_hire_deposits || 0}
+            // Money on account put aside for this job counts as paid on the client's statement,
+            // exactly as the payment portal counts it — or the two would ask for different sums.
+            amount={(data.financial.total_hire_deposits || 0) + (data.financial.on_account?.covers ?? 0)}
             hireValueIncVat={data.financial.hire_value_inc_vat || 0}
-            balanceOwed={data.financial.balance_override ? 0 : (data.financial.balance_outstanding || 0)}
+            balanceOwed={data.financial.balance_override ? 0 : (data.financial.on_account ? data.financial.on_account.to_pay : (data.financial.balance_outstanding || 0))}
             payments={data.financial.deposits
               // Hire payments only — excess has its own lifecycle/emails. Application
               // lines (excess/credit applied to an invoice) aren't real client payments.
@@ -2160,7 +2163,11 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
                 method: d.bank_name || 'Card',
                 amount: Math.abs(d.amount),
                 isRefund: d.is_refund,
-              }))}
+              }))
+              // …and the credit the totals above already count, so the lines add up.
+              .concat((data.financial.on_account?.covers ?? 0) > 0.004 ? [{
+                date: ukToday(), method: 'Credit held from a previous booking', amount: data.financial.on_account!.covers, isRefund: false,
+              }] : [])}
             onClose={() => setShowResendModal(false)}
             onResult={(r) => setResendMsg(r)}
           />

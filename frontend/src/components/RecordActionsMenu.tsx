@@ -19,7 +19,7 @@ export interface RecordAction {
  */
 export default function RecordActionsMenu({ actions, floating = false }: { actions: RecordAction[]; floating?: boolean }) {
   const [open, setOpen] = useState(false);
-  const [place, setPlace] = useState<{ top: number; right: number } | null>(null);
+  const [place, setPlace] = useState<{ top?: number; bottom?: number; right: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -40,7 +40,13 @@ export default function RecordActionsMenu({ actions, floating = false }: { actio
   const toggle = () => {
     if (!open && floating && ref.current) {
       const r = ref.current.getBoundingClientRect();
-      setPlace({ top: r.bottom + 4, right: window.innerWidth - r.right });
+      // Near the bottom of the window the menu opens UPWARDS — below, it fell off the page and
+      // only its first item could be reached (jon, 19 Nov 2026). ~40px a row plus padding.
+      const height = actions.length * 40 + 12;
+      const right = window.innerWidth - r.right;
+      setPlace(r.bottom + 4 + height > window.innerHeight && r.top - 4 - height > 0
+        ? { bottom: window.innerHeight - r.top + 4, right }
+        : { top: r.bottom + 4, right });
     }
     setOpen((o) => !o);
   };
@@ -60,7 +66,7 @@ export default function RecordActionsMenu({ actions, floating = false }: { actio
       {open && (
         <div
           className={`${floating ? 'fixed w-56 z-40' : 'absolute right-0 top-full mt-1 w-48 z-20'} bg-white border border-gray-200 rounded-lg shadow-lg py-1 text-left whitespace-normal`}
-          style={floating && place ? { top: place.top, right: place.right } : undefined}
+          style={floating && place ? { top: place.top, bottom: place.bottom, right: place.right } : undefined}
         >
           {actions.map((a) => (
             <button

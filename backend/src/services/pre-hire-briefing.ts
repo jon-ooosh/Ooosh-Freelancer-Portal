@@ -747,7 +747,7 @@ export async function buildBriefing(
         `Hire fee balance: £${money.balance_outstanding.toFixed(2)} due (${depositLabel} of £${money.hire_value.toFixed(2)})`
         + (money.on_account_label
           ? ` — ${money.on_account_label} comes off it at invoicing, so ask the client for £${money.to_pay.toFixed(2)}`
-            + ' (HireHop and the payment link still show the full balance)'
+            + ' (the payment link already does; HireHop shows the full balance until invoicing)'
           : '')
       );
     } else if (money.hire_value > 0) {

@@ -330,7 +330,7 @@ job), never a public route. Money › Vouchers (admin + managers) lists every vo
 the front-desk kiosk — never the sitter till**) it is spread as lowered line prices and used up in the sale's own
 transaction; its own amount is outside the role's discount ceiling; a cancelled / refunded sale gives it back.
 
-**PRs 1–2 OF 4 BUILT, 18 Nov 2026:** `docs/CREDIT-ON-ACCOUNT-SPEC.md` — credit on account: a client's
+**BUILT (PRs 1–4), 19 Nov 2026:** `docs/CREDIT-ON-ACCOUNT-SPEC.md` — credit on account: a client's
 overpayment on a finished hire, kept for their next one (job 16489). **It is the client's MONEY, never a voucher** —
 no VAT, no use-by date, nothing lapses; the next invoice stays full value and this pays part of it. The money
 never moves when it is held or put aside for a job: it stays unallocated on the payments of the job it was paid
@@ -342,8 +342,12 @@ staff holds it and uses it on a job; a manager takes either back off. Built: the
 History and on the client's Vouchers tab. **PR 2 (§5): the job it is put aside for shows "To pay now"** — the
 Money tab, the "Credit on account" confirmation method (a person's choice), the pre-hire briefing, the Wise
 matcher and the cash forecast all subtract it through `withCreditOnAccount()` / `reservedForJobSql()`; **no stored
-or HireHop-facing balance is ever changed** (it isn't in HireHop until that job is invoiced). §6 is the two PRs
-left (close-out applies it; the payment portal).
+or HireHop-facing balance is ever changed** (it isn't in HireHop until that job is invoiced). **PR 3 (§6): the
+close-out button applies it** — planned after the job's own payments as allocations marked `fromJob`, from the
+source job's own unallocated payments, read back on both jobs, Xero through the existing `sourceJobRows()` path
+(**the application's description must start with the source job number**); the arrival hook never applies it.
+**PR 4 (§7): the payment portal** counts it as paid (`job-lookup` → `credit_on_account`), so the client is asked
+for the reduced balance and deposit.
 
 **PHASES 1–3 BUILT, Nov 2026:** `docs/CASHFLOW-FORECAST-SPEC.md` — the admin-only 13-week cash forecast
 (Money › Cash forecast, `/money/cashflow`): the committed line by week and the next 14 days by day,

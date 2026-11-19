@@ -62,12 +62,13 @@ export default function AccountCreditNote({ clientOrgId, jobId }: {
               Overpaid <Link to={`/jobs/${c.source_job_id}?tab=money`} className="text-ooosh-600 hover:underline">{fromJob(c).replace('from ', 'on ')}</Link>
               {' '}· held {acDay(c.held_at)}{c.held_by_name ? ` by ${c.held_by_name}` : ''}
             </div>
-            {c.note && <div className="italic text-gray-500">{c.note}</div>}
+            {/* Two lines at most — the whole note on hover (jon, 19 Nov 2026) */}
+            {c.note && <div className="italic text-gray-500 line-clamp-2 cursor-help" title={c.note}>{c.note}</div>}
 
             {c.status === 'reserved' ? (
               <div className="mt-1.5 p-2 bg-amber-50 border border-amber-200 rounded text-amber-900">
-                Put aside for this job. It comes off the invoice when this job is invoiced; the Money tab shows what
-                is left to pay. HireHop and the payment link still show the full balance until then.
+                Put aside for this job. The Money tab and the client's payment link both ask for that much less.
+                It moves onto this job's invoice when the job is invoiced; until then HireHop shows the full balance.
                 {isManager && (
                   <div className="mt-1.5">
                     <button type="button" disabled={busy === c.id} className={btn}
