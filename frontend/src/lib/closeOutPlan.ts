@@ -38,7 +38,9 @@ export interface CloseOutPlan {
   invoice: InvoicePlan;
   invoices: CloseOutInvoice[];
   payments: CloseOutPayment[];
-  allocations: Array<{ depositId: number; amount: number; invoiceNumber: string }>;
+  allocations: Array<{ depositId: number; amount: number; invoiceNumber: string; fromJob?: { creditId: string; jobId: string; hhJobNumber: number } }>;
+  /** Money on account from earlier jobs put aside for this one — applied by the same button once there is an invoice. */
+  creditReserved?: Array<{ id: string; amount: number; source_job_id: string; source_job_number: number | null }>;
   surplus: Array<{ depositId: number; amount: number }>;
   shortfall: number;
   excessHeld: number;

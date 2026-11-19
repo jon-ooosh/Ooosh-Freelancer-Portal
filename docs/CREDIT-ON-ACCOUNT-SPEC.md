@@ -1,6 +1,6 @@
 # Credit on account — a client's overpayment kept for their next hire
 
-**Status:** PRs 1–2 built (18 Nov 2026). PRs 3–4 not built — §6.
+**Status:** all four PRs built (PRs 1–2 18 Nov 2026, live on job 16489 → 16982; PRs 3–4 19 Nov 2026).
 
 Born from job 16489 (Gently Tender): the hire finished £68.40 overpaid and the client asked
 us to keep it for a hire they were about to confirm. "Apply to another job" only works
@@ -126,18 +126,71 @@ what the client still has to PAY subtracts it through one definition:
   is held, the route re-reads HireHop at once (`refreshHoldAfterMoneyMoved()`), so the job
   it was put aside for never counts money that has gone.
 
-Still not known: the payment portal and HireHop's own documents (PR 4 / never). The Money
-tab line and the staff briefing both say so. On a phone the Client History panel is hidden
+Still not known: HireHop's own documents, until the job is invoiced (the payment portal
+knows since PR 4, §7). The Money tab line and the staff briefing both say so. On a phone the Client History panel is hidden
 (as it is for vouchers), so "Use on this job" is a laptop action; the Money tab line shows
 on a phone.
 
-## 6. Still to build
+## 6. PR 3 — close-out applies it (built 19 Nov 2026)
 
-- **PR 3 — close-out applies it.** The plan gains "This will also apply £68.40 from job
-  16489 to this invoice"; the one button applies it in HireHop and Xero on the existing
-  cross-job mechanism (`/money/:jobId/apply-credit`, `sourceJobRows()`), each write read
-  back; what the invoice doesn't need stays on account.
-- **PR 4 — the payment portal** (`netlify-functions`): OP's `job-lookup` carries the
-  credit, the portal subtracts it and lists it as "Credit from a previous booking".
-- Not planned: a cancelled job's refund held on account; a hold for a client with no
-  organisation; moving a hold between clients.
+The one button on the close-out panel (`POST /close-out/:jobId/run`, manager) now also
+applies money put aside for the job, in HireHop and Xero. `services/hire-close-out.ts`:
+
+- **Planned after the job's own payments.** `buildPlan()` reads each reserved credit's
+  SOURCE job from HireHop and adds allocations marked `fromJob` — from that job's own
+  unallocated hire payments, oldest first. Never more than (a) this invoice still needs,
+  (b) the hold says is spare there, (c) those payments really have free. So a hold can be
+  part-used, across several payments, and the rest stays on account.
+- **Shown before the press.** `CloseOutPlan.creditReserved` drives the panel's blue line
+  and the confirm box: "This will also apply £68.40 held on account from job 16489 to this
+  invoice" ("up to", before the invoice exists and the need is known).
+- **Written like any allocation, read back on BOTH jobs.** `postAllocation()` with a
+  description that starts with the source job number
+  (`16489 - Credit on account applied to OT-INV-… (job 16982)`); the source payment's free
+  balance is re-read on the source job and the invoice's owing on this one. A "success"
+  that moved nothing stops, as for any allocation.
+- **Xero needs nothing new.** `sourceJobRows()` already finds a payment from another job by
+  that leading job number and `applyCreditsInXero()` applies its overpayment — the same path
+  as a cross-job excess claim, and the nightly Xero sweep picks it up the same way. **Never
+  change that description's first token.**
+- **Then OP is put right at once, before Xero:** the source job's plan is rebuilt (so the
+  hold's amount is HireHop's again) and `afterCreditApplied()` takes the hold off this job
+  and writes both timelines. A Xero stop afterwards can't leave OP still promising money
+  that HireHop has used.
+- **A blocker, by name, if the source payment never reached Xero** or has no bank OP can
+  read — nothing is written.
+- **The arrival hook never applies it.** A payment that lands on an invoiced job is
+  allocated alone, as before; the held money stays in the plan ("Payments to allocate")
+  for a manager's press. Automatic money movement between jobs with nobody watching was
+  not asked for.
+- A cancelled job never uses it (its reservation reads as freed anyway).
+
+Also in this PR: the ⋯ menu opens upwards near the bottom of the window
+(`RecordActionsMenu`, floating), and the Client History note is two lines with the whole
+text on hover.
+
+## 7. PR 4 — the payment portal (built 19 Nov 2026, `netlify-functions`)
+
+95% of payments come through the portal, so without this the client simply overpays again.
+
+- OP: `GET /api/money/job-lookup/:hh` answers `credit_on_account` — the TOTAL put aside
+  for the job (`listReservedForJob()`), nothing about the job it came from.
+- Portal (`functions/lib/get-job-details-v2.js`, "Credit on account" block): counted as
+  money already paid, after every other sum — capped at what is still owed, never on a
+  cancelled job. `financial.totalHirePaid` includes it, `remainingHireBalance` is reduced,
+  `requiredDeposit` becomes the rest of the deposit, `financial.creditOnAccount` reports it,
+  and the history lists "Credit held from a previous booking". The page's options and
+  `create-stripe-session`'s amount bounds read those figures, so they follow.
+- Best-effort: if OP doesn't answer, the full balance shows and the job stays payable.
+- OP matches it: the Wise matcher also expects the deposit less the credit; the staff
+  "Resend confirmation" statement counts the credit as paid.
+- **Paying the reduced deposit confirms the job as any deposit does** (the Booked push is
+  by payment type, not amount). Credit that covers the WHOLE deposit means no payment
+  arrives, so a person confirms it (the "Credit on account" method, §5).
+- After close-out applies it, HireHop shows it on the job ("from another booking", which
+  the portal already counted) and OP stops sending it — never both.
+
+## 8. Not built
+
+A cancelled job's refund held on account; a hold for a client with no organisation; moving
+a hold between clients; the arrival hook applying held money by itself.

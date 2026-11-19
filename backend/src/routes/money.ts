@@ -900,7 +900,11 @@ router.get('/job-lookup/:hhJobNumber', async (req: AuthRequest, res: Response) =
     // paid, and which options are its siblings. The portal refuses a payment
     // on payable:false before any Stripe session exists.
     const options = await portalOptionsFor(result.rows[0].id);
-    res.json({ data: { ...result.rows[0], ...options } });
+    // Money on account put aside for this job (CREDIT-ON-ACCOUNT-SPEC.md §7): the client's own
+    // overpayment from an earlier job, not in HireHop's balance until this job is invoiced.
+    // The portal takes it off what it asks for. A total only — nothing about the other job.
+    const creditOnAccount = withCreditOnAccount(Number.MAX_SAFE_INTEGER, await listReservedForJob(result.rows[0].id)).total;
+    res.json({ data: { ...result.rows[0], ...options, credit_on_account: creditOnAccount } });
   } catch (error) {
     console.error('[money] Job lookup error:', error);
     res.status(500).json({ error: 'Job lookup failed' });

@@ -40,7 +40,7 @@ import xeroBroker from './xero-broker';
 import { isXeroConfigured } from '../config/xero';
 import { DISPLAY_NAME_SQL } from './display-name';
 import { hasNonStandardVatItem } from './vat-adjustment';
-import { holdForPlan, PlanHold } from './account-credit';
+import { holdForPlan, PlanHold, listReservedForJob, ReservedCredit, afterCreditApplied } from './account-credit';
 import { hhLocalNow } from './shop-stock';
 import { getMethodForBankId, PAYMENT_METHODS_LABELS } from './hh-deposit';
 import { handleJobStatusChange } from '../routes/webhooks';
@@ -88,6 +88,11 @@ export interface PlannedAllocation {
   amount: number;
   invoiceId: number;
   invoiceNumber: string;
+  /**
+   * Set when the payment sits on ANOTHER job: money held on account there and put aside
+   * for this one (docs/CREDIT-ON-ACCOUNT-SPEC.md §6). Planned after this job's own payments.
+   */
+  fromJob?: { creditId: string; jobId: string; hhJobNumber: number };
 }
 
 export interface CloseOutLogEntry {
@@ -171,6 +176,12 @@ export interface CloseOutPlan {
    * no longer waits to be sorted. The money has not moved. Null when it isn't held.
    */
   onAccount: PlanHold | null;
+  /**
+   * Money on account from EARLIER jobs put aside for this one — shown before the button
+   * ("this will also apply £68.40 from job 16489"). It is planned into `allocations` once
+   * there is an invoice for it to pay.
+   */
+  creditReserved: ReservedCredit[];
 }
 
 export interface CloseOutResult {
@@ -656,6 +667,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     paymentTarget: null as CloseOutPlan['paymentTarget'],
     cancellation: null as CancellationPlan | null,
     onAccount: null as PlanHold | null,
+    creditReserved: [] as ReservedCredit[],
   };
   if (!job.hh_job_number) { blockers.push('This job has no HireHop job number.'); return base; }
   if (job.is_internal) { blockers.push('Internal job — there is no client to invoice.'); return base; }
@@ -816,6 +828,44 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     if (p.bankId == null) blockers.push(`Couldn't read which bank payment ${p.depositId} is on.`);
   }
   const { allocations, surplus } = planAllocations(target ? [target] : [], payments);
+
+  // Money on account put aside for this job (CREDIT-ON-ACCOUNT-SPEC.md §6): it still sits on
+  // the payments of the job it was overpaid on. Once there is an invoice here for it to pay,
+  // plan it AFTER this job's own payments, from HireHop's own figures for that job — never
+  // more than the hold says is spare there, the payments really have free, or this invoice
+  // still needs. What isn't needed stays on account.
+  base.creditReserved = cancelled ? [] : await listReservedForJob(job.id);
+  if (target && base.creditReserved.length) {
+    let need = round2(target.owing - allocations.reduce((s, a) => s + a.amount, 0));
+    for (const credit of base.creditReserved) {
+      if (need < PENNY) break;
+      if (!credit.source_job_number) continue;
+      let srcRows: Row[];
+      try {
+        srcRows = await readBillingRows(credit.source_job_number);
+      } catch (e) {
+        warnings.push(`Couldn't read job ${credit.source_job_number} in HireHop, so the ${gbp(credit.amount)} held on account there is not in this plan — try Check again.`);
+        continue;
+      }
+      let spare = credit.amount;
+      for (const p of hirePayments(srcRows)) {
+        const amount = round2(Math.min(p.available, spare, need));
+        if (amount < PENNY) continue;
+        const row = srcRows.find((r) => kindOf(r) === 6 && idOf(r) === p.depositId);
+        if (p.bankId == null || !String(row?.data?.ACC_DATA?.OverpaymentID ?? '').trim()) {
+          blockers.push(`Payment ${p.depositId} on job ${credit.source_job_number} (held on account for this job) `
+            + `${p.bankId == null ? 'has no bank OP can read' : 'isn\'t in Xero as a payment'} — it can't be applied here. Take the money off this job in Client History, or sort that payment first.`);
+          continue;
+        }
+        allocations.push({
+          depositId: p.depositId, bankId: p.bankId, amount, invoiceId: target.invoiceId, invoiceNumber: target.number,
+          fromJob: { creditId: credit.id, jobId: credit.source_job_id, hhJobNumber: credit.source_job_number },
+        });
+        spare = round2(spare - amount);
+        need = round2(need - amount);
+      }
+    }
+  }
   base.allocations = allocations;
   base.surplus = surplus;
   base.shortfall = round2(open.reduce((s, i) => s + i.owing, 0) - allocations.reduce((s, a) => s + a.amount, 0));
@@ -831,7 +881,11 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
 
   // Sentences.
   const sentences: string[] = [];
-  for (const a of allocations) sentences.push(`Allocate ${gbp(a.amount)} of payment ${a.depositId} to ${a.invoiceNumber}.`);
+  for (const a of allocations) {
+    sentences.push(a.fromJob
+      ? `Apply ${gbp(a.amount)} held on account from job ${a.fromJob.hhJobNumber} (payment ${a.depositId}) to ${a.invoiceNumber}.`
+      : `Allocate ${gbp(a.amount)} of payment ${a.depositId} to ${a.invoiceNumber}.`);
+  }
   if (cancelled && base.invoice.netToInvoice >= PENNY) {
     sentences.unshift(`Raise the cancellation fee invoice: ${gbp(base.invoice.netToInvoice)} + VAT = ${gbp(base.cancellation!.feeGross)}.`);
   }
@@ -900,6 +954,7 @@ export async function planHireCloseOut(jobIdOrNumber: string, opts: { fresh?: bo
         sentences: [`Completed in HireHop${completed.user_name ? ` by ${completed.user_name}` : ''} on ${String(completed.created_at).slice(0, 10)}.`],
         ready: false, readyToComplete: false, log: entries, ...await jobFacts(job.id), paymentTarget: null, cancellation: null,
         onAccount: await holdForPlan(job.id, null),
+        creditReserved: [],
       };
     }
   }
@@ -1000,9 +1055,12 @@ export async function runHireAllocation(jobIdOrNumber: string, userId: string | 
 async function allocateSteps(job: JobRow, rep: CloseReporter, onlyFromDeposit?: number): Promise<string> {
   const plan = await buildPlan(job);
   if (plan.blockers.length) await rep.stop('preflight', plan.blockers.join(' '));
+  // The arrival hook allocates the payment that just arrived and nothing else: money held on
+  // account on another job is applied only when a person presses the button and has seen the plan.
+  const todo = onlyFromDeposit != null ? plan.allocations.filter((a) => !a.fromJob) : plan.allocations;
   if (onlyFromDeposit != null) {
-    const others = [...new Set(plan.allocations.filter((a) => a.depositId !== onlyFromDeposit).map((a) => a.depositId))];
-    if (others.length || !plan.allocations.length) {
+    const others = [...new Set(todo.filter((a) => a.depositId !== onlyFromDeposit).map((a) => a.depositId))];
+    if (others.length || !todo.length) {
       await rep.stop('arrival', others.length
         ? `Payment ${onlyFromDeposit} arrived, but payment${others.length > 1 ? 's' : ''} ${others.join(', ')} on this job `
           + `still hold${others.length > 1 ? '' : 's'} money and would be used first — left for a person to allocate.`
@@ -1014,12 +1072,25 @@ async function allocateSteps(job: JobRow, rep: CloseReporter, onlyFromDeposit?: 
 
   // 1. HireHop, one application at a time, each read back.
   let rows = await readBillingRows(hhJobNumber);
-  for (const a of plan.allocations) {
-    const before = readDepositAvailability(rows, a.depositId)?.available ?? 0;
+  const appliedFrom = new Map<string, { creditId: string; jobId: string; hhJobNumber: number; amount: number }>();
+  for (const a of todo) {
+    // A payment held on account sits on ANOTHER job: its free balance is read there, before
+    // and after, exactly as this job's own payments are read here.
+    const src = a.fromJob?.hhJobNumber;
+    const depositRows = async () => (src ? readBillingRows(src) : rows);
+    const before = readDepositAvailability(await depositRows(), a.depositId)?.available ?? 0;
     const invBefore = invoiceOwing(findInvoice(rows, a.invoiceId) || {}) ?? 0;
-    const res = await postAllocation({ depositId: a.depositId, bankId: a.bankId, amount: a.amount, invoiceId: a.invoiceId });
+    const res = await postAllocation({
+      depositId: a.depositId, bankId: a.bankId, amount: a.amount, invoiceId: a.invoiceId,
+      // The description starts with the source job number: sourceJobRows() finds the
+      // payment's Xero overpayment by it, tonight's Xero sweep included.
+      ...(src ? {
+        desc: `${src} - Credit on account applied to ${a.invoiceNumber} (job ${hhJobNumber})`,
+        memo: `Held on account from job ${src}, applied to job ${hhJobNumber} at close-out (recorded via Ooosh OP)`,
+      } : {}),
+    });
     rows = await readBillingRows(hhJobNumber);
-    const after = readDepositAvailability(rows, a.depositId)?.available ?? 0;
+    const after = readDepositAvailability(await depositRows(), a.depositId)?.available ?? 0;
     const invAfter = invoiceOwing(findInvoice(rows, a.invoiceId) || {}) ?? 0;
     const depositMoved = Math.abs((before - after) - a.amount) < PENNY;
     const invoiceMoved = Math.abs((invBefore - invAfter) - a.amount) < PENNY;
@@ -1030,8 +1101,22 @@ async function allocateSteps(job: JobRow, rep: CloseReporter, onlyFromDeposit?: 
         + `Nothing more was allocated — check the job in HireHop, then ${rep.retryHint}.`);
     }
     await log(job.id, null, 'allocate_hh', true,
-      `${gbp(a.amount)} of payment ${a.depositId} allocated to ${a.invoiceNumber} in HireHop — invoice now ${gbp(invAfter)} owing.`,
-      { depositId: a.depositId, invoiceId: a.invoiceId, amount: a.amount });
+      src
+        ? `${gbp(a.amount)} held on account from job ${src} (payment ${a.depositId}) applied to ${a.invoiceNumber} in HireHop — invoice now ${gbp(invAfter)} owing.`
+        : `${gbp(a.amount)} of payment ${a.depositId} allocated to ${a.invoiceNumber} in HireHop — invoice now ${gbp(invAfter)} owing.`,
+      { depositId: a.depositId, invoiceId: a.invoiceId, amount: a.amount, ...(src ? { fromJob: src } : {}) });
+    if (a.fromJob) {
+      const got = appliedFrom.get(a.fromJob.creditId) ?? { ...a.fromJob, amount: 0 };
+      got.amount = round2(got.amount + a.amount);
+      appliedFrom.set(a.fromJob.creditId, got);
+    }
+  }
+  // The money has moved in HireHop: bring the holds into line at once (the source job is
+  // re-read, so its figure is HireHop's) and free what this invoice didn't need — before
+  // Xero, so a Xero stop can't leave OP still promising money that has been used.
+  for (const c of appliedFrom.values()) {
+    await buildPlan(await loadJob(c.jobId)).catch((e) => console.warn(`[hire-close-out] could not re-read job ${c.hhJobNumber} after applying its credit:`, e));
+    await afterCreditApplied(c.creditId, { amount: c.amount, jobId: job.id, hhJobNumber, userId: rep.userId ?? null });
   }
 
   // 2. Xero — every allocation on every approved invoice, not just the ones just made.
@@ -1048,8 +1133,9 @@ async function allocateSteps(job: JobRow, rep: CloseReporter, onlyFromDeposit?: 
 
   const after = await buildPlan(job);
   const parts: string[] = [];
-  if (plan.allocations.length) parts.push(`${plan.allocations.length === 1 ? 'Payment allocated' : `${plan.allocations.length} payments allocated`} in HireHop and Xero.`);
+  if (todo.length) parts.push(`${todo.length === 1 ? 'Payment allocated' : `${todo.length} payments allocated`} in HireHop and Xero.`);
   else parts.push('Nothing to allocate in HireHop; Xero checked.');
+  for (const c of appliedFrom.values()) parts.push(`${gbp(c.amount)} of it was money held on account from job ${c.hhJobNumber}.`);
   if (after.shortfall >= PENNY) parts.push(`The client still owes ${gbp(after.shortfall)}.`);
   const left = round2(after.surplus.reduce((s, x) => s + x.amount, 0));
   if (after.cancellation) {

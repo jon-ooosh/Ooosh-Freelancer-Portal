@@ -208,13 +208,27 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
     ? { label: 'Add a charge', onClick: () => setCharge({ description: '', amount: '', reason: '' }), kind: 'secondary' }
     : null;
 
+  // Money on account from an earlier job, put aside for this one: the same button applies it,
+  // so say so before the press (jon, 18 Nov 2026). Before the invoice exists the plan can't
+  // say how much of it is needed — "up to"; once it can, the planned figure.
+  const reservedHere = cancel ? [] : (plan.creditReserved ?? []);
+  const reservedTotal = reservedHere.reduce((s, c) => s + c.amount, 0);
+  const plannedFromCredit = plan.allocations.filter(a => a.fromJob).reduce((s, a) => s + a.amount, 0);
+  const reservedJobs = reservedHere.map(c => c.source_job_number).filter(Boolean).join(', ');
+  const alsoApplies = reservedTotal < PENNY || (view.stage !== 'to_invoice' && view.stage !== 'to_allocate') ? ''
+    : plannedFromCredit >= PENNY
+      ? `This will also apply ${money(plannedFromCredit)} held on account from job ${reservedJobs} to this invoice.`
+      : view.stage === 'to_invoice'
+        ? `This will also apply up to ${money(reservedTotal)} held on account from job ${reservedJobs}, after this job's own payments.`
+        : '';
+
   const run = async () => {
     const what = view.stage === 'to_invoice' && cancel
       ? `Raise the cancellation fee invoice for ${money(cancel.feeNet)}+VAT = ${money(cancel.feeGross)} (one Misc income line, dated today, approved, sent to Xero) and allocate the client's payments up to it. Anything left stays on the payment to be refunded`
       : view.stage === 'to_invoice'
       ? `Create the invoice for ${money(inv.netToInvoice)} ex VAT (dated today, approved, sent to Xero) and allocate the payments`
       : 'Allocate the payments to the invoice in HireHop and Xero';
-    if (!window.confirm(`${what}${view.stillOut ? '\n\nHireHop still shows this job as out.' : ''}\n\nCarry on?`)) return;
+    if (!window.confirm(`${what}${alsoApplies ? `\n\n${alsoApplies}` : ''}${view.stillOut ? '\n\nHireHop still shows this job as out.' : ''}\n\nCarry on?`)) return;
     setBusy('run');
     setError(null);
     setNotice(null);
@@ -484,6 +498,11 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
           </div>
         </div>
         {why && showWhy && <p className="text-sm text-gray-600">{why}</p>}
+        {alsoApplies && (
+          <p className="text-sm text-blue-900 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+            {alsoApplies} <span className="text-xs text-blue-800">It moves in HireHop and Xero; whatever isn't needed stays on account.</span>
+          </p>
+        )}
         {view.open.length > 1 && (
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="text-gray-700">Hire payments go to</span>

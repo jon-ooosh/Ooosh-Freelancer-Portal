@@ -36,7 +36,11 @@ jest.mock('../xero-broker', () => ({
 }));
 jest.mock('../eu-vat-split', () => ({ splitEuDraft: jest.fn() }));
 // The plan asks whether its job's spare money is held on account (CREDIT-ON-ACCOUNT-SPEC.md).
-jest.mock('../account-credit', () => ({ holdForPlan: jest.fn(async () => null) }));
+jest.mock('../account-credit', () => ({
+  holdForPlan: jest.fn(async () => null),
+  listReservedForJob: jest.fn(async () => []),
+  afterCreditApplied: jest.fn(async () => undefined),
+}));
 
 import { query } from '../../config/database';
 import hhBroker from '../hirehop-broker';
@@ -49,8 +53,10 @@ import { handleJobStatusChange } from '../../routes/webhooks';
 import { allocateOnArrival, fireArrivalHook } from '../close-out-arrival';
 import { splitEuDraft } from '../eu-vat-split';
 import { Stop } from '../hh-invoice-close';
-import { holdForPlan } from '../account-credit';
+import { holdForPlan, listReservedForJob, afterCreditApplied } from '../account-credit';
 const mockHold = holdForPlan as jest.Mock;
+const mockReserved = listReservedForJob as jest.Mock;
+const mockApplied = afterCreditApplied as jest.Mock;
 const mockSplit = splitEuDraft as jest.Mock;
 const mockStatus = handleJobStatusChange as jest.Mock;
 const mockSync = syncSavedRowToXero as jest.Mock;
@@ -104,8 +110,19 @@ function rows(): any[] {
   return out;
 }
 
+/** An EARLIER job (16489) whose spare money is held on account for this one — null in most tests. */
+let earlier: { deposits: Dep[] } | null = null;
+function earlierRows(): any[] {
+  const out: any[] = (earlier?.deposits ?? []).map((d) => ({
+    kind: 6, credit: d.credit, owing: -(r2(d.credit - d.allocated)), paid: d.allocated, date: d.date,
+    data: { ID: d.id, ACC_ACCOUNT_ID: d.bank, DESCRIPTION: d.desc, DATE: d.date, ACC_DATA: d.noXero ? {} : { OverpaymentID: `op-${d.id}` } },
+  }));
+  (out as any).banks = [{ ID: 265, NAME: 'Wise' }, { ID: 267, NAME: 'Stripe GBP' }];
+  return out;
+}
+
 function installHireHop() {
-  mockRead.mockImplementation(async () => rows());
+  mockRead.mockImplementation(async (jobNumber?: number) => (earlier && Number(jobNumber) === 16489 ? earlierRows() : rows()));
   mockGet.mockImplementation(async (path: string) => {
     if (path === '/api/job_data.php') return { success: true, data: { STATUS: hh.jobStatus } };
     if (path === '/frames/items_to_supply_list.php') return { success: true, data: supply };
@@ -151,10 +168,10 @@ function installHireHop() {
     }
     if (path === '/php_functions/billing_payments_save.php') {
       if (hh.ignoreAllocations) return { success: true, data: {} };   // "success" that did nothing (§0)
-      const dep = hh.deposits.find((d) => d.id === body.deposit)!;
+      const dep = (hh.deposits.find((d) => d.id === body.deposit) ?? earlier?.deposits.find((d) => d.id === body.deposit))!;
       const inv = hh.invoices.find((i) => i.id === body.OWNER)!;
       dep.allocated = r2(dep.allocated + body.paid); inv.paid = r2(inv.paid + body.paid);
-      hh.apps.push({ id: hh.nextApp++, invoiceId: inv.id, depositId: dep.id, amount: body.paid });
+      hh.apps.push({ id: hh.nextApp++, invoiceId: inv.id, depositId: dep.id, amount: body.paid, desc: body.desc || '' });
       return { success: true, data: { hh_task: 'post_payment', hh_id: hh.nextApp - 1 } };
     }
     if (path === '/frames/status_save.php') { hh.jobStatus = body.status; return { success: true, data: {} }; }
@@ -258,6 +275,8 @@ function job16015Corrected() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  earlier = null;
+  mockReserved.mockResolvedValue([]);
   logRows = [];
   arrivalEnabled = 'true';
   layout = 'flat';
@@ -532,6 +551,107 @@ describe('runHireAllocation', () => {
     expect(logRows.map((l) => l.step)).toEqual(expect.arrayContaining(['preflight', 'allocate_hh', 'xero']));
     expect(logRows.find((l) => l.step === 'preflight')).toMatchObject({ ok: true, user_id: 'u1' });
     expect(logRows.find((l) => l.step === 'allocate_hh')!.hh_refs).toEqual({ depositId: 8661, invoiceId: 12252, amount: 254.17 });
+  });
+});
+
+describe('money held on account from an earlier job (CREDIT-ON-ACCOUNT-SPEC.md §6)', () => {
+  const CREDIT = { id: 'ac1', amount: 68.4, source_job_id: 'src-job', source_job_number: 16489 };
+  /** 16015 with a small payment of its own (£100), so £154.17 is left for the credit to help with. */
+  function withEarlierJob(spare: Array<Partial<Dep> & { id: number; free: number }>) {
+    hh.deposits[0].credit = 100; opPayments[0].amount = 100; xero.overpayments['op-8661'].remaining = 100;
+    earlier = { deposits: spare.map((d) => ({ credit: d.free, bank: 267, allocated: 0, desc: '16489 - deposit', date: '2026-10-27', ...d })) };
+    for (const d of earlier.deposits) xero.overpayments[`op-${d.id}`] = { remaining: d.credit, allocations: [] };
+    mockReserved.mockResolvedValue([CREDIT]);
+  }
+
+  it('plans this job\'s own payment first, then the held money — across the two payments it sits on', async () => {
+    withEarlierJob([{ id: 9300, free: 38.4 }, { id: 9400, free: 30, bank: 265 }]);
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.blockers).toEqual([]);
+    expect(plan.allocations.map((a) => [a.depositId, a.amount, a.fromJob?.hhJobNumber])).toEqual([
+      [8661, 100, undefined], [9300, 38.4, 16489], [9400, 30, 16489],
+    ]);
+    expect(plan.shortfall).toBe(85.77);
+    expect(plan.sentences.join(' ')).toContain('Apply £38.40 held on account from job 16489 (payment 9300) to OT-INV-12252');
+    expect(plan.creditReserved).toEqual([CREDIT]);
+  });
+
+  it('applies it in HireHop and Xero, reads both jobs back, and tidies the hold', async () => {
+    withEarlierJob([{ id: 9300, free: 38.4 }, { id: 9400, free: 30, bank: 265 }]);
+    const r = await runHireAllocation(JOB.id, 'u1');
+    expect(r.done).toBe(true);
+    const sent = posts('/php_functions/billing_payments_save.php');
+    expect(sent).toEqual([
+      expect.objectContaining({ deposit: 8661, OWNER: 12252, paid: 100, desc: '' }),
+      // The description starts with the source job number — that is how the Xero step finds the payment.
+      expect.objectContaining({ deposit: 9300, OWNER: 12252, paid: 38.4, bank: 267, desc: expect.stringMatching(/^16489 - Credit on account applied to OT-INV-12252/) }),
+      expect.objectContaining({ deposit: 9400, OWNER: 12252, paid: 30, bank: 265 }),
+    ]);
+    // HireHop: the earlier job's payments are used up, this invoice owes the rest.
+    expect(earlier!.deposits.map((d) => r2(d.credit - d.allocated))).toEqual([0, 0]);
+    expect(r2(hh.invoices[0].gross - hh.invoices[0].paid)).toBe(85.77);
+    // Xero: the credits came off the EARLIER job's overpayments.
+    expect(xero.overpayments['op-9300'].remaining).toBe(0);
+    expect(xero.overpayments['op-9400'].remaining).toBe(0);
+    expect(xero.invoiceDue['x-12252']).toBe(85.77);
+    // OP: told once, with the total, so the hold comes off this job.
+    expect(mockApplied).toHaveBeenCalledTimes(1);
+    expect(mockApplied).toHaveBeenCalledWith('ac1', expect.objectContaining({ amount: 68.4, hhJobNumber: 16015 }));
+    expect(r.message).toContain('£68.40 of it was money held on account from job 16489');
+  });
+
+  it('never takes more than this invoice needs, the hold says is spare, or the payments have free', async () => {
+    // The invoice needs £154.17 after its own £100; the earlier job has £500 free but only £68.40 is held.
+    withEarlierJob([{ id: 9300, free: 500 }]);
+    let plan = await planHireCloseOut(JOB.id);
+    expect(plan.allocations.filter((a) => a.fromJob).map((a) => a.amount)).toEqual([68.4]);
+    // A hold bigger than the need: only the need is taken, the rest stays on account.
+    mockReserved.mockResolvedValue([{ ...CREDIT, amount: 400 }]);
+    plan = await planHireCloseOut(JOB.id);
+    expect(plan.allocations.filter((a) => a.fromJob).map((a) => a.amount)).toEqual([154.17]);
+    expect(plan.shortfall).toBe(0);
+    // The payments there have less free than the hold thinks (refunded since): HireHop's figure wins.
+    earlier!.deposits[0].allocated = 490;
+    plan = await planHireCloseOut(JOB.id);
+    expect(plan.allocations.filter((a) => a.fromJob).map((a) => a.amount)).toEqual([10]);
+  });
+
+  it('is not planned when this job\'s own payments cover the invoice', async () => {
+    withEarlierJob([{ id: 9300, free: 68.4 }]);
+    hh.deposits[0].credit = 1140.97; opPayments[0].amount = 1140.97;
+    const plan = await planHireCloseOut(JOB.id);
+    expect(plan.allocations.some((a) => a.fromJob)).toBe(false);
+    expect(plan.creditReserved).toEqual([CREDIT]);
+  });
+
+  it('refuses by name when the earlier payment never reached Xero, and moves nothing', async () => {
+    withEarlierJob([{ id: 9300, free: 68.4, noXero: true }]);
+    const r = await runHireAllocation(JOB.id, 'u1');
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('Payment 9300 on job 16489');
+    expect(posts('/php_functions/billing_payments_save.php')).toEqual([]);
+  });
+
+  it('stops, having tidied nothing, when HireHop says success but the earlier payment did not move', async () => {
+    withEarlierJob([{ id: 9300, free: 68.4 }]);
+    hh.deposits[0].credit = 0.001;   // nothing of its own to allocate — the credit is the first write
+    opPayments[0].amount = 0.001;
+    hh.ignoreAllocations = true;
+    const r = await runHireAllocation(JOB.id, 'u1');
+    expect(r.done).toBe(false);
+    expect(r.message).toContain('HireHop did not allocate £68.40 of payment 9300');
+    expect(mockApplied).not.toHaveBeenCalled();
+    expect(mockXeroAllocate).not.toHaveBeenCalled();
+  });
+
+  it('the arrival hook allocates only the payment that arrived — held money waits for a person', async () => {
+    withEarlierJob([{ id: 9300, free: 68.4 }]);
+    const r = await runHireAllocation(JOB.id, null, { onlyFromDeposit: 8661 });
+    expect(r.done).toBe(true);
+    expect(posts('/php_functions/billing_payments_save.php').map((b) => b.deposit)).toEqual([8661]);
+    expect(mockApplied).not.toHaveBeenCalled();
+    // Still in the plan for the next press.
+    expect(r.plan.allocations.filter((a) => a.fromJob).map((a) => a.amount)).toEqual([68.4]);
   });
 });
 

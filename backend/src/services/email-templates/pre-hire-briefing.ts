@@ -276,7 +276,7 @@ function renderMoneyAndPeople(b: JobBriefing): string {
         // The client's own money held from an earlier job, put aside for this one — not in
         // HireHop's balance until invoicing, so staff need the figure to actually ask for.
         if (m.on_account_label) {
-          moneyLines.push(`<strong>On account:</strong> ${m.on_account_label} comes off at invoicing — <strong>ask the client for £${m.to_pay.toFixed(2)}</strong>. HireHop and the payment link still show the full £${m.balance_outstanding.toFixed(2)}.`);
+          moneyLines.push(`<strong>On account:</strong> ${m.on_account_label} comes off at invoicing — <strong>ask the client for £${m.to_pay.toFixed(2)}</strong>. The payment link asks for that too; HireHop itself shows the full £${m.balance_outstanding.toFixed(2)} until invoicing.`);
         }
       } else {
         moneyLines.push(`<strong>Hire fee:</strong> £${m.hire_value.toFixed(2)} paid in full ✓`);
