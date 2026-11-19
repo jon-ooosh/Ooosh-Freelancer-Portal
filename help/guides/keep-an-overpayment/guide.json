@@ -1,0 +1,60 @@
+{
+  "title": "Keep a client's overpayment for their next hire",
+  "area": "Money",
+  "who": "Any staff. A manager to undo it.",
+  "checked": "2026-11-19",
+  "summary": "A finished hire has been paid for with money left over, and the client wants us to keep it rather than send it back.",
+  "useWhen": [
+    "The hire is back, invoiced and paid, and the Money tab says \"In credit\" or \"overpaid\".",
+    "The client has asked us to keep the money for a future booking."
+  ],
+  "notWhen": [
+    { "text": "The client wants the money back. Use Refund on the payment instead." },
+    { "text": "We are giving them money off as a thank-you or a sorry. That is a voucher, not this." },
+    { "text": "The job was cancelled.", "see": "keep-a-cancellation-refund" }
+  ],
+  "steps": [
+    {
+      "text": "Open the finished job and go to its Money tab.",
+      "detail": "The Financial Summary shows \"In credit\" with the amount, and the invoice panel below says \"Money to sort\".",
+      "open": "job:money",
+      "image": "1-in-credit.png"
+    },
+    {
+      "text": "Press Hold on account.",
+      "detail": "It is on the amber line of the invoice panel. The same option is in the ... menu beside any payment in Payment History.",
+      "image": "2-hold-button.png"
+    },
+    {
+      "text": "Add a note saying why, then press Hold on account again.",
+      "detail": "The note is for us only. Say who asked and what it is for, so the next person understands it.",
+      "image": "3-confirm.png"
+    },
+    {
+      "text": "Check the panel now says the money is held.",
+      "detail": "A blue line shows the amount and who it is held for. The job is no longer waiting on money and can be completed.",
+      "image": "4-held.png"
+    }
+  ],
+  "next": [
+    "Nothing has moved. The money is still on this job's payments in HireHop and Xero.",
+    "It now shows on every other job and new enquiry for the same client, ready to use.",
+    "It appears in Money > Overview under Held on Account until it is used or refunded.",
+    "It can still be refunded at any time from this job's Payment History."
+  ],
+  "wrong": [
+    { "problem": "There is no Hold on account button.", "fix": "The job has to be invoiced and the invoice paid first. Until then OP cannot tell what is spare. If the panel says \"Ready to invoice\" or \"Payments to allocate\", a manager does that step first." },
+    { "problem": "It says the job has no client organisation.", "fix": "Add the client to the job, then try again. The money is found again through the client." },
+    { "problem": "We held it by mistake, or the client now wants it back.", "fix": "A manager opens the ... menu at the top right of the invoice panel and chooses Stop holding on account. The money goes back to \"Money to sort\" and can be refunded." },
+    { "problem": "The amount held has gone down.", "fix": "Some of it was refunded or used. OP re-reads the real figure from HireHop, so the amount shown is always what is actually left." }
+  ],
+  "related": ["use-money-on-account", "keep-a-cancellation-refund"],
+  "routes": ["/jobs/:id", "/money/overview"],
+  "keywords": ["overpaid", "overpayment", "in credit", "credit", "on account", "hold", "carry over", "carry forward", "roll forward", "money to sort"],
+  "covers": [
+    "frontend/src/components/account-credit/**",
+    "frontend/src/lib/accountCredit.ts",
+    "backend/src/services/account-credit.ts",
+    "backend/src/routes/account-credit.ts"
+  ]
+}

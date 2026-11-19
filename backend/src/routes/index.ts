@@ -15,6 +15,7 @@ import duplicatesRouter from './duplicates';
 import endorsementsRouter from './endorsements';
 import goodwillCreditsRouter from './goodwill-credits';
 import accountCreditRouter from './account-credit';
+import helpRouter from './help';
 import hirehopRouter from './hirehop';
 import pipelineRouter from './pipeline';
 import jobProjectsRouter from './job-projects';
@@ -102,6 +103,7 @@ router.use('/duplicates', duplicatesRouter);
 router.use('/endorsements', endorsementsRouter);
 router.use('/goodwill', goodwillCreditsRouter);  // goodwill credit (docs/GOODWILL-CREDIT-SPEC.md)
 router.use('/account-credit', accountCreditRouter);  // credit on account (docs/CREDIT-ON-ACCOUNT-SPEC.md)
+router.use('/help', helpRouter);  // "How do I…?" guides — feedback only (help/README.md)
 router.use('/hirehop', hirehopRouter);
 router.use('/pipeline', pipelineRouter);
 router.use('/job-projects', jobProjectsRouter);  // festival-style "these jobs belong together" (docs/JOB-PROJECTS-SPEC.md)

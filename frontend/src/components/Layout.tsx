@@ -6,6 +6,7 @@ import { displayFirstName, displayFullName, displayInitials } from '../lib/displ
 import { api } from '../services/api';
 import GlobalSearch from './GlobalSearch';
 import NotificationBell from './NotificationBell';
+import HelpButton from './HelpButton';
 import LoginSecurityModal from './LoginSecurityModal';
 
 interface NavItem {
@@ -370,6 +371,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </div>
             <div className="flex items-center gap-2">
               <GlobalSearch />
+              <HelpButton />
               <NotificationBell />
               <UserMenu />
               {/* Mobile hamburger */}

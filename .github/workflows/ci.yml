@@ -60,3 +60,17 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  help-guides:
+    # The staff Help guides (help/README.md): each is well formed, and a change to code a
+    # guide describes comes with a change to that guide.
+    name: Help guides
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - run: node scripts/check-help-coverage.mjs "origin/${{ github.base_ref }}"

@@ -435,6 +435,15 @@ the band / tour managers — not promoters or agents. **§21 is the band watch**
 knows the name, plus a back catalogue of past bands to watch in bulk; the one Leads part that runs
 on a timer. §21.7–21.8 are what shipped.
 
+**PILOT, 19 Nov 2026: staff Help guides** — `help/README.md`. The "how do I…?" pages staff read inside
+OP (`/help`, and the **?** in the header, which offers the guides for the page you are on). **A guide is a
+folder in the repo** (`help/guides/<slug>/guide.json` + pictures), bundled by `frontend/src/lib/helpGuides.ts`
+— never the database, never a PDF. One task per guide, the same fixed parts every time. Pictures are taken by
+`help/shots/*.js` from made-up data ("The Demo Band"), never by hand and never from production. **A PR that
+changes a file a guide `covers` must update that guide or re-date its `checked`** — CI fails otherwise
+(`scripts/check-help-coverage.mjs`). House rules and anything signed stay in Staff Documents. "Tell us" on a
+guide bells the admins (`routes/help.ts`). Not built: the Help chat, "Report a problem".
+
 **The Staff page is one URL, two levels.** `/staff/admin` is the roster; a person opens
 in place as `?person=<id>&tab=overview|employment|time|records|reviews|access|absence`. The person is
 in the URL rather than in component state so a notification can deep-link to the tab
@@ -532,6 +541,7 @@ existing definition:
 | A voucher (its code, is it usable, make one, hold it on a job, use it at the till, give it back) | `services/vouchers.ts` + pure `voucher-rules.ts` (codes, inc→ex VAT, `spreadVoucher()`); the sale side is `shop-sales.ts` `checkVoucher()` — a voucher IS a goodwill credit, never a second money-off system (`GOODWILL-CREDIT-SPEC.md` §16) |
 | A client's overpayment kept for their next hire (hold it, is it still there, put it aside for a job, stop holding) | `services/account-credit.ts` — per JOB, the amount is HireHop's unallocated figure refreshed by the close-out plan (`holdForPlan()`), `ACCOUNT_CREDIT_STATUS_SQL` is THE status; what a job has put aside for it and what is left to pay: `listReservedForJob()` + `withCreditOnAccount()` (SQL: `reservedForJobSql()`) — never subtract it from a stored balance; real money, **never a voucher** and never written to HireHop / Xero here (`CREDIT-ON-ACCOUNT-SPEC.md`) |
 | Artist endorsements (who, which brand, the deal, last confirmed) | `services/endorsements.ts` — on a person OR a band (artist not in OP), never both; deal is free text; over 12 months since the last check is flagged. `forClientContext()` feeds New Enquiry / Job view. Page: Operations › Backline – Endorsements |
+| A staff how-to guide (which exist, which fit this page, its pictures, is it stale?) | `help/guides/` + `frontend/src/lib/helpGuides.ts` (`guidesForPath()`, `searchGuides()`); format and rules `help/README.md`; the stale check `scripts/check-help-coverage.mjs` |
 | Recently viewed (per user) | `services/address-book-views.ts` — written ONLY when a detail page passes `?track_view=1`; pickers reading the same GET must not count |
 | Which address-book tabs have content (main row vs "More")? | `frontend/src/hooks/useTabPresence.ts` + `components/EntityTabs.tsx` — asks each tab's own endpoint; an empty tab moves under More, never hidden; one opened during a visit stays in the row until you leave the page. Both pages keep the tab in `?tab=` |
 | Find-or-create a person (by email) / org (by exact name) from an inbound source | `services/address-book-resolve.ts` — exact only; shared by the website enquiry intake and Leads. Also `isGenericMailbox()` (info@, bookings@… is an org email, not a person) |
