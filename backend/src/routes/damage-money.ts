@@ -243,4 +243,155 @@ router.delete('/lines/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Link a cost that is already in Money › Costs (§23.1) ──────────────────
+//
+// The cost form only links a Problem when the cost is CREATED from it. A bill
+// that went into Costs first (the usual way) had no route to its Problem.
+// These change costs.job_issue_id and NOTHING else: not through PATCH /costs,
+// which fires a Xero push for any cost not yet in Xero. Which Problem a cost
+// belongs to is OP's own filing; Xero never sees it.
+
+/** "Bodyshop £1,200.00 (INV-123)" for a timeline line. */
+function describeCost(c: { supplier_name?: string | null; amount_gross?: unknown; invoice_number?: string | null }): string {
+  const gross = Number(c.amount_gross);
+  return `${c.supplier_name || 'Cost'}${Number.isFinite(gross) ? ` ${gbp(gross)}` : ''}${c.invoice_number ? ` (${c.invoice_number})` : ''}`;
+}
+
+/** On the Problem's timeline, and its claim's too when it is on one. Never fails the write. */
+async function logCostEvent(issueId: string, userId: string, body: string) {
+  try {
+    await logIssueEvent(issueId, userId, 'money', body);
+    const c = await query(
+      `SELECT ji.claim_id FROM job_issues ji
+       JOIN incident_claims c ON c.id = ji.claim_id AND c.is_deleted = false
+       WHERE ji.id = $1`,
+      [issueId],
+    );
+    if (c.rows[0]?.claim_id) await logClaimEvent(c.rows[0].claim_id, userId, 'money', body);
+  } catch (err) {
+    console.error('[damage-money] cost timeline log failed:', err);
+  }
+}
+
+/**
+ * Costs that could belong here. With no search: those on the same hire (whole
+ * or split) or the same van. With a search: any cost whose supplier,
+ * description or invoice number matches, or whose amount (net or gross) is
+ * the number typed. Costs already linked here are left out; one linked to
+ * ANOTHER Problem is listed, saying which — linking it moves it.
+ */
+router.get('/linkable-costs', async (req: AuthRequest, res: Response) => {
+  try {
+    const issueId = typeof req.query.issue_id === 'string' ? req.query.issue_id : '';
+    const claimId = typeof req.query.claim_id === 'string' ? req.query.claim_id : '';
+    const guid = z.string().guid();
+    let ids: string[] = [];
+    let jobId: string | null = null;
+    let vehicleId: string | null = null;
+    if (guid.safeParse(issueId).success) {
+      const r = await query(`SELECT id, job_id, vehicle_id FROM job_issues WHERE id = $1`, [issueId]);
+      if (!r.rows[0]) { res.status(404).json({ error: 'Problem not found' }); return; }
+      ids = [issueId];
+      jobId = r.rows[0].job_id;
+      vehicleId = r.rows[0].vehicle_id;
+    } else if (guid.safeParse(claimId).success) {
+      const r = await query(`SELECT job_id, vehicle_id FROM incident_claims WHERE id = $1 AND is_deleted = false`, [claimId]);
+      if (!r.rows[0]) { res.status(404).json({ error: 'Claim not found' }); return; }
+      jobId = r.rows[0].job_id;
+      vehicleId = r.rows[0].vehicle_id;
+      ids = (await query(`SELECT id FROM job_issues WHERE claim_id = $1`, [claimId])).rows.map((p) => p.id);
+    } else {
+      res.status(400).json({ error: 'Say which Problem or claim' }); return;
+    }
+
+    const raw = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 100) : '';
+    const search = raw.length >= 2 ? raw.replace(/[\\%_]/g, (m) => `\\${m}`) : null;
+    const amountTyped = raw ? Number(raw.replace(/[£,\s]/g, '')) : NaN;
+    const amount = Number.isFinite(amountTyped) && amountTyped > 0 ? Math.round(amountTyped * 100) / 100 : null;
+    if (!search && !jobId && !vehicleId) { res.json({ data: [] }); return; }
+
+    const r = await query(
+      `SELECT c.id, c.supplier_name, c.description, c.invoice_number,
+              to_char(c.cost_date, 'YYYY-MM-DD') AS cost_date,
+              c.amount_net, c.amount_vat, c.amount_gross,
+              c.job_issue_id, ji.summary AS linked_problem_summary
+       FROM costs c
+       LEFT JOIN job_issues ji ON ji.id = c.job_issue_id
+       WHERE (c.job_issue_id IS NULL OR c.job_issue_id <> ALL($1::uuid[]))
+         AND (
+           ($4::text IS NULL AND (
+              c.job_id = $2::uuid OR c.vehicle_id = $3::uuid
+              OR EXISTS (SELECT 1 FROM cost_allocations a WHERE a.cost_id = c.id AND a.job_id = $2::uuid)
+              -- on another Problem of the same hire or van
+              OR ji.job_id = $2::uuid OR ji.vehicle_id = $3::uuid))
+           OR ($4::text IS NOT NULL AND (
+              c.supplier_name ILIKE '%' || $4 || '%'
+              OR c.description ILIKE '%' || $4 || '%'
+              OR c.invoice_number ILIKE '%' || $4 || '%'
+              OR ($5::numeric IS NOT NULL AND (ABS(c.amount_gross - $5::numeric) < 0.005 OR ABS(c.amount_net - $5::numeric) < 0.005))))
+         )
+       ORDER BY c.cost_date DESC NULLS LAST, c.created_at DESC
+       LIMIT 40`,
+      [ids, jobId, vehicleId, search, amount],
+    );
+    res.json({
+      data: r.rows.map((c) => ({
+        ...c,
+        amount_net: c.amount_net === null ? null : Number(c.amount_net),
+        amount_vat: c.amount_vat === null ? null : Number(c.amount_vat),
+        amount_gross: c.amount_gross === null ? null : Number(c.amount_gross),
+      })),
+    });
+  } catch (err) {
+    console.error('[damage-money] linkable costs error:', err);
+    res.status(500).json({ error: 'Could not look up costs' });
+  }
+});
+
+router.post('/costs/:costId/link', validate(z.object({ issue_id: z.string().guid() })), async (req: AuthRequest, res: Response) => {
+  try {
+    const costId = String(req.params.costId);
+    const issueId = req.body.issue_id as string;
+    const issue = await query(`SELECT id, summary FROM job_issues WHERE id = $1`, [issueId]);
+    if (!issue.rows[0]) { res.status(404).json({ error: 'Problem not found' }); return; }
+    const cur = await query(
+      `SELECT c.id, c.supplier_name, c.amount_gross, c.invoice_number, c.job_issue_id
+       FROM costs c WHERE c.id = $1`,
+      [costId],
+    );
+    const cost = cur.rows[0];
+    if (!cost) { res.status(404).json({ error: 'Cost not found' }); return; }
+    if (cost.job_issue_id === issueId) { res.json({ data: { ok: true } }); return; }
+
+    await query(`UPDATE costs SET job_issue_id = $2 WHERE id = $1`, [costId, issueId]);
+    const what = describeCost(cost);
+    await logCostEvent(issueId, req.user!.id, `Cost linked from Money › Costs: ${what}`);
+    if (cost.job_issue_id) {
+      await logCostEvent(cost.job_issue_id, req.user!.id, `Cost moved to another Problem (${issue.rows[0].summary}): ${what}`);
+    }
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('[damage-money] link cost error:', err);
+    res.status(500).json({ error: 'Could not link that cost' });
+  }
+});
+
+router.post('/costs/:costId/unlink', validate(z.object({ issue_id: z.string().guid() })), async (req: AuthRequest, res: Response) => {
+  try {
+    const issueId = req.body.issue_id as string;
+    // Only from the Problem it is on — a stale screen can't unlink it from another.
+    const r = await query(
+      `UPDATE costs SET job_issue_id = NULL WHERE id = $1 AND job_issue_id = $2
+       RETURNING supplier_name, amount_gross, invoice_number`,
+      [String(req.params.costId), issueId],
+    );
+    if (!r.rows[0]) { res.status(409).json({ error: 'That cost isn’t on this Problem any more — reload the page.' }); return; }
+    await logCostEvent(issueId, req.user!.id, `Cost unlinked (it stays in Money › Costs): ${describeCost(r.rows[0])}`);
+    res.json({ data: { ok: true } });
+  } catch (err) {
+    console.error('[damage-money] unlink cost error:', err);
+    res.status(500).json({ error: 'Could not unlink that cost' });
+  }
+});
+
 export default router;

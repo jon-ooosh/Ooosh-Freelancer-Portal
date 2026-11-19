@@ -5,7 +5,7 @@
  */
 jest.mock('../../routes/system-settings', () => ({ getSystemSetting: jest.fn(async () => null) }));
 
-import { shapeForBuyer, monthlyMileage, cleanSwitches, DEFAULT_SWITCHES, type FullSaleData } from '../vehicle-sale-links';
+import { shapeForBuyer, monthlyMileage, cleanSwitches, buyerDamageStatus, DEFAULT_SWITCHES, type FullSaleData } from '../vehicle-sale-links';
 
 const full: FullSaleData = {
   reg: 'RX21ABC', make: 'MERCEDES-BENZ', model: 'SPRINTER', colour: 'SILVER', seats: 9,
@@ -96,5 +96,24 @@ describe('cleanSwitches', () => {
     expect(cleanSwitches({ showPrice: false, showMileageHistory: 'yes', hackerField: true }))
       .toEqual({ showPrice: false });
     expect(cleanSwitches(null)).toEqual({});
+  });
+});
+
+// A buyer is only told "Repaired" when it was repaired or replaced (INCIDENT-CLAIMS-SPEC.md §23.1).
+describe('buyerDamageStatus', () => {
+  it('says Repaired only for a repair or replacement', () => {
+    expect(buyerDamageStatus('resolved', 'repaired')).toBe('Repaired');
+    expect(buyerDamageStatus('resolved', 'replaced')).toBe('Repaired');
+  });
+  it('says Closed when it was written off, needed nothing, was found, or other', () => {
+    for (const p of ['write_off', 'no_action', 'found', 'other']) expect(buyerDamageStatus('resolved', p)).toBe('Closed');
+    expect(buyerDamageStatus('written_off', null)).toBe('Closed');
+  });
+  it('keeps what older Problems always showed (no reason, or an old money answer)', () => {
+    expect(buyerDamageStatus('resolved', null)).toBe('Repaired');
+    expect(buyerDamageStatus('resolved', 'charge_client')).toBe('Repaired');
+  });
+  it('anything still open is Outstanding', () => {
+    for (const s of ['open', 'investigating', 'awaiting_quote', 'quoted', 'actioned']) expect(buyerDamageStatus(s, null)).toBe('Outstanding');
   });
 });
