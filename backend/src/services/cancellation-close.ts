@@ -23,6 +23,7 @@
  * this one).
  */
 import { query } from '../config/database';
+import { ukToday } from './uk-date';
 import {
   PENNY, round2, gbp, CloseReporter, Row, MISC_INCOME_NOMINAL, customLineGross, raiseCustomLineInvoice,
   invoiceRows, invoiceStatus, invoiceNet, isChargeOnlyInvoice,
@@ -253,6 +254,27 @@ export async function syncRefundReminder(jobId: string, refundDue: number, userI
     return `The pending refund on the Money tab is now ${gbp(due)} (was ${gbp(one.amount)}) — press Process on it to refund the client.`;
   }
   return `The pending refund of ${gbp(due)} on the Money tab is ready — press Process on it to refund the client.`;
+}
+
+/** The reason a refund reminder carries when its money is held on account instead (CREDIT-ON-ACCOUNT-SPEC.md §9). */
+export const HELD_ON_ACCOUNT_REASON = 'Held on account for their next booking';
+
+/**
+ * The client asked us to KEEP what is due back after a cancellation: its pending refund
+ * reminder(s) are cleared with that reason, in the same words and shape as a manager's
+ * Clear on Money › Overview — so the job's banner (`readRefundOutcome()`) and "Owed to
+ * Clients" follow by themselves. No money moves. Returns how many were cleared.
+ */
+export async function clearRefundRemindersHeld(jobId: string, userId: string | null): Promise<number> {
+  const who = userId ? (await query(`SELECT email FROM users WHERE id = $1`, [userId])).rows[0]?.email : null;
+  const stamp = `\n[Dismissed: ${HELD_ON_ACCOUNT_REASON} — by ${who || 'OP'} on ${ukToday()}]`;
+  const r = await query(
+    `UPDATE job_payments
+        SET payment_status = 'cancelled', notes = COALESCE(notes, '') || $2, updated_at = NOW()
+      WHERE job_id = $1 AND payment_type = 'refund' AND payment_status = 'pending'`,
+    [jobId, stamp],
+  );
+  return r.rowCount ?? 0;
 }
 
 /**

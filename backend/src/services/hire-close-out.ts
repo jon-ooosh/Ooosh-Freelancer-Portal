@@ -876,7 +876,8 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   // Held on account? The stored figure follows what HireHop has unallocated right now —
   // but only from a read nothing is blocking, so a half-read job never zeroes a hold.
   const surplusNow = round2(surplus.reduce((s, x) => s + x.amount, 0));
-  base.onAccount = cancelled ? null : await holdForPlan(job.id, blockers.length === 0 ? surplusNow : null);
+  // (A cancelled job too, once its fee is invoiced: what is left may be kept for the next booking.)
+  base.onAccount = await holdForPlan(job.id, blockers.length === 0 && (!cancelled || feeInvoiced) ? surplusNow : null);
   const held = base.onAccount;
 
   // Sentences.
@@ -890,7 +891,7 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
     sentences.unshift(`Raise the cancellation fee invoice: ${gbp(base.invoice.netToInvoice)} + VAT = ${gbp(base.cancellation!.feeGross)}.`);
   }
   for (const s of surplus) {
-    sentences.push(cancelled
+    sentences.push(cancelled && !held
       ? `Refund ${gbp(s.amount)} of payment ${s.depositId} to the client.`
       : held
         ? `Leave ${gbp(s.amount)} of payment ${s.depositId} unallocated — it is held on account for ${held.clientName}.`
@@ -911,7 +912,9 @@ async function buildPlan(job: JobRow): Promise<CloseOutPlan> {
   const nothingSpare = held ? allocations.length === 0 : surplus.length === 0 && payments.length === 0;
   base.readyToComplete = !cancelled && blockers.length === 0 && invoices.length > 0 && open.length === 0 && nothingSpare;
   if (base.cancellation) {
-    base.cancellation.settled = blockers.length === 0 && feeInvoiced && open.length === 0 && payments.length === 0;
+    // Held on account is the refund decided: nothing more to do on this job.
+    base.cancellation.settled = blockers.length === 0 && feeInvoiced && open.length === 0
+      && (payments.length === 0 || (!!held && allocations.length === 0));
     if (base.cancellation.settled) await markCancellationReconciled(job.id);
   }
   return base;
@@ -1138,7 +1141,9 @@ async function allocateSteps(job: JobRow, rep: CloseReporter, onlyFromDeposit?: 
   for (const c of appliedFrom.values()) parts.push(`${gbp(c.amount)} of it was money held on account from job ${c.hhJobNumber}.`);
   if (after.shortfall >= PENNY) parts.push(`The client still owes ${gbp(after.shortfall)}.`);
   const left = round2(after.surplus.reduce((s, x) => s + x.amount, 0));
-  if (after.cancellation) {
+  if (after.cancellation && after.onAccount) {
+    parts.push(`${gbp(left)} is held on account for ${after.onAccount.clientName}.`);
+  } else if (after.cancellation) {
     // What is left after the fee is a refund due. OP's reminder follows the real figure;
     // the refund itself is a person pressing Process (never moved here).
     const note = await syncRefundReminder(job.id, left, rep.userId ?? null);

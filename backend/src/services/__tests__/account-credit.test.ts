@@ -58,8 +58,14 @@ describe('holdBlockReason', () => {
     expect(holdBlockReason(plan({ invoices: [{ ...paidInvoice, owing: 50 }] }))).toContain('still owing');
     expect(holdBlockReason(plan({ allocations: [{ depositId: 9300, amount: 10 }] }))).toContain('still owing');
   });
-  it('refuses a cancelled job, a blocked plan, nothing spare, and a second hold', () => {
-    expect(holdBlockReason(plan({ cancellation: {} }))).toContain('refund');
+  it('a cancelled job: what is left after the fee can be held, but only once the fee is invoiced', () => {
+    expect(holdBlockReason(plan({ cancellation: { invoiced: false } }))).toContain('Raise the cancellation fee invoice first');
+    expect(holdBlockReason(plan({ cancellation: { invoiced: true } }))).toBeNull();
+    // No fee at all: there is no invoice, and that is fine for a cancellation only.
+    expect(holdBlockReason(plan({ cancellation: { invoiced: true }, invoices: [] }))).toBeNull();
+    expect(holdBlockReason(plan({ invoices: [] }))).toContain('no invoice yet');
+  });
+  it('refuses a blocked plan, nothing spare, and a second hold', () => {
     expect(holdBlockReason(plan({ blockers: ['Payment 9300 is in HireHop but OP has no record of taking it'] }))).toContain('Payment 9300');
     expect(holdBlockReason(plan({ surplus: [] }))).toContain('Nothing is unallocated');
     expect(holdBlockReason(plan({ onAccount: { id: 'ac1' } }))).toContain('already held');

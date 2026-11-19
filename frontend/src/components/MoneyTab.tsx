@@ -483,7 +483,8 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
   // Overpaid and nobody has decided yet → "Hold on account" is on offer; once held, Refund
   // and Apply to another job ask first, because that money is promised.
   const closeView = closePlan ? closeOutView(closePlan, { isManager: canManage }) : null;
-  const spareToHold = closeView?.stage === 'credit' ? closeView.credit : 0;
+  // (A cancelled job's refund due can be kept for the client's next booking the same way.)
+  const spareToHold = closeView?.stage === 'credit' || closeView?.stage === 'refund' ? closeView.credit : 0;
   const heldOnAccount = closePlan?.onAccount ?? null;
   const okWhileHeld = (doing: string) => !heldOnAccount || window.confirm(
     `£${heldOnAccount.amount.toFixed(2)} on this job is held on account for ${heldOnAccount.clientName}`
@@ -1580,7 +1581,7 @@ export default function MoneyTab({ jobId, job, onJobChanged, onRequestComplete }
         />
       )}
       {showHoldOnAccount && (
-        <HoldOnAccountModal jobId={jobId} amount={spareToHold} clientName={jobClientName(job)}
+        <HoldOnAccountModal jobId={jobId} amount={spareToHold} clientName={jobClientName(job)} cancelled={!!closePlan?.cancellation}
           onClose={() => setShowHoldOnAccount(false)} />
       )}
 

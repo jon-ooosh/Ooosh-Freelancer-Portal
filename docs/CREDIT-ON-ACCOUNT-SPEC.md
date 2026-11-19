@@ -1,6 +1,6 @@
 # Credit on account — a client's overpayment kept for their next hire
 
-**Status:** all four PRs built (PRs 1–2 18 Nov 2026, live on job 16489 → 16982; PRs 3–4 19 Nov 2026).
+**Status:** all four PRs built (PRs 1–2 18 Nov 2026, live on job 16489 → 16982; PRs 3–4 19 Nov 2026), plus §8 (cancel-and-rebook, the overview card).
 
 Born from job 16489 (Gently Tender): the hire finished £68.40 overpaid and the client asked
 us to keep it for a hire they were about to confirm. "Apply to another job" only works
@@ -190,7 +190,35 @@ text on hover.
 - After close-out applies it, HireHop shows it on the job ("from another booking", which
   the portal already counted) and OP stops sending it — never both.
 
-## 8. Not built
+## 8. Cancel-and-rebook, and the overview (built 19 Nov 2026)
 
-A cancelled job's refund held on account; a hold for a client with no organisation; moving
-a hold between clients; the arrival hook applying held money by itself.
+**A cancelled job's refund can be held on account.** What is left on a cancelled job's
+payments after its fee is a refund due; the client may ask us to keep it for their next
+booking instead (jon, 19 Nov 2026).
+
+- Allowed once the fee is on an approved invoice and paid — or there is no fee
+  (`holdBlockReason()`). Before that every payment looks spare, so the plan never refreshes
+  a hold from a cancelled job whose fee isn't invoiced.
+- Offered where a refund is: the "to refund to the client" line gains **Hold on account**,
+  and the payment rows' ⋯ menu has it.
+- **The pending refund is cleared, not left** (`cancellation-close.ts`
+  `clearRefundRemindersHeld()`): the same shape as a manager's Clear, reason "Held on
+  account for their next booking" — so the job's banner (`readRefundOutcome()`) and Money ›
+  Overview's "Owed to Clients" follow by themselves. No money moves.
+- The plan then reads **Settled** (`cancellation.settled` accepts a hold in place of an
+  empty payment), the Payment Reconciliation card ticks, and pressing the button again does
+  not bring the reminder back (`allocateSteps()` skips `syncRefundReminder()` while held).
+- **Stop holding** (manager) puts the refund reminder back at HireHop's figure.
+- From there it is an ordinary hold: "Use on this job" on the rebooking, the portal asks
+  for less, close-out applies it.
+
+**Money › Overview has a fifth card, "Held on Account"** (`GET /money/overview` →
+`held_on_account`, `account-credit.ts` `listAllHeld()`): every hold with money on it, oldest
+first, with the job it was paid on, how long it has been held, and the job it is put aside
+for — or an amber "Not on a job yet", totalled on the card. Read-only; each row opens the job.
+
+## 9. Not built
+
+A hold for a client with no organisation (a job can't be made without one); moving a hold
+between clients; the arrival hook applying held money by itself (wait until close-out has
+applied a few for real); "Use on this job" on a phone (Client History is a laptop panel).

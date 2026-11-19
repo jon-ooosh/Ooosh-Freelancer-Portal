@@ -356,13 +356,15 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       acts = onHoldOnAccount ? [{ label: 'Hold on account', onClick: onHoldOnAccount, kind: 'secondary' }] : [];
       break;
     case 'refund':
-      title = `${money(view.credit)} to refund to the client`;
-      why = 'The fee has been paid from what the client had already paid. Refund the rest with Process on the pending refund below: a Stripe payment goes back to the card; a bank transfer is recorded here and sent from Wise. OP never refunds on its own.';
-      acts = [];
+      title = `${money(view.credit)} to refund to the client — or hold it on account`;
+      why = 'The fee has been paid from what the client had already paid. Refund the rest with Process on the pending refund below: a Stripe payment goes back to the card; a bank transfer is recorded here and sent from Wise. Or, if the client would rather we kept it for their next booking, hold it on account: the pending refund is cleared and nothing moves. OP never decides this for you.';
+      acts = onHoldOnAccount ? [{ label: 'Hold on account', onClick: onHoldOnAccount, kind: 'secondary' }] : [];
       break;
     case 'settled':
       title = cancel && cancel.feeNet >= PENNY ? 'Cancellation settled' : 'Nothing left to settle';
-      why = 'The fee is invoiced and paid and nothing is left on the client\'s payments, in HireHop and Xero. The job stays Cancelled.';
+      why = plan.onAccount
+        ? 'The fee is invoiced and paid. What was left is held on account for the client\'s next booking instead of being refunded. The job stays Cancelled.'
+        : 'The fee is invoiced and paid and nothing is left on the client\'s payments, in HireHop and Xero. The job stays Cancelled.';
       acts = [checkAgain];
       if (plan.excessHeld >= PENNY) chips.push([false, `${money(plan.excessHeld)} excess still held — return it from the Excess card`]);
       break;
@@ -424,6 +426,8 @@ export default function CloseOutMoneyPanel({ jobId, portalUrl, onRecordPayment, 
       // Before the fee is invoiced every payment looks "spare" — the refund is only known after it.
       if (i === 3 && view.credit >= PENNY && cancel.invoiced) return `${money(view.credit)} to refund`;
       if (i === 3 && view.owing >= PENNY) return `${money(view.owing)} owing`;
+      // Kept for the client's next booking instead of refunded — the step is done, but say how.
+      if (i === 3 && plan.onAccount) return `${money(view.onAccount)} held on account`;
       return '';
     }
     if (i === 4 && hasInv && view.owing >= PENNY) return view.paid >= PENNY ? `${money(view.paid)} paid · ${money(view.owing)} owing` : 'Nothing paid yet';

@@ -119,10 +119,15 @@ async function note(jobIds: Array<string | null | undefined>, text: string, user
 export function holdBlockReason(plan: Pick<CloseOutPlan,
   'cancellation' | 'blockers' | 'invoice' | 'invoices' | 'allocations' | 'surplus' | 'onAccount'>): string | null {
   if (plan.onAccount) return 'This job\'s spare money is already held on account.';
-  if (plan.cancellation) return 'A cancelled job\'s spare money is a refund — use Process on the pending refund.';
   if (plan.blockers.length) return plan.blockers[0];
+  // A CANCELLED job (jon, 19 Nov 2026): what is left after the cancellation fee is a refund
+  // due — the client may ask us to keep it for their next booking instead. Only once the
+  // fee is on an invoice (or there is no fee): before that every payment looks spare.
+  if (plan.cancellation && !plan.cancellation.invoiced) {
+    return 'Raise the cancellation fee invoice first — until then OP can\'t tell what is left to hold.';
+  }
   if (plan.invoice.netToInvoice >= PENNY || plan.invoice.draft) return 'Raise this job\'s invoice first — until then OP can\'t tell what is spare.';
-  if (plan.invoices.length === 0) return 'This job has no invoice yet — until it does OP can\'t tell what is spare.';
+  if (plan.invoices.length === 0 && !plan.cancellation) return 'This job has no invoice yet — until it does OP can\'t tell what is spare.';
   if (plan.allocations.length > 0 || plan.invoices.some((i) => i.owing >= PENNY)) {
     return 'This job\'s own invoice is still owing — allocate the payments to it first.';
   }
@@ -160,7 +165,7 @@ export async function holdOnAccount(plan: CloseOutPlan, userId: string | null, n
     throw e;
   }
   const credit = (await getRow(id))!;
-  await note([plan.jobId], `On account: ${gbp(amount)} overpaid on this job is being held for ${credit.client_name} to use on another hire`
+  await note([plan.jobId], `On account: ${gbp(amount)} ${plan.cancellation ? 'due back after this job was cancelled' : 'overpaid on this job'} is being held for ${credit.client_name} to use on another hire`
     + `${noteText?.trim() ? ` — ${noteText.trim()}` : ''}. It stays on this job's payments in HireHop until then.`, userId);
   return credit;
 }
@@ -374,4 +379,16 @@ export async function afterCreditApplied(id: string, applied: { amount: number; 
   } catch (e) {
     console.warn('[account-credit] could not tidy the hold after applying it:', e);
   }
+}
+
+/**
+ * Every hold that still has money on it, oldest first — Money › Overview's "Held on
+ * account" (jon, 19 Nov 2026). Oldest first on purpose: the ones to worry about are the
+ * ones that have sat unused longest.
+ */
+export async function listAllHeld(): Promise<AccountCredit[]> {
+  const r = await query(
+    `SELECT * FROM (${SELECT} WHERE a.status = 'held') x WHERE x.status IN ('held', 'reserved') ORDER BY x.held_at`,
+  );
+  return r.rows;
 }

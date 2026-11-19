@@ -34,7 +34,7 @@ import { fireEventTriggeredReminders } from '../services/requirement-close-sweep
 import { afterOptionConfirmed } from '../services/option-confirm';
 import { PRE_CONFIRMED_STATUSES } from '../services/pipeline-stage';
 import { portalOptionsFor } from '../services/job-groups';
-import { listReservedForJob, withCreditOnAccount, hasLiveHold } from '../services/account-credit';
+import { listReservedForJob, withCreditOnAccount, hasLiveHold, listAllHeld } from '../services/account-credit';
 import { planHireCloseOut } from '../services/hire-close-out';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 import { requiredDeposit as depositRule } from '../services/deposit-rule';
@@ -268,6 +268,8 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
       else { excessHeldUpcoming += amt; excessUpcomingCount++; }
     }
 
+    const heldOnAccount = await listAllHeld().catch((e) => { console.warn('[money] held on account read failed:', e); return []; });
+
     res.json({
       data: {
         balances_outstanding: balances.rows,
@@ -276,7 +278,11 @@ router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, 
         excess_held: excessHeld.rows,
         pending_refunds: pendingRefunds.rows,
         client_overpaid: clientOverpaid.rows,
+        // Clients' own money kept for their next hire (CREDIT-ON-ACCOUNT-SPEC.md §9), oldest first.
+        held_on_account: heldOnAccount,
         totals: {
+          held_on_account: Math.round(heldOnAccount.reduce((s, c) => s + c.amount, 0) * 100) / 100,
+          held_on_account_count: heldOnAccount.length,
           balance_outstanding: sum(balances.rows, 'balance_outstanding'),
           balances_count: balances.rows.length,
           balances_resolved_total: sum(balancesResolved.rows, 'balance_outstanding'),
