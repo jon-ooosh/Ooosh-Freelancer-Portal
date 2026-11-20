@@ -41,7 +41,7 @@ function GuideList() {
       )}
       {areas.map((area) => (
         <section key={area} className="mt-6">
-          <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">{area}</h2>
+          <h2 className="text-lg font-bold text-gray-900 mb-2">{area}</h2>
           <ul className="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
             {found.filter((g) => g.area === area).map((g) => (
               <li key={g.slug}>
@@ -74,19 +74,19 @@ function GuideView({ slug }: { slug: string }) {
   return (
     <div className="p-4 sm:p-6 max-w-3xl mx-auto">
       <Link to="/help" className="text-sm text-ooosh-600 hover:underline">All guides</Link>
-      <h1 className="text-2xl font-bold text-gray-900 mt-2">{guide.title}</h1>
+      <h1 className="text-3xl font-bold text-gray-900 mt-2 leading-tight">{guide.title}</h1>
       <p className="text-xs text-gray-500 mt-1">{guide.area} · {guide.who} · checked {guideDate(guide.checked)}</p>
       <p className="text-[15px] text-gray-700 mt-3">{guide.summary}</p>
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2">
         <div className="rounded-xl border border-green-200 bg-green-50 p-4">
-          <h2 className="text-xs font-semibold text-green-800 uppercase tracking-wider">Use this when</h2>
+          <h2 className="text-sm font-bold text-green-800 uppercase tracking-wide">Use this when</h2>
           <ul className="mt-2 space-y-1.5 text-sm text-gray-800 list-disc pl-5">
             {guide.useWhen.map((t) => <li key={t}>{t}</li>)}
           </ul>
         </div>
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
-          <h2 className="text-xs font-semibold text-amber-800 uppercase tracking-wider">Not when</h2>
+          <h2 className="text-sm font-bold text-amber-800 uppercase tracking-wide">Not when</h2>
           <ul className="mt-2 space-y-1.5 text-sm text-gray-800 list-disc pl-5">
             {guide.notWhen.map((n) => (
               <li key={n.text}>
@@ -98,7 +98,7 @@ function GuideView({ slug }: { slug: string }) {
         </div>
       </div>
 
-      <h2 className="text-lg font-semibold text-gray-900 mt-8">Steps</h2>
+      <h2 className="text-xl font-bold text-gray-900 mt-10">Steps</h2>
       <ol className="mt-3 space-y-6">
         {guide.steps.map((s, i) => {
           const img = guideImage(guide.slug, s.image);
@@ -107,7 +107,7 @@ function GuideView({ slug }: { slug: string }) {
             <li key={s.text} className="flex gap-3">
               <span className="flex-none w-7 h-7 rounded-full bg-ooosh-600 text-white text-sm font-bold grid place-items-center">{i + 1}</span>
               <div className="min-w-0 flex-1">
-                <p className="text-[15px] font-semibold text-gray-900">
+                <p className="text-base font-semibold text-gray-900">
                   {s.text}
                   {s.who && <span className="ml-2 align-middle text-[11px] font-semibold px-2 py-0.5 rounded-full bg-purple-100 text-purple-800">{s.who}</span>}
                 </p>
@@ -131,12 +131,12 @@ function GuideView({ slug }: { slug: string }) {
         })}
       </ol>
 
-      <h2 className="text-lg font-semibold text-gray-900 mt-8">What happens next</h2>
+      <h2 className="text-xl font-bold text-gray-900 mt-10">What happens next</h2>
       <ul className="mt-2 space-y-1.5 text-sm text-gray-800 list-disc pl-5">
         {guide.next.map((t) => <li key={t}>{t}</li>)}
       </ul>
 
-      <h2 className="text-lg font-semibold text-gray-900 mt-8">If it looks wrong</h2>
+      <h2 className="text-xl font-bold text-gray-900 mt-10">If it looks wrong</h2>
       <dl className="mt-2 bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
         {guide.wrong.map((w) => (
           <div key={w.problem} className="px-4 py-3">
@@ -148,7 +148,7 @@ function GuideView({ slug }: { slug: string }) {
 
       {(guide.related ?? []).some((r) => guideBySlug(r)) && (
         <>
-          <h2 className="text-lg font-semibold text-gray-900 mt-8">Related</h2>
+          <h2 className="text-xl font-bold text-gray-900 mt-10">Related</h2>
           <ul className="mt-2 space-y-1 text-sm">
             {(guide.related ?? []).map((r) => guideBySlug(r)).filter((g): g is Guide => !!g).map((g) => (
               <li key={g.slug}><Link to={guideLink(g.slug)} className="text-ooosh-700 hover:underline">{g.title}</Link></li>
