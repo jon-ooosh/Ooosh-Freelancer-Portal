@@ -400,6 +400,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '358_hire_agreement_dates.sql',
         '359_wise_api_incoming_setting.sql',
         '360_premises_library_advisories_costs.sql',
+        '361_premises_bookings_staff_docs.sql',
       ];
 
       for (const migration of migrations) {

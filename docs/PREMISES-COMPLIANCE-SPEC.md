@@ -1,8 +1,7 @@
 # Premises & compliance — spec
 
-**Status: PHASES 1, S, 2 and 3a BUILT, 20 Nov 2026 — §12–§15 are what shipped and where it differs from the
-plan; read them first.** Phase 3b (booked visits on the staff calendar, the supplier's Premises line, the Staff
-Document link) is not built. Mockups (v1, before the decisions below):
+**Status: ALL PHASES BUILT (1, S, 2, 3a, 3b), 20 Nov 2026 — §12–§16 are what shipped and where it differs
+from the plan; read them first.** "Later" in §9 is what's left. Mockups (v1, before the decisions below):
 https://claude.ai/artifact/GnedY9eyyMDydPUKMg2tJK — Mockup A's place chips, visibility and "Book the next
 visit" are described here, not drawn there yet.
 
@@ -413,5 +412,41 @@ own). **3a: the documents library, advisories as To Dos, and the bill in Costs.*
   (`GET /premises/checks/:id/linkable-costs`); read-only over Costs. The check's page shows **"What it's cost"** by
   year (ex VAT, from the linked bills).
 
-**Not built yet (3b):** "Book a visit" onto the staff calendar (and the reminder turning into "they're coming on …"),
-the supplier org's "Premises" line, the Staff Document link and the re-issue nudge after a fire risk assessment.
+(3b — the calendar, the supplier line and the Staff Document link — is §16.)
+
+---
+
+## §16 Phase 3b — what shipped (20 Nov 2026)
+
+Migration **361**. **Booked visits, the staff calendar row, the contractor's line, the Staff Document link.**
+
+- **Booking a visit** (`premises_bookings`; "Book a visit" / "Change the booking" on a contractor-visit check —
+  anyone who can see the check). Date (today or later), a quarter-hour time or "No set time", who's letting them
+  in, a note. **One live booking per check** (unique index on `status = 'booked'`); booking again changes it.
+  The person letting them in must be able to see the check (their To Do links to it); left blank, it's whoever
+  looks after the check. The pill reads **"Booked Mon 23 Nov"**; the About card shows the booking with "Cancel the
+  booking" (soft — `status = 'cancelled'`, never deleted).
+- **The reminder follows the booking.** While a check has a live booking, its ONE To Do (`source_type =
+  'premises_check'`, unchanged) becomes **"Northside coming 23 Nov 2026 at 10:30 — let them in (Boiler service)"**,
+  for the person letting them in, due on the day (`bookingTitle()` in `premises-rules.ts`). Changing the booking
+  re-titles and re-dates the same To Do; cancelling goes back to "Book: …". **A To Do ticked by hand isn't made again
+  for the same thing**: `premises_checks.reminded_key` (`booking:<id>:<date>` or `due:<date>`) replaced
+  `reminded_for_due` as the memory (the old column is still written and still honoured for rows from before).
+  The daily 09:17 run includes every check with a live booking.
+- **Recording the visit marks the booking done** and closes the To Do, as before. **"Add past records" never
+  touches a live booking** — an old certificate filed today isn't the visit that's booked.
+- **Staff calendar: "Contractors on site"** — one row under the freelancers, from its own call
+  (`GET /premises/visits?from=&to=`, filtered by who can see each check), so the calendar keeps working if it
+  fails. A chip per visit (its time, or "Visit"; hover for contractor, check, place, who's letting them in, the
+  note); a done visit stays on its day, grey with a ✓. **Never counted in "In"** — not people we roster. Click →
+  the check. Nothing else in the calendar changed (additive only, per `staff-calendar.md`).
+- **The contractor's organisation page** gets one line under its name — "Premises checks they do: Boiler service ·
+  Gas safety" — the checks it's the contractor on or has done a record for, that you can see
+  (`GET /premises/by-organisation/:id`). Nothing shows when there are none.
+- **The Staff Document link** (`premises_checks.staff_document_id`, "Staff document it feeds" on the check form —
+  manager-tier, as the form is). The check page shows the link; after a visit is recorded on a linked check, a banner
+  says "issue a new version if what was done changes it" with a link to Staff Documents. **A nudge only** — nothing
+  is changed on the Staff Document, no new version is made, no one is asked to re-read.
+
+**Not built (deliberately):** a booking for anything but a contractor visit; a booking that runs over several days;
+contractor visits counting as cover; emailing the contractor.

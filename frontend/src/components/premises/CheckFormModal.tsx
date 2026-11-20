@@ -9,7 +9,7 @@
  * On a change, only the fields that actually changed are sent — so renaming a
  * check can't move its due date.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../services/api';
 import { ukToday } from '../../lib/ukDate';
 import SearchPicker, { PickerOption } from '../SearchPicker';
@@ -39,6 +39,8 @@ interface FormState {
   meter_serial: string;
   /** A rotating test's call points — one per line. */
   points: string;
+  /** A Staff Document this check feeds (e.g. the fire risk assessment) — spec §16. */
+  staff_document_id: string;
 }
 
 const DEFAULT_REMIND: Record<CheckKind, number> = { visit: 30, renewal: 30, test: 0, reading: 0 };
@@ -66,6 +68,7 @@ function initialState(meta: PremisesMeta, check: PremisesCheck | null): FormStat
     unit: check?.unit ?? 'kWh',
     meter_serial: check?.meter_serial ?? '',
     points: (check?.points ?? []).join('\n'),
+    staff_document_id: check?.staff_document_id ?? '',
   };
 }
 
@@ -89,6 +92,7 @@ function toPayload(f: FormState) {
     unit: f.kind === 'reading' ? (f.unit.trim() || null) : null,
     meter_serial: f.kind === 'reading' ? (f.meter_serial.trim() || null) : null,
     points: f.kind === 'test' ? f.points.split('\n').map(p => p.trim()).filter(Boolean) : [],
+    staff_document_id: f.staff_document_id || null,
   };
 }
 
@@ -109,6 +113,14 @@ export default function CheckFormModal({ meta, check, onClose, onSaved }: {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) => setF(prev => ({ ...prev, [k]: v }));
+  // Staff Documents to link to. Manager-tier list; if it can't be read the picker just shows what's linked.
+  const [staffDocs, setStaffDocs] = useState<{ id: string; title: string }[]>([]);
+  useEffect(() => {
+    api.get<{ data: { id: string; title: string }[] }>('/staff-documents')
+      .then(r => setStaffDocs((r.data || []).map(d => ({ id: d.id, title: d.title }))))
+      .catch(() => { /* optional */ });
+  }, []);
+  const docMissing = !!check?.staff_document_id && !staffDocs.some(d => d.id === check.staff_document_id);
 
   const startsOn = f.next_due || ukToday();
   const isAdmin = meta.can.admin;
@@ -319,6 +331,15 @@ export default function CheckFormModal({ meta, check, onClose, onSaved }: {
           <div>
             <label className={label} htmlFor="pc-notes">Notes</label>
             <textarea id="pc-notes" value={f.notes} onChange={e => set('notes', e.target.value)} rows={2} maxLength={4000} className={input} />
+          </div>
+          <div>
+            <label className={label} htmlFor="pc-doc">Staff document it feeds</label>
+            <select id="pc-doc" value={f.staff_document_id} onChange={e => set('staff_document_id', e.target.value)} className={input}>
+              <option value="">None</option>
+              {docMissing && <option value={check!.staff_document_id!}>{check!.staff_document_title ?? 'Linked document'}</option>}
+              {staffDocs.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}
+            </select>
+            <p className="text-xs text-gray-500 mt-1">e.g. the fire risk assessment. Recording this check then reminds you to issue a new version.</p>
           </div>
         </div>
 

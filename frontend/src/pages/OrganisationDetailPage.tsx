@@ -28,6 +28,7 @@ import WatchBandButton from '../components/leads/WatchBandButton';
 import GoodwillTab from '../components/goodwill/GoodwillTab';
 import AccountCreditOrgList from '../components/account-credit/AccountCreditOrgList';
 import OfferGoodwillModal from '../components/goodwill/OfferGoodwillModal';
+import OrgPremisesLine from '../components/premises/OrgPremisesLine';
 
 interface OrgDetail {
   id: string;
@@ -588,6 +589,7 @@ function OrganisationDetailContent() {
                 Part of <Link to={`/organisations/${org.parent_id}`} className="text-ooosh-600 hover:text-ooosh-700">{org.parent_name}</Link>
               </p>
             )}
+            <OrgPremisesLine key={org.id} orgId={org.id} />
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="hidden sm:inline text-sm text-gray-500 mr-2">

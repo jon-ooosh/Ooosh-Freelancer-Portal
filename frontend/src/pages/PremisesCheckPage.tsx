@@ -16,9 +16,10 @@ import RecordModal, { uploadRecordFiles } from '../components/premises/RecordMod
 import PastRecordsModal from '../components/premises/PastRecordsModal';
 import UsageChart from '../components/premises/UsageChart';
 import LinkCostModal from '../components/premises/LinkCostModal';
+import BookVisitModal from '../components/premises/BookVisitModal';
 import {
   KIND_LABEL, OUTCOME_CLASS, OUTCOME_LABEL, PremisesCheck, PremisesMeta, PremisesRecord, TEST_OUTCOME_LABEL,
-  VISIBILITY_LABEL, advisoryDone, fmtDate, fmtMoney, fmtNumber, statusPill,
+  VISIBILITY_LABEL, advisoryDone, fmtDate, fmtMoney, fmtNumber, fmtShortDay, statusPill,
 } from '../components/premises/premisesCopy';
 
 export default function PremisesCheckPage() {
@@ -37,6 +38,9 @@ function PremisesCheckContent({ id }: { id: string }) {
   const [recording, setRecording] = useState(false);
   const [filingPast, setFilingPast] = useState(false);
   const [linkingRecord, setLinkingRecord] = useState<string | null>(null);
+  const [booking, setBooking] = useState(false);
+  // After a visit is recorded on a check tied to a Staff Document: "issue a new version?" (spec §16).
+  const [docNudge, setDocNudge] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -77,6 +81,10 @@ function PremisesCheckContent({ id }: { id: string }) {
     const reason = window.prompt(`Retire “${check!.title}”? It comes off the register and stops reminding anyone. Its records and certificates are kept. Why (optional)?`);
     if (reason === null) return;
     void act(() => api.post(`/premises/checks/${id}/retire`, { reason: reason.trim() || null }), 'Could not retire it');
+  }
+  function cancelBooking() {
+    if (!window.confirm('Call off this booking? The reminder goes back to “book it”.')) return;
+    void act(() => api.post(`/premises/checks/${id}/booking/cancel`, {}), 'Could not cancel the booking');
   }
   function remove() {
     if (!window.confirm(`Delete “${check!.title}”? Only for a check added by mistake — nothing has been recorded on it.`)) return;
@@ -124,6 +132,12 @@ function PremisesCheckContent({ id }: { id: string }) {
             <button type="button" disabled={busy} onClick={remove}
               className="px-3 py-1.5 text-sm rounded border border-red-200 text-red-700 bg-white hover:bg-red-50 disabled:opacity-40">Delete</button>
           )}
+          {!retired && check.kind === 'visit' && (
+            <button type="button" disabled={busy} onClick={() => setBooking(true)}
+              className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40">
+              {check.booking_id ? 'Change the booking' : 'Book a visit'}
+            </button>
+          )}
           {!retired && (
             <button type="button" disabled={busy} onClick={() => setFilingPast(true)}
               className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-40">Add past records</button>
@@ -144,6 +158,15 @@ function PremisesCheckContent({ id }: { id: string }) {
         </div>
       )}
       {error && <p className="text-sm text-red-700 mb-4">{error}</p>}
+      {docNudge && check.staff_document_id && (
+        <div className="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 flex flex-wrap items-center justify-between gap-2">
+          <span>Recorded. This check is linked to the Staff Document “{check.staff_document_title}” — if what was done changes it, issue a new version.</span>
+          <span className="flex gap-3">
+            <Link to="/staff/documents/admin" className="text-ooosh-700 hover:underline font-medium">Open Staff Documents</Link>
+            <button type="button" onClick={() => setDocNudge(false)} className="text-gray-600 hover:underline">Dismiss</button>
+          </span>
+        </div>
+      )}
 
       <div className="grid md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-4 items-start">
         <div className="bg-white border border-gray-200 rounded-lg p-4">
@@ -151,11 +174,28 @@ function PremisesCheckContent({ id }: { id: string }) {
           <dl className="grid grid-cols-[120px_minmax(0,1fr)] gap-x-3 gap-y-2 text-sm">
             <dt className="text-gray-500">How often</dt><dd>{check.repeat_text}</dd>
             <dt className="text-gray-500">Next due</dt><dd>{dueLine}</dd>
+            {check.booking_id && check.booking_on && (
+              <>
+                <dt className="text-gray-500">Booked</dt>
+                <dd>
+                  {fmtShortDay(check.booking_on)}{check.booking_time ? ` at ${check.booking_time}` : ', no set time'}
+                  <span className="block text-xs text-gray-500">
+                    {check.booking_letting_in_name ?? check.owner_name ?? 'Nobody'} letting them in{check.booking_note ? ` · ${check.booking_note}` : ''}
+                  </span>
+                  {!retired && (
+                    <button type="button" disabled={busy} onClick={cancelBooking}
+                      className="text-xs text-red-700 hover:underline disabled:opacity-40">Cancel the booking</button>
+                  )}
+                </dd>
+              </>
+            )}
             <dt className="text-gray-500">Looks after it</dt>
             <dd>{check.owner_name ?? <span className="text-amber-700">Nobody yet — no reminders until someone does</span>}</dd>
             <dt className="text-gray-500">Reminder</dt>
             <dd>
-              {check.owner_name ? `A To Do for ${check.owner_name}, ${remindLine.toLowerCase()}` : remindLine}
+              {check.booking_id
+                ? `Booked, so a To Do for ${check.booking_letting_in_name ?? check.owner_name ?? 'nobody'} on the day — to let them in`
+                : check.owner_name ? `A To Do for ${check.owner_name}, ${remindLine.toLowerCase()}` : remindLine}
               {check.open_reminder && <span className="block text-xs text-gray-500">Open now{check.open_reminder.due_date ? `, due ${fmtDate(check.open_reminder.due_date)}` : ''}</span>}
             </dd>
             <dt className="text-gray-500">Whose job</dt>
@@ -194,6 +234,12 @@ function PremisesCheckContent({ id }: { id: string }) {
                 </dd>
               </>
             )}
+            {check.staff_document_id && (
+              <>
+                <dt className="text-gray-500">Staff document</dt>
+                <dd><Link to="/staff/documents/admin" className="text-ooosh-600 hover:underline">{check.staff_document_title ?? 'Linked document'}</Link></dd>
+              </>
+            )}
             <dt className="text-gray-500">Who can see it</dt><dd>{VISIBILITY_LABEL[check.visibility]}</dd>
             {check.notes && (<><dt className="text-gray-500">Notes</dt><dd className="whitespace-pre-wrap">{check.notes}</dd></>)}
           </dl>
@@ -227,7 +273,11 @@ function PremisesCheckContent({ id }: { id: string }) {
       )}
       {recording && (
         <RecordModal check={check} onClose={() => setRecording(false)}
-          onSaved={() => { setRecording(false); void act(async () => undefined, 'Could not reload'); }} />
+          onSaved={() => { setRecording(false); setDocNudge(true); void act(async () => undefined, 'Could not reload'); }} />
+      )}
+      {booking && meta && (
+        <BookVisitModal check={check} meta={meta} onClose={() => setBooking(false)}
+          onSaved={saved => { setBooking(false); setCheck(prev => ({ ...prev, ...saved })); }} />
       )}
       {filingPast && (
         <PastRecordsModal check={check} onClose={() => setFilingPast(false)}
