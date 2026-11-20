@@ -8,6 +8,7 @@ import ModalShell from '../components/ModalShell';
 import SearchPicker from '../components/SearchPicker';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { ukToday } from '../lib/ukDate';
+import type { PremisesVisit } from '../components/premises/premisesCopy';
 
 /**
  * Staff calendar — the global "who's in" grid (Staff Calendar, Phase A).
@@ -263,6 +264,9 @@ export default function StaffCalendarPage() {
   const [bankHolidays, setBankHolidays] = useState<string[]>([]);
   const [companyDays, setCompanyDays] = useState<{ date: string; label: string }[]>([]);
   const [freelancerDays, setFreelancerDays] = useState<DayBooking[]>([]);
+  // Contractors booked in for a premises check (PREMISES-COMPLIANCE-SPEC.md §16) —
+  // shown, never counted as cover.
+  const [visits, setVisits] = useState<PremisesVisit[]>([]);
   const [spend, setSpend] = useState<SpendSummary | null>(null);
   const [addingBooking, setAddingBooking] = useState(false);
   const [openBooking, setOpenBooking] = useState<DayBooking | null>(null);
@@ -323,6 +327,14 @@ export default function StaffCalendarPage() {
         setFreelancerDays([]);
         setSpend(null);
       }
+      // Same again for premises visits: their own call, their own visibility
+      // (a manager-only check's visit is only on a manager's calendar).
+      try {
+        const pv = await api.get<{ data: PremisesVisit[] }>(`/premises/visits?from=${from}&to=${to}`);
+        setVisits(pv.data ?? []);
+      } catch {
+        setVisits([]);
+      }
       setBhPolicy(res.bankHolidayPolicy ?? 'use_allowance');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load the calendar');
@@ -381,6 +393,15 @@ export default function StaffCalendarPage() {
     })),
     [dates, people, freelancerDays]
   );
+
+  const visitsByDate = useMemo(() => {
+    const m = new Map<string, PremisesVisit[]>();
+    for (const v of visits) {
+      const k = String(v.visit_on).slice(0, 10);
+      m.set(k, [...(m.get(k) ?? []), v]);
+    }
+    return m;
+  }, [visits]);
 
   // One lane per freelancer who appears anywhere in the window.
   const freelancerLanes = useMemo(() => {
@@ -694,6 +715,44 @@ export default function StaffCalendarPage() {
                 </tr>
               ))}
 
+              {/* Contractors coming in for a premises check — so whoever's in
+                  knows to expect them. Not people we roster: never in "In". */}
+              {visits.length > 0 && (
+                <tr className="h-[52px]">
+                  <td className="sticky left-0 z-10 bg-white px-4 border-b border-gray-100 whitespace-nowrap">
+                    <Link to="/operations/premises" className="text-[15px] font-semibold text-gray-900 hover:text-ooosh-700 hover:underline">
+                      Contractors on site
+                    </Link>
+                    <div className="text-xs text-gray-500">Premises checks</div>
+                  </td>
+                  {dates.map(d => {
+                    const list = visitsByDate.get(d) ?? [];
+                    return (
+                      <td key={d} className={`px-1 py-1 border-b border-gray-100 text-center align-middle ${monthEdge(d)} ${colBg(d)}`}>
+                        <div className="flex flex-col gap-0.5">
+                          {list.map(v => (
+                            <Link key={v.id} to={`/operations/premises/checks/${v.check_id}`}
+                              title={[
+                                v.contractor_name ?? 'Contractor',
+                                v.check_title,
+                                v.place_name,
+                                v.visit_time ? `at ${v.visit_time}` : 'no set time',
+                                v.letting_in_name ? `${v.letting_in_name} letting them in` : null,
+                                v.note,
+                                v.status === 'done' ? 'Done' : null,
+                              ].filter(Boolean).join(' · ')}
+                              className={`block w-full rounded-md h-[20px] leading-[20px] text-[11px] truncate px-1 hover:ring-1 hover:ring-ooosh-400 ${
+                                v.status === 'done' ? 'bg-gray-100 text-gray-500' : 'bg-ooosh-100 text-ooosh-800'}`}>
+                              {v.status === 'done' ? '✓ ' : ''}{v.visit_time ?? 'Visit'}
+                            </Link>
+                          ))}
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              )}
+
               <tr className="h-11">
                 <td className="sticky left-0 z-10 bg-white px-4 text-xs font-bold uppercase tracking-[.07em] text-gray-500">
                   In
@@ -763,6 +822,12 @@ export default function StaffCalendarPage() {
           <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
             <span className={`inline-block w-3.5 h-2.5 rounded-[3px] ${BOOKING_STATUS.accepted.cell}`} />
             Freelance (counts as &ldquo;+n&rdquo;)
+          </span>
+        )}
+        {visits.length > 0 && (
+          <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+            <span className="inline-block w-3.5 h-2.5 rounded-[3px] bg-ooosh-100" />
+            Contractor visit (a premises check — not counted as cover)
           </span>
         )}
         {freelancerDays.some(b => b.status === 'offered') && (

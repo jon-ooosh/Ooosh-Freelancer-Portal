@@ -38,6 +38,12 @@
  *   GET    /folders                      every folder, retired too (admin)
  *   POST   /folders                      { name, visibility } (admin)
  *   PATCH  /folders/:id                  { name?, visibility?, sort_order?, retired? } (admin)
+ *
+ * Phase 3b (spec §16):
+ *   POST   /checks/:id/booking           { visit_on, visit_time, letting_in_person_id, note } book / change
+ *   POST   /checks/:id/booking/cancel    call the booking off
+ *   GET    /visits?from=&to=             booked visits for the staff calendar (what I can see)
+ *   GET    /by-organisation/:id          the checks an organisation does for us (org page)
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
@@ -52,6 +58,7 @@ import {
   createCheck, deleteCheck, getCheck, getMeta, listChecks, listMeters, previewNextDue, recordCheck, removeRecord,
   retireCheck, unretireCheck, updateCheck, updateTaxonomy,
   addAdvisories, makeAdvisoryTask, setAdvisoryDone, linkableCosts, linkCost,
+  bookVisit, cancelBooking, listVisits, listChecksForOrganisation,
 } from '../services/premises';
 import {
   getLibrary, listFolders, createDocument, updateDocument, archiveDocument, documentForUpload, addDocumentFile,
@@ -109,6 +116,7 @@ const checkSchema = z.object({
   unit: optText(20),
   meter_serial: optText(60),
   points: z.array(z.string().max(80)).max(50).nullable().optional(),
+  staff_document_id: z.string().guid().nullable().optional(),
 });
 
 router.post('/checks', validate(checkSchema), async (req: AuthRequest, res: Response) => {
@@ -159,6 +167,36 @@ router.get('/checks/:id/next-due', validate(idParam, 'params'), async (req: Auth
   try {
     res.json({ data: await previewNextDue(String(req.params.id), String(req.query.done_on || ''), req.user!.role) });
   } catch (err) { fail(res, 'next-due', err); }
+});
+
+// ── Booking a visit (phase 3b) ───────────────────────────────────────────────
+
+const bookingSchema = z.object({
+  visit_on: ymd,
+  visit_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'must be a time (HH:MM)').nullable(),
+  letting_in_person_id: z.string().guid().nullable(),
+  note: optText(1000),
+});
+
+router.post('/checks/:id/booking', validate(idParam, 'params'), validate(bookingSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const b = req.body as z.infer<typeof bookingSchema>;
+    res.json({ data: await bookVisit(String(req.params.id), { ...b, note: b.note ?? null }, caller(req)) });
+  } catch (err) { fail(res, 'book visit', err); }
+});
+
+router.post('/checks/:id/booking/cancel', validate(idParam, 'params'), async (req: AuthRequest, res: Response) => {
+  try { res.json({ data: await cancelBooking(String(req.params.id), caller(req)) }); } catch (err) { fail(res, 'cancel booking', err); }
+});
+
+router.get('/visits', async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await listVisits(String(req.query.from || ''), String(req.query.to || ''), req.user!.role) });
+  } catch (err) { fail(res, 'visits', err); }
+});
+
+router.get('/by-organisation/:id', validate(idParam, 'params'), async (req: AuthRequest, res: Response) => {
+  try { res.json({ data: await listChecksForOrganisation(String(req.params.id), req.user!.role) }); } catch (err) { fail(res, 'by organisation', err); }
 });
 
 // ── Recording it ─────────────────────────────────────────────────────────────

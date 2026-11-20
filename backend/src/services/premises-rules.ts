@@ -161,6 +161,18 @@ export function reminderTitle(
   return `${title} ${due}`;
 }
 
+/**
+ * The To Do once a visit is BOOKED — it stops asking "book it" and says who is
+ * coming and when, for whoever is letting them in:
+ *   "Northside Heating Ltd coming 14 Dec 2026 at 10:00 — let them in (Gas safety inspection)"
+ */
+export function bookingTitle(contractor: string | null, checkTitle: string, visitOn: string, visitTime: string | null): string {
+  const when = `${dateLabel(visitOn)}${visitTime ? ` at ${visitTime}` : ''}`;
+  return contractor
+    ? `${contractor} coming ${when} — let them in (${checkTitle})`
+    : `Visit on ${when} — let them in (${checkTitle})`;
+}
+
 // ── Call points (the weekly fire alarm test) ────────────────────────────────
 
 /**

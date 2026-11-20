@@ -1,6 +1,6 @@
 import {
   canSee, visibleLevels, roleRank, checkStatus, reminderWanted, nextDueAfterRecord, reminderTitle,
-  nextPoint, cleanPoints, usageSeries, assessReading,
+  nextPoint, cleanPoints, usageSeries, assessReading, bookingTitle,
 } from '../premises-rules';
 
 describe('premises — who can see a check', () => {
@@ -155,5 +155,13 @@ describe('premises — meter readings', () => {
   });
   it('a reading dated before the latest compares with the one before it', () => {
     expect(assessReading(weekly, 1500, '2026-10-10', false).previous?.done_on).toBe('2026-10-08');
+  });
+});
+
+describe('premises — a booked visit', () => {
+  it('says who is coming, when, and to let them in', () => {
+    expect(bookingTitle('Northside Heating Ltd', 'Gas safety inspection', '2026-12-14', '10:00'))
+      .toBe('Northside Heating Ltd coming 14 Dec 2026 at 10:00 — let them in (Gas safety inspection)');
+    expect(bookingTitle(null, 'EICR', '2027-03-03', null)).toBe('Visit on 3 Mar 2027 — let them in (EICR)');
   });
 });

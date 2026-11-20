@@ -28,7 +28,7 @@ import {
   CHECK_KINDS, VISIBILITIES, OUTCOMES, CheckKind, Visibility,
   canSee, canSetVisibility, visibleLevels, roleRank, checkStatus, daysBetween,
   reminderWanted, reminderTitle, nextDueAfterRecord, dateLabel,
-  nextPoint, cleanPoints, usageSeries, assessReading, Reading, effectiveVisibility,
+  nextPoint, cleanPoints, usageSeries, assessReading, Reading, effectiveVisibility, bookingTitle,
 } from './premises-rules';
 import { createTask, cancelTask, updateTask, listTasksForSource } from './staff-tasks';
 import { PremisesError } from './premises-errors';
@@ -69,7 +69,10 @@ const CHECK_SELECT = `
          ${OWNER_NAME} AS owner_name,
          o.name AS contractor_name,
          lr.done_on AS last_done_on, lr.outcome AS last_outcome,
-         lf.id AS current_file_id, lf.r2_key AS current_file_key, lf.filename AS current_file_name
+         lf.id AS current_file_id, lf.r2_key AS current_file_key, lf.filename AS current_file_name,
+         c.staff_document_id, sd.title AS staff_document_title,
+         bk.id AS booking_id, bk.visit_on AS booking_on, bk.visit_time AS booking_time, bk.note AS booking_note,
+         bk.letting_in_person_id AS booking_letting_in_person_id, bk.letting_in_name AS booking_letting_in_name
     FROM premises_checks c
     JOIN premises_headings h ON h.id = c.heading_id
     JOIN premises_places p ON p.id = c.place_id
@@ -87,7 +90,16 @@ const CHECK_SELECT = `
         JOIN premises_records r2 ON r2.id = f.record_id
        WHERE r2.check_id = c.id AND r2.removed_at IS NULL AND f.archived_at IS NULL
        ORDER BY r2.done_on DESC, f.created_at DESC LIMIT 1
-    ) lf ON true`;
+    ) lf ON true
+    LEFT JOIN staff_documents sd ON sd.id = c.staff_document_id
+    LEFT JOIN LATERAL (
+      SELECT b.id, b.visit_on::text AS visit_on, b.visit_time, b.note, b.letting_in_person_id,
+             NULLIF(TRIM(COALESCE(NULLIF(bp.preferred_name, ''), bp.first_name, '') || ' ' || COALESCE(bp.last_name, '')), '') AS letting_in_name
+        FROM premises_bookings b
+        LEFT JOIN people bp ON bp.id = b.letting_in_person_id
+       WHERE b.check_id = c.id AND b.status = 'booked'
+       LIMIT 1
+    ) bk ON true`;
 
 interface CheckRow {
   id: string; title: string; kind: CheckKind; heading_id: string; place_id: string; visibility: Visibility;
@@ -260,6 +272,18 @@ export interface CheckInput {
   meter_serial?: string | null;
   /** A rotating test's call points, in order (premises-rules.ts nextPoint). */
   points?: string[] | null;
+  /** A Staff Document this check is linked to (re-issued after a new visit). */
+  staff_document_id?: string | null;
+}
+
+/** Point a check at a Staff Document (or none). Linked, never copied. */
+async function setStaffDocument(id: string, docId: string | null | undefined) {
+  if (docId === undefined) return;
+  if (docId) {
+    const r = await query(`SELECT 1 FROM staff_documents WHERE id = $1`, [docId]);
+    if (!r.rows.length) throw new PremisesError('That staff document isn’t there any more');
+  }
+  await query(`UPDATE premises_checks SET staff_document_id = $2 WHERE id = $1`, [id, docId]);
 }
 
 /** The meter and call-point fields — written after the main insert / update. */
@@ -349,6 +373,7 @@ export async function createCheck(input: CheckInput, caller: Caller) {
   );
   const id = r.rows[0].id as string;
   await saveExtras(id, input.unit, input.meter_serial, input.points);
+  await setStaffDocument(id, input.staff_document_id ?? null);
   await syncCheckReminder(id);
   return getCheck(id, caller.role);
 }
@@ -405,6 +430,7 @@ export async function updateCheck(id: string, patch: Partial<CheckInput>, caller
     patch.unit !== undefined ? patch.unit : cur.unit,
     patch.meter_serial !== undefined ? patch.meter_serial : cur.meter_serial,
     patch.points !== undefined ? patch.points : cur.points);
+  await setStaffDocument(id, patch.staff_document_id);
   await syncCheckReminder(id);
   return getCheck(id, caller.role);
 }
@@ -568,6 +594,12 @@ async function saveRecords(id: string, inputs: RecordInput[], backfilled: boolea
         [id, next.date, next.source],
       );
     }
+    // The visit happened, so its booking is done. Never from a filed-later
+    // record: last year's certificate doesn't answer next week's booking.
+    if (moved && !backfilled) {
+      await client.query(
+        `UPDATE premises_bookings SET status = 'done', updated_at = NOW() WHERE check_id = $1 AND status = 'booked'`, [id]);
+    }
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
@@ -578,7 +610,9 @@ async function saveRecords(id: string, inputs: RecordInput[], backfilled: boolea
 
   // It's done, so the reminder that asked for it is done too. Only when the
   // date moved: typing in last year's visit answers nothing.
-  if (moved) {
+  const bookingLive = backfilled
+    && (await query(`SELECT 1 FROM premises_bookings WHERE check_id = $1 AND status = 'booked'`, [id])).rows.length > 0;
+  if (moved && !bookingLive) {
     for (const t of await listTasksForSource(REMINDER_SOURCE, id) as Array<{ id: string; status: string }>) {
       if (t.status !== 'open') continue;
       await updateTask(t.id, { status: 'done' }, SYSTEM_USER_ID, 'admin')
@@ -892,43 +926,164 @@ export async function syncCheckReminder(checkId: string): Promise<void> {
     const r = await query(
       `SELECT c.id, c.title, c.kind, c.responsibility, c.visibility, c.owner_person_id, c.retired_at, c.points,
               c.next_due::text AS next_due, c.remind_days_before, c.reminded_for_due::text AS reminded_for_due,
+              c.reminded_key, o.name AS contractor_name,
+              b.id AS booking_id, b.visit_on::text AS booking_on, b.visit_time AS booking_time,
+              b.letting_in_person_id AS booking_person_id,
               (SELECT r.point FROM premises_records r
                 WHERE r.check_id = c.id AND r.removed_at IS NULL AND r.point IS NOT NULL
                 ORDER BY r.done_on DESC, r.created_at DESC LIMIT 1) AS last_point
-         FROM premises_checks c WHERE c.id = $1`, [checkId]);
+         FROM premises_checks c
+         LEFT JOIN organisations o ON o.id = c.contractor_org_id
+         LEFT JOIN premises_bookings b ON b.check_id = c.id AND b.status = 'booked'
+        WHERE c.id = $1`, [checkId]);
     const c = r.rows[0] as {
       title: string; kind: string; responsibility: string; visibility: string; owner_person_id: string | null;
-      points: string[] | null; last_point: string | null;
-      retired_at: string | null; next_due: string | null; remind_days_before: number; reminded_for_due: string | null;
+      points: string[] | null; last_point: string | null; contractor_name: string | null;
+      retired_at: string | null; next_due: string | null; remind_days_before: number;
+      reminded_for_due: string | null; reminded_key: string | null;
+      booking_id: string | null; booking_on: string | null; booking_time: string | null; booking_person_id: string | null;
     } | undefined;
     const today = ukToday();
     const open = (await listTasksForSource(REMINDER_SOURCE, checkId) as Array<{ id: string; status: string; person_id: string; title: string }>)
       .filter(t => t.status === 'open');
-    const ownerSees = !!c?.owner_person_id && canSee(roleNameForRank(await personRank(c.owner_person_id)), c.visibility);
-    const wanted = !!c && !c.retired_at && !!c.owner_person_id && ownerSees
-      && reminderWanted(c.next_due, c.remind_days_before, today);
-    if (!wanted) {
+    const sees = async (personId: string | null) =>
+      !!personId && !!c && canSee(roleNameForRank(await personRank(personId)), c.visibility);
+
+    // What the To Do should be right now — or nothing.
+    let plan: { person: string; title: string; due: string; key: string } | null = null;
+    if (c && !c.retired_at && c.booking_id && c.booking_on) {
+      // A booked visit: whoever is letting them in (else the owner), from the moment it's booked.
+      const person = c.booking_person_id ?? c.owner_person_id;
+      if (person && await sees(person)) {
+        plan = {
+          person,
+          title: bookingTitle(c.contractor_name, c.title, c.booking_on, c.booking_time),
+          due: c.booking_on < today ? today : c.booking_on,
+          key: `booking:${c.booking_id}:${c.booking_on}`,
+        };
+      }
+    } else if (c && !c.retired_at && c.owner_person_id && c.next_due
+      && reminderWanted(c.next_due, c.remind_days_before, today) && await sees(c.owner_person_id)) {
+      plan = {
+        person: c.owner_person_id,
+        title: reminderTitle(c.kind, c.responsibility, c.title, c.next_due, nextPoint(c.points, c.last_point)),
+        // A To Do's date can't be in the past; an overdue check's says so in its title.
+        due: c.next_due < today ? today : c.next_due,
+        key: `due:${c.next_due}`,
+      };
+    }
+
+    if (!plan) {
       for (const t of open) await cancelTask(t.id, SYSTEM_USER_ID, 'admin');
       return;
     }
-    const title = reminderTitle(c!.kind, c!.responsibility, c!.title, c!.next_due!, nextPoint(c!.points, c!.last_point));
-    if (open.length === 1 && open[0].person_id === c!.owner_person_id && open[0].title === title) return;
-    // Ticked (or dropped) by hand for this same due date: don't make it again.
-    if (open.length === 0 && c!.reminded_for_due === c!.next_due) return;
+    if (open.length === 1 && open[0].person_id === plan.person && open[0].title === plan.title) return;
+    // Ticked (or dropped) by hand for this same due date or booking: don't make it again.
+    // (Before mig 362 only the due date was kept — still honoured.)
+    const lastKey = c!.reminded_key ?? (c!.reminded_for_due ? `due:${c!.reminded_for_due}` : null);
+    if (open.length === 0 && lastKey === plan.key) return;
     for (const t of open) await cancelTask(t.id, SYSTEM_USER_ID, 'admin');
     await createTask({
-      title,
-      personId: c!.owner_person_id!,
-      // A To Do's date can't be in the past; an overdue check's says so in its title.
-      dueDate: c!.next_due! < today ? today : c!.next_due!,
+      title: plan.title,
+      personId: plan.person,
+      dueDate: plan.due,
       sourceType: REMINDER_SOURCE,
       sourceId: checkId,
       followUpOn: null,
     }, SYSTEM_USER_ID, 'admin');
-    await query(`UPDATE premises_checks SET reminded_for_due = $2::date WHERE id = $1`, [checkId, c!.next_due]);
+    await query(`UPDATE premises_checks SET reminded_key = $2, reminded_for_due = $3::date WHERE id = $1`,
+      [checkId, plan.key, c!.next_due]);
   } catch (err) {
     console.error(`[premises] reminder for ${checkId} not set (non-fatal):`, err);
   }
+}
+
+// ── Booking a visit (phase 3b) ──────────────────────────────────────────────
+
+export interface BookingInput {
+  visit_on: string;
+  visit_time: string | null;
+  letting_in_person_id: string | null;
+  note: string | null;
+}
+
+/**
+ * Book the contractor in — or change the booking (one live booking per check).
+ * Anyone who can see the check. The person letting them in must be able to see
+ * it too: their To Do opens the check.
+ */
+export async function bookVisit(checkId: string, input: BookingInput, caller: Caller) {
+  const c = await visibleCheck(checkId, caller.role);
+  if (c.retired_at) throw new PremisesError('This check has been retired — bring it back first');
+  if (!DATE_RE.test(input.visit_on)) throw new PremisesError('Say which day they’re coming');
+  if (input.visit_on < ukToday()) throw new PremisesError('That day has gone — record the visit instead');
+  if (input.visit_time !== null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(input.visit_time)) throw new PremisesError('The time must be HH:MM');
+  if (input.letting_in_person_id) {
+    const rank = await personRank(input.letting_in_person_id);
+    if (!canSee(roleNameForRank(rank), c.visibility)) {
+      throw new PremisesError('They can’t see this check, so their To Do wouldn’t open — pick someone else');
+    }
+  }
+  const live = await query(`SELECT id FROM premises_bookings WHERE check_id = $1 AND status = 'booked'`, [checkId]);
+  if (live.rows.length) {
+    await query(
+      `UPDATE premises_bookings SET visit_on = $2::date, visit_time = $3, letting_in_person_id = $4, note = $5, updated_at = NOW()
+        WHERE id = $1`,
+      [live.rows[0].id, input.visit_on, input.visit_time, input.letting_in_person_id, trimOrNull(input.note)]);
+  } else {
+    await query(
+      `INSERT INTO premises_bookings (check_id, visit_on, visit_time, letting_in_person_id, note, created_by)
+       VALUES ($1, $2::date, $3, $4, $5, $6)`,
+      [checkId, input.visit_on, input.visit_time, input.letting_in_person_id, trimOrNull(input.note), caller.userId]);
+  }
+  await syncCheckReminder(checkId);
+  return getCheck(checkId, caller.role);
+}
+
+/** Call a booking off (soft — the row stays). The reminder goes back to "book it" if it's due. */
+export async function cancelBooking(checkId: string, caller: Caller) {
+  await visibleCheck(checkId, caller.role);
+  await query(
+    `UPDATE premises_bookings SET status = 'cancelled', cancelled_at = NOW(), cancelled_by = $2, updated_at = NOW()
+      WHERE check_id = $1 AND status = 'booked'`, [checkId, caller.userId]);
+  await syncCheckReminder(checkId);
+  return getCheck(checkId, caller.role);
+}
+
+/**
+ * Booked visits between two dates, for the staff calendar's "Contractors on
+ * site" lane — only checks the caller can see. Read-through: the calendar's
+ * own tables are never touched (STAFF-CALENDAR rules).
+ */
+export async function listVisits(from: string, to: string, role: string | undefined) {
+  if (!DATE_RE.test(from) || !DATE_RE.test(to)) throw new PremisesError('from and to must be dates');
+  const r = await query(
+    `SELECT b.id, b.check_id, b.visit_on::text AS visit_on, b.visit_time, b.status, b.note,
+            c.title AS check_title, o.name AS contractor_name, p.name AS place_name,
+            NULLIF(TRIM(COALESCE(NULLIF(bp.preferred_name, ''), bp.first_name, '') || ' ' || COALESCE(bp.last_name, '')), '') AS letting_in_name
+       FROM premises_bookings b
+       JOIN premises_checks c ON c.id = b.check_id
+       JOIN premises_places p ON p.id = c.place_id
+       LEFT JOIN organisations o ON o.id = c.contractor_org_id
+       LEFT JOIN people bp ON bp.id = b.letting_in_person_id
+      WHERE b.status <> 'cancelled' AND b.visit_on BETWEEN $1::date AND $2::date
+        AND c.visibility = ANY($3::text[])
+      ORDER BY b.visit_on, b.visit_time NULLS LAST, c.title`,
+    [from, to, visibleLevels(role)]);
+  return r.rows;
+}
+
+/** The checks an organisation does for us — its contractor, or it did a recorded visit (org page). */
+export async function listChecksForOrganisation(orgId: string, role: string | undefined) {
+  const today = ukToday();
+  const r = await query(
+    `${CHECK_SELECT}
+      WHERE c.visibility = ANY($1::text[]) AND c.retired_at IS NULL
+        AND (c.contractor_org_id = $2
+             OR EXISTS (SELECT 1 FROM premises_records x WHERE x.check_id = c.id AND x.done_by_org_id = $2 AND x.removed_at IS NULL))
+      ORDER BY c.title`,
+    [visibleLevels(role), orgId]);
+  return (r.rows as CheckRow[]).map(row => decorate(row, today));
 }
 
 /** A role name standing for a rank, so canSee() stays the one rule. */
@@ -945,7 +1100,8 @@ export async function runPremisesReminders(): Promise<number> {
     `SELECT id FROM premises_checks
       WHERE (retired_at IS NULL AND owner_person_id IS NOT NULL AND next_due IS NOT NULL
              AND next_due - remind_days_before <= $1::date)
-         OR id IN (SELECT source_id FROM staff_tasks WHERE source_type = $2 AND status = 'open')`,
+         OR id IN (SELECT source_id FROM staff_tasks WHERE source_type = $2 AND status = 'open')
+         OR id IN (SELECT check_id FROM premises_bookings WHERE status = 'booked')`,
     [ukToday(), REMINDER_SOURCE],
   );
   for (const row of r.rows) await syncCheckReminder(row.id as string);

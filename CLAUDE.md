@@ -396,7 +396,7 @@ Google Drive links, saved hashtag sets, a tracked link per post. **OP plans; Met
 post from OP. The owner gets ONE To Do two days before a post that isn't approved (`source_type = 'marketing_post'`,
 09:16 run + every save). Posts are dropped, content archived — never deleted. Next: studio sitters sending content in.
 
-**PHASE 1 BUILT, 19 Nov 2026:** `docs/PREMISES-COMPLIANCE-SPEC.md` — Operations › Premises & compliance
+**BUILT (all phases), 20 Nov 2026:** `docs/PREMISES-COMPLIANCE-SPEC.md` — Operations › Premises & compliance
 (`/operations/premises`): the checks that keep Compass House, the Rear Unit, Beach Yard and the company legal and
 serviced (contractor visits, in-house tests, renewals; meter readings are phase 2), a record with its certificates
 every time one is done, reminders as To Dos (`source_type = 'premises_check'`, ONE open per check, daily 09:17;
@@ -410,7 +410,11 @@ the fire alarm call-point rotation, and "Add past records" (one batch moves the 
 "Get it fixed" To Do). **Phase 3a BUILT (§15):** the Documents library (`services/premises-library.ts` — a document
 may be tighter than its folder, never looser: `effectiveVisibility()`; files are versions, under `premises/library/`),
 advisories → To Do (`source_type = 'premises_advisory'`), and the bill in Costs (`premises_records.cost_id`,
-ON DELETE SET NULL). Not built (3b): calendar visits, the supplier's Premises line, the Staff Document link.
+ON DELETE SET NULL). **Phase 3b BUILT (§16):** "Book a visit" (`premises_bookings`, one live per check, soft-cancelled)
+turns the check's ONE To Do into "… coming on … — let them in" for whoever lets them in (`premises_checks.reminded_key`
+stops a hand-ticked To Do coming back); "Contractors on site" on the staff calendar from its own call (never counted
+as cover); a contractor org's "Premises checks they do" line; a check may link a Staff Document (a re-issue nudge
+after recording, nothing more).
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**

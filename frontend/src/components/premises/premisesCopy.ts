@@ -148,6 +148,16 @@ export interface PremisesCheck {
   next_point?: string | null;
   /** What it has cost, by year, from the linked bills (check page). */
   cost_by_year?: { year: number; net: number; bills: number }[];
+  /** A Staff Document this check is linked to (spec §16). */
+  staff_document_id: string | null;
+  staff_document_title: string | null;
+  /** The live booked visit, if any (one per check). */
+  booking_id: string | null;
+  booking_on: string | null;
+  booking_time: string | null;
+  booking_note: string | null;
+  booking_letting_in_person_id: string | null;
+  booking_letting_in_name: string | null;
 }
 
 export interface UsageInterval { from: string; to: string; days: number; used: number; per_week: number }
@@ -242,9 +252,32 @@ export function fmtDate(ymd: string | null | undefined): string {
   return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 }
 
-/** The pill: what it says and its colour. */
-export function statusPill(c: Pick<PremisesCheck, 'status' | 'days_to_due' | 'retired_at'>): { text: string; cls: string } {
+/** "Mon 14 Dec" — a booked visit's day. */
+export function fmtShortDay(ymd: string | null | undefined): string {
+  if (!ymd) return '—';
+  const d = new Date(`${ymd.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+}
+
+/** A booked visit on the staff calendar (GET /premises/visits). */
+export interface PremisesVisit {
+  id: string;
+  check_id: string;
+  check_title: string;
+  contractor_name: string | null;
+  place_name: string;
+  visit_on: string;
+  visit_time: string | null;
+  letting_in_name: string | null;
+  note: string | null;
+  status: 'booked' | 'done';
+}
+
+/** The pill: what it says and its colour. A booked visit shows as Booked, in blue. */
+export function statusPill(c: Pick<PremisesCheck, 'status' | 'days_to_due' | 'retired_at'> & { booking_on?: string | null }): { text: string; cls: string } {
   if (c.retired_at) return { text: 'Retired', cls: 'bg-gray-100 text-gray-500' };
+  if (c.booking_on) return { text: `Booked ${fmtShortDay(c.booking_on)}`, cls: 'bg-ooosh-100 text-ooosh-800' };
   const d = c.days_to_due;
   switch (c.status) {
     case 'overdue': return { text: `${-(d ?? 0)} day${d === -1 ? '' : 's'} overdue`, cls: 'bg-red-100 text-red-800' };
