@@ -886,6 +886,27 @@ matched for suggestions, never recorded or emailed (`queueOnly`). The panel now 
 even when the queue is empty, and each row says "via Wise API" or "via email". Read-only report of what OP
 never saw: `npx tsx src/scripts/wise-missed-payments.ts [--since YYYY-MM-DD]` (default 6 Oct 2026, with
 "possibly recorded by hand" hints). Next: "split across jobs" for one transfer covering several jobs.
+**First run (20 Nov):** 40 transfers in since 6 Oct, 2 never seen — #2501093374 (O I B RE, recorded by hand
+as three payments) and #2506805617 (£1,200 from JJAF MUSIC, "Job 16911 excess", 11:59 that day): **Wise
+skipped that email too** — two misses in three days.
+
+**20 Nov 2026 — "Split across jobs".** One transfer paying several jobs (O I B RE's "MUTATIONS X 3") could only
+be recorded onto ONE job. `services/incoming-split.ts` (`POST /money/incoming-payments/:id/split`, admin /
+manager; pure rules `incoming-split-rules.ts`; lines in `incoming_bank_payment_splits`, migration 360): a person
+enters lines (job number, hire deposit / balance / excess, amount) that add up to the transfer **to the penny**.
+**Every line is checked before anything is written** — totals, every job exists, every link is a real free
+payment of that amount on that job, and money already on the job (`findAlreadyRecordedPayment()` per line);
+any problem refuses the lot, by line. A line that looks already recorded comes back as a 409 with `conflicts`
+and the panel asks per line: **link to that payment** (nothing recorded again — how a transfer someone already
+typed in by hand is tidied up) or **record anyway**. A recording line goes through `recordPayment()` exactly
+like Record (`wise_bacs`, reference `Wise #N - REF (part i of n)`, client email per job), written as
+`'recording'` BEFORE its money moves; the run stops at the first failed line, the lines before it stay
+recorded, and finishing needs only what is left (`'failed'` never counts; a `'recording'` line older than 10
+minutes becomes `'failed'` with "check job #N's Money tab", so the duplicate check offers to link it). The
+transfer becomes `recorded` (`match_method = 'split'`) only when the counting lines add up to it; once any line
+counts, Record / Link / Record in Xero / Not a job payment refuse (`splitStartedMessage()`). One split at a
+time per transfer (advisory lock). A payment linked to a split line is never offered again as "already
+recorded" (`findAlreadyRecordedPayment()` excludes it). The auto-matcher never splits.
 
 **`services/record-payment.ts`** is the staff "Record Payment" route's 330 lines lifted into a
 service (route = validate + relay, same HTTP contract) so the matcher — and the planned

@@ -709,6 +709,8 @@ export async function recordIncomingPaymentInXero(opts: {
   const row = rowRes.rows[0];
   if (!row) return { ok: false, error: 'Incoming payment not found' };
   if (row.status === 'recorded') return { ok: false, error: 'Already recorded' };
+  const splitMsg = await splitStartedMessage(opts.incomingId);
+  if (splitMsg) return { ok: false, error: splitMsg };
   if (!isXeroConfigured()) return { ok: false, error: 'Xero is not configured' };
   if (opts.invoices.length === 0) return { ok: false, error: 'No Xero invoice to record against' };
   const accountId = (await getSystemSetting('xero_bank_wise') || '').trim();
@@ -758,9 +760,25 @@ function round2(n: number): number { return Math.round(n * 100) / 100; }
 
 // ── Recording ──────────────────────────────────────────────────────────────
 
-function wisePaymentReference(row: { transfer_number: string | null; reference: string | null }): string {
+export function wisePaymentReference(row: { transfer_number: string | null; reference: string | null }): string {
   const parts = [row.transfer_number ? `Wise #${row.transfer_number}` : 'Wise', row.reference || ''].filter(Boolean);
   return parts.join(' - ').slice(0, 255);
+}
+
+// ── Split across jobs? ─────────────────────────────────────────────────────
+
+/**
+ * A transfer with split lines that count (services/incoming-split.ts) is finished by
+ * the split, never by Record / Link / Record in Xero / Not a job payment — those
+ * would record the whole amount on top of the part already recorded.
+ */
+export async function splitStartedMessage(incomingId: string): Promise<string | null> {
+  const r = await query(
+    `SELECT COUNT(*)::int AS n FROM incoming_bank_payment_splits
+      WHERE incoming_id = $1 AND status IN ('recording', 'recorded', 'linked')`,
+    [incomingId],
+  );
+  return r.rows[0]?.n > 0 ? 'Part of this payment is already split across jobs — finish the split' : null;
 }
 
 // ── Already recorded by hand? ──────────────────────────────────────────────
@@ -800,6 +818,7 @@ export async function findAlreadyRecordedPayment(jobId: string, amount: number, 
         AND jp.payment_method = ANY($4::text[])
         AND jp.payment_date BETWEEN $5::timestamptz - INTERVAL '14 days' AND $5::timestamptz + INTERVAL '30 days'
         AND NOT EXISTS (SELECT 1 FROM incoming_bank_payments i WHERE i.job_payment_id = jp.id)
+        AND NOT EXISTS (SELECT 1 FROM incoming_bank_payment_splits s WHERE s.job_payment_id = jp.id)
       ORDER BY ABS(EXTRACT(EPOCH FROM (jp.payment_date - $5::timestamptz)))
       LIMIT 1`,
     [jobId, amount, AMOUNT_TOLERANCE, BANK_METHODS, receivedAt],
@@ -817,7 +836,7 @@ export async function findAlreadyRecordedPayment(jobId: string, amount: number, 
   };
 }
 
-function describeExisting(e: ExistingJobPayment): string {
+export function describeExisting(e: ExistingJobPayment): string {
   const when = new Date(e.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'Europe/London' });
   return `£${e.amount.toFixed(2)} (${e.payment_type}) is already recorded on this job${e.recorded_by_name ? ` by ${e.recorded_by_name}` : ''} on ${when}${e.hirehop_deposit_id ? `, HireHop deposit ${e.hirehop_deposit_id}` : ''}`;
 }
@@ -835,6 +854,8 @@ export async function linkIncomingToExistingPayment(opts: {
   const row = rowRes.rows[0];
   if (!row) return { ok: false, error: 'Incoming payment not found' };
   if (row.status !== 'unmatched') return { ok: false, error: `This payment is already ${row.status}` };
+  const splitMsg = await splitStartedMessage(opts.incomingId);
+  if (splitMsg) return { ok: false, error: splitMsg };
 
   const pRes = await query(
     `SELECT id, job_id, amount, payment_type, hirehop_deposit_id FROM job_payments WHERE id = $1`,
@@ -845,7 +866,11 @@ export async function linkIncomingToExistingPayment(opts: {
   if (Math.abs(parseFloat(p.amount) - parseFloat(row.amount)) > AMOUNT_TOLERANCE) {
     return { ok: false, error: `That payment is £${parseFloat(p.amount).toFixed(2)}, not £${parseFloat(row.amount).toFixed(2)}` };
   }
-  const taken = await query(`SELECT 1 FROM incoming_bank_payments WHERE job_payment_id = $1 AND id <> $2`, [p.id, opts.incomingId]);
+  const taken = await query(
+    `SELECT 1 FROM incoming_bank_payments WHERE job_payment_id = $1 AND id <> $2
+     UNION ALL SELECT 1 FROM incoming_bank_payment_splits WHERE job_payment_id = $1`,
+    [p.id, opts.incomingId],
+  );
   if (taken.rows.length > 0) return { ok: false, error: 'That job payment is already linked to another Wise transfer' };
 
   await query(
@@ -880,6 +905,8 @@ export async function recordIncomingPaymentOnJob(opts: {
   const row = rowRes.rows[0];
   if (!row) return { ok: false, error: 'Incoming payment not found' };
   if (row.status === 'recorded') return { ok: false, error: 'Already recorded' };
+  const splitMsg = await splitStartedMessage(opts.incomingId);
+  if (splitMsg) return { ok: false, error: splitMsg };
 
   const amount = opts.amount ?? parseFloat(row.amount);
 
