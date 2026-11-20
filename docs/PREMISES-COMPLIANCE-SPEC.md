@@ -1,7 +1,8 @@
 # Premises & compliance — spec
 
-**Status: PHASES 1, S and 2 BUILT (PRs 1–3), 19 Nov 2026 — §12, §13 and §14 are what shipped and where it
-differs from the plan; read them first.** Phase 3 (documents library, calendar visits, Costs links) is not built. Mockups (v1, before the decisions below):
+**Status: PHASES 1, S, 2 and 3a BUILT, 20 Nov 2026 — §12–§15 are what shipped and where it differs from the
+plan; read them first.** Phase 3b (booked visits on the staff calendar, the supplier's Premises line, the Staff
+Document link) is not built. Mockups (v1, before the decisions below):
 https://claude.ai/artifact/GnedY9eyyMDydPUKMg2tJK — Mockup A's place chips, visibility and "Book the next
 visit" are described here, not drawn there yet.
 
@@ -382,3 +383,35 @@ gathers them all, so one visit to it ticks them all.
 
 **Not built yet (phase 3):** the documents library, "Book a visit" onto the staff calendar, advisories → To Do, Costs
 links. Readings against the supplier's bills and a smart-meter import are later still.
+
+---
+
+## §15 Phase 3a — what shipped (20 Nov 2026)
+
+Phase 3 was split in two (the calendar sits in the staff calendar, the most rule-heavy module, so it goes on its
+own). **3a: the documents library, advisories as To Dos, and the bill in Costs.** Migration **359**.
+
+- **The documents library** (Premises & compliance › **Documents**, `GET /premises/library`,
+  `services/premises-library.ts`). Folders (`premises_folders`, seeded: Lease & legal and Insurance admins-only,
+  Utility accounts managers-only, Risk assessments / Plans & drawings / Manuals & warranties everyone) hold
+  documents (`premises_documents`); **a document's files are its versions** — newest is current, "N earlier
+  versions" lists the rest, nothing is replaced. **A document may be tighter than its folder, never looser**; what
+  it comes to is `effectiveVisibility()` in `premises-rules.ts` (the tighter of the two) — one rule for the list and
+  the file gate. Tightening a folder hides its looser documents; a tighter document stays tighter. Adding, changing,
+  archiving and new versions are manager-tier; folders (name, who can see it, order, retire — refused while
+  documents are in it) are admin. **"Certificates"** at the top is read-through: each check's current certificate.
+- **One file table, two owners.** `premises_files` belongs to a record OR a document (CHECK); library files live under
+  `premises/library/<document>/`. `canOpenPremisesFile()` (the download gate) and `archiveFile()` handle both.
+- **Advisories** (`premises_advisories`): the visit form has an "Advisories — one per line" box; each becomes its own
+  line on the record with a tick and **"Make it a To Do"** (`source_type = 'premises_advisory'`, for the check's
+  owner — else whoever pressed it — set by whoever pressed it, due in 30 days; the "Premises" chip opens the check).
+  Ticking it off closes its open To Do; an advisory whose To Do was done counts as done. "+ Add an advisory" adds
+  one to a past record.
+- **The bill in Costs** (`premises_records.cost_id`, **`ON DELETE SET NULL`** — a cost is hard-deleted from Money ›
+  Costs, and must never fail because a certificate pointed at it). "Link the bill from Costs" offers the
+  contractor's recent bills, or searches supplier / description / invoice number / amount
+  (`GET /premises/checks/:id/linkable-costs`); read-only over Costs. The check's page shows **"What it's cost"** by
+  year (ex VAT, from the linked bills).
+
+**Not built yet (3b):** "Book a visit" onto the staff calendar (and the reminder turning into "they're coming on …"),
+the supplier org's "Premises" line, the Staff Document link and the re-issue nudge after a fire risk assessment.

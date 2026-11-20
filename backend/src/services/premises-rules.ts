@@ -30,7 +30,18 @@ export type CheckStatus = 'overdue' | 'due_soon' | 'ok' | 'no_date';
 
 // ── 1. Who may see it ───────────────────────────────────────────────────────
 
-const VIS_RANK: Record<Visibility, number> = { all: 0, managers: 1, admins: 2 };
+export const VIS_RANK: Record<Visibility, number> = { all: 0, managers: 1, admins: 2 };
+
+/**
+ * A library document's visibility: the tighter of its own and its folder's
+ * (a document may be set tighter than its folder, never looser). THE rule for
+ * the library list and the file gate.
+ */
+export function effectiveVisibility(doc: string | null | undefined, folder: string): Visibility {
+  const f = (VIS_RANK[folder as Visibility] !== undefined ? folder : 'admins') as Visibility;
+  const d = doc as Visibility | null | undefined;
+  return d && VIS_RANK[d] !== undefined && VIS_RANK[d] > VIS_RANK[f] ? d : f;
+}
 
 /**
  * How far up the visibility ladder a role reaches. -1 = sees nothing (a

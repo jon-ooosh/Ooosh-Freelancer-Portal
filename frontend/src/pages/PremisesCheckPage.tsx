@@ -15,9 +15,10 @@ import CheckFormModal from '../components/premises/CheckFormModal';
 import RecordModal, { uploadRecordFiles } from '../components/premises/RecordModal';
 import PastRecordsModal from '../components/premises/PastRecordsModal';
 import UsageChart from '../components/premises/UsageChart';
+import LinkCostModal from '../components/premises/LinkCostModal';
 import {
   KIND_LABEL, OUTCOME_CLASS, OUTCOME_LABEL, PremisesCheck, PremisesMeta, PremisesRecord, TEST_OUTCOME_LABEL,
-  VISIBILITY_LABEL, fmtDate, fmtNumber, statusPill,
+  VISIBILITY_LABEL, advisoryDone, fmtDate, fmtMoney, fmtNumber, statusPill,
 } from '../components/premises/premisesCopy';
 
 export default function PremisesCheckPage() {
@@ -35,6 +36,7 @@ function PremisesCheckContent({ id }: { id: string }) {
   const [editing, setEditing] = useState(false);
   const [recording, setRecording] = useState(false);
   const [filingPast, setFilingPast] = useState(false);
+  const [linkingRecord, setLinkingRecord] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -181,6 +183,17 @@ function PremisesCheckContent({ id }: { id: string }) {
                 </dd>
               </>
             )}
+            {(check.cost_by_year?.length ?? 0) > 0 && (
+              <>
+                <dt className="text-gray-500">What it's cost</dt>
+                <dd>
+                  {check.cost_by_year!.map(y => (
+                    <span key={y.year} className="block tabular-nums">{y.year}: {fmtMoney(y.net)} + VAT
+                      <span className="text-xs text-gray-500"> · {y.bills} bill{y.bills === 1 ? '' : 's'}</span></span>
+                  ))}
+                </dd>
+              </>
+            )}
             <dt className="text-gray-500">Who can see it</dt><dd>{VISIBILITY_LABEL[check.visibility]}</dd>
             {check.notes && (<><dt className="text-gray-500">Notes</dt><dd className="whitespace-pre-wrap">{check.notes}</dd></>)}
           </dl>
@@ -200,7 +213,8 @@ function PremisesCheckContent({ id }: { id: string }) {
             <ul className="divide-y divide-gray-100">
               {check.records!.map(r => (
                 <RecordRow key={r.id} record={r} check={check} canManage={canManage} busy={busy}
-                  onChanged={() => act(async () => undefined, 'Could not reload')} onError={setError} />
+                  onChanged={() => act(async () => undefined, 'Could not reload')} onError={setError}
+                  onLinkCost={() => setLinkingRecord(r.id)} />
               ))}
             </ul>
           )}
@@ -219,19 +233,31 @@ function PremisesCheckContent({ id }: { id: string }) {
         <PastRecordsModal check={check} onClose={() => setFilingPast(false)}
           onSaved={() => { setFilingPast(false); void act(async () => undefined, 'Could not reload'); }} />
       )}
+      {linkingRecord && (
+        <LinkCostModal checkId={check.id} recordId={linkingRecord} contractorName={check.contractor_name}
+          onClose={() => setLinkingRecord(null)}
+          onLinked={() => { setLinkingRecord(null); void act(async () => undefined, 'Could not reload'); }} />
+      )}
     </div>
   );
 }
 
-function RecordRow({ record: r, check, canManage, busy, onChanged, onError }: {
+function RecordRow({ record: r, check, canManage, busy, onChanged, onError, onLinkCost }: {
   record: PremisesRecord;
   check: PremisesCheck;
   canManage: boolean;
   busy: boolean;
   onChanged: () => Promise<void>;
   onError: (msg: string | null) => void;
+  onLinkCost: () => void;
 }) {
   const [uploading, setUploading] = useState(false);
+  const [newAdvisory, setNewAdvisory] = useState<string | null>(null);
+
+  async function run(fn: () => Promise<unknown>, fallback: string) {
+    onError(null);
+    try { await fn(); await onChanged(); } catch (err) { onError(err instanceof Error ? err.message : fallback); }
+  }
   const outcomeText = r.outcome
     ? (check.kind === 'test' ? TEST_OUTCOME_LABEL[r.outcome] ?? OUTCOME_LABEL[r.outcome] : OUTCOME_LABEL[r.outcome])
     : null;
@@ -279,6 +305,53 @@ function RecordRow({ record: r, check, canManage, busy, onChanged, onError }: {
           {r.recorded_by_name && <span className="text-xs text-gray-400">recorded by {r.recorded_by_name}</span>}
         </div>
         {r.notes && <p className="text-sm text-gray-700 whitespace-pre-wrap">{r.notes}</p>}
+        {r.advisories.length > 0 && (
+          <ul className="space-y-1">
+            {r.advisories.map(a => {
+              const done = advisoryDone(a);
+              return (
+                <li key={a.id} className="flex flex-wrap items-center gap-2 text-sm">
+                  <input type="checkbox" checked={done} aria-label={`Done: ${a.text}`}
+                    onChange={e => void run(() => api.post(`/premises/advisories/${a.id}/done`, { done: e.target.checked }), 'Could not change it')} />
+                  <span className={done ? 'text-gray-400 line-through' : 'text-gray-800'}>{a.text}</span>
+                  {a.task_id && a.task_status === 'open' && (
+                    <span className="text-xs text-ooosh-700 bg-ooosh-50 rounded px-1.5">To Do for {a.task_owner ?? 'someone'}</span>
+                  )}
+                  {!done && (!a.task_id || a.task_status === 'cancelled') && (
+                    <button type="button" className="text-xs text-ooosh-600 hover:underline"
+                      onClick={() => void run(() => api.post(`/premises/advisories/${a.id}/task`, {}), 'Could not make the To Do')}>
+                      Make it a To Do
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {newAdvisory !== null && (
+          <form className="flex gap-2" onSubmit={e => {
+            e.preventDefault();
+            const text = newAdvisory.trim();
+            if (!text) return;
+            void run(async () => { await api.post(`/premises/records/${r.id}/advisories`, { texts: [text] }); setNewAdvisory(null); }, 'Could not add it');
+          }}>
+            <input autoFocus value={newAdvisory} onChange={e => setNewAdvisory(e.target.value)} maxLength={500}
+              placeholder="An advisory from this visit" aria-label="New advisory"
+              className="flex-1 min-w-0 px-2 py-1 border border-gray-300 rounded text-sm" />
+            <button type="submit" className="px-2 py-1 text-xs rounded bg-ooosh-600 text-white">Add</button>
+            <button type="button" onClick={() => setNewAdvisory(null)} className="px-2 py-1 text-xs text-gray-500">Cancel</button>
+          </form>
+        )}
+        {r.cost ? (
+          <p className="text-xs text-gray-600">
+            Bill: <span className="tabular-nums">{fmtMoney(r.cost.amount_net)} + VAT</span>
+            {[r.cost.supplier_name, r.cost.invoice_number].filter(Boolean).map(t => ` · ${t}`).join('')}
+            <button type="button" className="ml-2 text-gray-400 hover:text-gray-700"
+              onClick={() => void run(() => api.post(`/premises/records/${r.id}/cost`, { cost_id: null }), 'Could not unlink it')}>Unlink</button>
+          </p>
+        ) : r.reading_value === null && (
+          <button type="button" onClick={onLinkCost} className="text-xs text-ooosh-600 hover:underline">Link the bill from Costs</button>
+        )}
         {r.next_due_set && (
           <p className="text-xs text-gray-500">
             Next due set to {fmtDate(r.next_due_set)}{r.next_due_source === 'certificate' ? ' from the certificate' : ''}
@@ -297,6 +370,9 @@ function RecordRow({ record: r, check, canManage, busy, onChanged, onError }: {
               )}
             </span>
           ))}
+          {check.kind === 'visit' && newAdvisory === null && (
+            <button type="button" onClick={() => setNewAdvisory('')} className="text-xs text-ooosh-600 hover:underline">+ Add an advisory</button>
+          )}
           <label className={`text-xs text-ooosh-600 hover:underline cursor-pointer ${uploading || busy ? 'opacity-50 pointer-events-none' : ''}`}>
             {uploading ? 'Uploading…' : '+ Add a file'}
             <input type="file" multiple className="hidden" onChange={e => {

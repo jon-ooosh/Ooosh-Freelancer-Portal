@@ -28,23 +28,24 @@ import {
   CHECK_KINDS, VISIBILITIES, OUTCOMES, CheckKind, Visibility,
   canSee, canSetVisibility, visibleLevels, roleRank, checkStatus, daysBetween,
   reminderWanted, reminderTitle, nextDueAfterRecord, dateLabel,
-  nextPoint, cleanPoints, usageSeries, assessReading, Reading,
+  nextPoint, cleanPoints, usageSeries, assessReading, Reading, effectiveVisibility,
 } from './premises-rules';
 import { createTask, cancelTask, updateTask, listTasksForSource } from './staff-tasks';
+import { PremisesError } from './premises-errors';
 import { listAssignableStaff } from './assignable-staff';
 
 export const PREMISES_PREFIX = 'premises/';
 export const REMINDER_SOURCE = 'premises_check';
 export const FIX_SOURCE = 'premises_fix';
+/** A To Do made from an advisory on a record. */
+export const ADVISORY_SOURCE = 'premises_advisory';
 
 /** The platform's own service account — same id as marketing-content.ts / carnet-auto-email.ts. */
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 const MODES: Mode[] = ['schedule', 'after_done'];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-export class PremisesError extends Error {
-  constructor(message: string, public status = 400) { super(message); }
-}
+export { PremisesError };
 
 export interface Caller { userId: string; role: string | undefined }
 
@@ -143,7 +144,21 @@ export async function getCheck(id: string, role: string | undefined) {
   const row = await visibleCheck(id, role);
   const records = await query(
     `SELECT r.id, r.done_on::text AS done_on, r.outcome, r.reading_value::float8 AS reading_value, r.meter_replaced, r.notes,
-            r.point, r.backfilled,
+            r.point, r.backfilled, r.cost_id,
+            CASE WHEN co.id IS NULL THEN NULL ELSE json_build_object(
+              'id', co.id, 'supplier_name', co.supplier_name, 'invoice_number', co.invoice_number,
+              'cost_date', to_char(co.cost_date, 'YYYY-MM-DD'),
+              'amount_net', co.amount_net::float8, 'amount_gross', co.amount_gross::float8) END AS cost,
+            COALESCE((
+              SELECT json_agg(json_build_object('id', a.id, 'text', a.text, 'done_at', a.done_at,
+                                                'task_id', a.task_id, 'task_status', t.status,
+                                                'task_owner', NULLIF(TRIM(COALESCE(NULLIF(tp.preferred_name, ''), tp.first_name, '') || ' ' || COALESCE(tp.last_name, '')), ''))
+                              ORDER BY a.created_at)
+                FROM premises_advisories a
+                LEFT JOIN staff_tasks t ON t.id = a.task_id
+                LEFT JOIN people tp ON tp.id = t.person_id
+               WHERE a.record_id = r.id
+            ), '[]'::json) AS advisories,
             r.next_due_set::text AS next_due_set, r.next_due_source, r.created_at,
             r.done_by_org_id, o.name AS done_by_org_name,
             NULLIF(TRIM(COALESCE(NULLIF(rp.preferred_name, ''), rp.first_name, '') || ' ' || COALESCE(rp.last_name, '')), '') AS recorded_by_name,
@@ -156,6 +171,7 @@ export async function getCheck(id: string, role: string | undefined) {
             ), '[]'::json) AS files
        FROM premises_records r
        LEFT JOIN organisations o ON o.id = r.done_by_org_id
+       LEFT JOIN costs co ON co.id = r.cost_id
        LEFT JOIN users ru ON ru.id = r.recorded_by
        LEFT JOIN people rp ON rp.id = ru.person_id
       WHERE r.check_id = $1 AND r.removed_at IS NULL
@@ -170,7 +186,16 @@ export async function getCheck(id: string, role: string | undefined) {
   const usage = row.kind === 'reading' ? usageSeries(readingsOf(recs)) : [];
   // The call point the next test should try (rotation, premises-rules.ts).
   const next_point = nextPoint(row.points, recs.find(r => r.point)?.point ?? null);
-  return { ...decorate(row, today), records: records.rows, open_reminder: open[0] ?? null, usage, next_point };
+  // What it has cost, by the year it was done (ex VAT, from the bills linked in Costs).
+  const byYear = await query(
+    `SELECT EXTRACT(YEAR FROM r.done_on)::int AS year, SUM(co.amount_net)::float8 AS net, COUNT(*)::int AS bills
+       FROM premises_records r JOIN costs co ON co.id = r.cost_id
+      WHERE r.check_id = $1 AND r.removed_at IS NULL
+      GROUP BY 1 ORDER BY 1 DESC`, [id]);
+  return {
+    ...decorate(row, today), records: records.rows, open_reminder: open[0] ?? null, usage, next_point,
+    cost_by_year: byYear.rows,
+  };
 }
 
 /** A meter's readings from its records (records with no value are skipped). */
@@ -433,6 +458,8 @@ export interface RecordInput {
   meter_replaced: boolean;
   /** The call point tested (a rotating test). */
   point?: string | null;
+  /** The engineer's advisories, one each — each can become a To Do. */
+  advisories?: string[] | null;
 }
 
 /** What next due date recording on `doneOn` would set — the record form's preview. */
@@ -528,6 +555,12 @@ async function saveRecords(id: string, inputs: RecordInput[], backfilled: boolea
          setsDate ? next.date : null, setsDate ? next.source : null, caller.userId, backfilled],
       );
       ids.push(ins.rows[0].id as string);
+      for (const text of cleanAdvisories(input.advisories)) {
+        await client.query(
+          // clock_timestamp, not NOW(): one transaction's NOW() is the same for every row, which would lose their order.
+          `INSERT INTO premises_advisories (record_id, text, created_by, created_at) VALUES ($1, $2, $3, clock_timestamp())`,
+          [ins.rows[0].id, text, caller.userId]);
+      }
     }
     if (moved) {
       await client.query(
@@ -662,10 +695,10 @@ export async function addFile(recordId: string, f: {
 /** Take a file off — a manager, or whoever uploaded it. Kept in R2 and the table. */
 export async function archiveFile(fileId: string, caller: Caller) {
   const r = await query(
-    `SELECT f.uploaded_by, r.check_id FROM premises_files f JOIN premises_records r ON r.id = f.record_id
-      WHERE f.id = $1 AND f.archived_at IS NULL`, [fileId]);
+    `SELECT f.uploaded_by, f.r2_key FROM premises_files f WHERE f.id = $1 AND f.archived_at IS NULL`, [fileId]);
   if (!r.rows.length) throw new PremisesError('File not found', 404);
-  await visibleCheck(r.rows[0].check_id as string, caller.role);
+  // A certificate on a check, or a version in the library — the same gate as opening it.
+  if (!(await canOpenPremisesFile(r.rows[0].r2_key as string, caller.role))) throw new PremisesError('File not found', 404);
   if (!isManager(caller.role) && r.rows[0].uploaded_by !== caller.userId) {
     throw new PremisesError('Only a manager or whoever added it can remove a file', 403);
   }
@@ -679,11 +712,132 @@ export async function archiveFile(fileId: string, caller: Caller) {
  */
 export async function canOpenPremisesFile(key: string, role: string | undefined): Promise<boolean> {
   const r = await query(
-    `SELECT c.visibility FROM premises_files f
-       JOIN premises_records r ON r.id = f.record_id
-       JOIN premises_checks c ON c.id = r.check_id
+    `SELECT c.visibility AS check_visibility, d.visibility AS doc_visibility, fo.visibility AS folder_visibility
+       FROM premises_files f
+       LEFT JOIN premises_records r ON r.id = f.record_id
+       LEFT JOIN premises_checks c ON c.id = r.check_id
+       LEFT JOIN premises_documents d ON d.id = f.document_id
+       LEFT JOIN premises_folders fo ON fo.id = d.folder_id
       WHERE f.r2_key = $1`, [key]);
-  return r.rows.length > 0 && canSee(role, r.rows[0].visibility as string);
+  const row = r.rows[0] as { check_visibility: string | null; doc_visibility: string | null; folder_visibility: string | null } | undefined;
+  if (!row) return false;
+  // A check's certificate follows the check; a library version follows its document (the tighter of it and its folder).
+  if (row.check_visibility) return canSee(role, row.check_visibility);
+  if (row.folder_visibility) return canSee(role, effectiveVisibility(row.doc_visibility, row.folder_visibility));
+  return false;
+}
+
+// ── Advisories ──────────────────────────────────────────────────────────────
+
+/** Advisories from a form: trimmed, no blanks, at most 30 of 500 characters. */
+function cleanAdvisories(raw: string[] | null | undefined): string[] {
+  return (raw ?? []).map(t => String(t ?? '').trim().slice(0, 500)).filter(Boolean).slice(0, 30);
+}
+
+/** The advisory, its record's check (visible to the caller), or 404. */
+async function advisoryFor(advisoryId: string, role: string | undefined) {
+  const r = await query(
+    `SELECT a.id, a.text, a.task_id, a.done_at, r.check_id, t.status AS task_status
+       FROM premises_advisories a
+       JOIN premises_records r ON r.id = a.record_id AND r.removed_at IS NULL
+       LEFT JOIN staff_tasks t ON t.id = a.task_id
+      WHERE a.id = $1`, [advisoryId]);
+  const a = r.rows[0] as { id: string; text: string; task_id: string | null; done_at: string | null; check_id: string; task_status: string | null } | undefined;
+  if (!a) throw new PremisesError('Advisory not found', 404);
+  const check = await visibleCheck(a.check_id, role);
+  return { a, check };
+}
+
+/** Add advisories to a record after the event (anyone who can see the check). */
+export async function addAdvisories(recordId: string, texts: string[], caller: Caller) {
+  const checkId = await checkForRecord(recordId, caller.role);
+  const clean = cleanAdvisories(texts);
+  if (!clean.length) throw new PremisesError('Type the advisory');
+  for (const text of clean) {
+    await query(`INSERT INTO premises_advisories (record_id, text, created_by, created_at) VALUES ($1, $2, $3, clock_timestamp())`, [recordId, text, caller.userId]);
+  }
+  return { check_id: checkId };
+}
+
+/**
+ * Turn an advisory into a To Do (spec §1.9) — for the check's owner, else for
+ * whoever asked. Set by the person who pressed it, so it reads as theirs.
+ */
+export async function makeAdvisoryTask(advisoryId: string, caller: Caller) {
+  const { a, check } = await advisoryFor(advisoryId, caller.role);
+  if (a.done_at) throw new PremisesError('That advisory is already done');
+  if (a.task_id && a.task_status !== 'cancelled') throw new PremisesError('That advisory is already a To Do');
+  let personId = check.owner_person_id;
+  if (!personId) {
+    const me = await query(`SELECT person_id FROM users WHERE id = $1`, [caller.userId]);
+    personId = (me.rows[0]?.person_id as string | null) ?? null;
+  }
+  if (!personId) throw new PremisesError('Nobody looks after this check yet, and your login has no person to give it to');
+  const task = await createTask({
+    title: `${check.title}: ${a.text}`.slice(0, 300),
+    personId,
+    dueDate: ukDatePlus(30),
+    sourceType: ADVISORY_SOURCE,
+    sourceId: advisoryId,
+  }, caller.userId, caller.role) as { id: string };
+  await query(`UPDATE premises_advisories SET task_id = $2 WHERE id = $1`, [advisoryId, task.id]);
+  return { task_id: task.id };
+}
+
+/** Tick an advisory off (or back on). Ticking it off closes its open To Do too. */
+export async function setAdvisoryDone(advisoryId: string, done: boolean, caller: Caller) {
+  const { a } = await advisoryFor(advisoryId, caller.role);
+  await query(
+    `UPDATE premises_advisories SET done_at = ${done ? 'NOW()' : 'NULL'}, done_by = $2 WHERE id = $1`,
+    [advisoryId, done ? caller.userId : null]);
+  if (done && a.task_id && a.task_status === 'open') {
+    await updateTask(a.task_id, { status: 'done' }, SYSTEM_USER_ID, 'admin')
+      .catch(e => console.error(`[premises] closing advisory To Do ${a.task_id} failed (non-fatal):`, e));
+  }
+}
+
+// ── The bill in Costs ───────────────────────────────────────────────────────
+
+/**
+ * Bills to link a record to: with no search, the contractor's recent ones (by
+ * the name on the cost); with one, by supplier, description, invoice number or
+ * amount. Read-only over Money › Costs — nothing about the cost changes.
+ */
+export async function linkableCosts(checkId: string, rawSearch: string, role: string | undefined) {
+  const check = await visibleCheck(checkId, role);
+  const raw = rawSearch.trim().slice(0, 100);
+  const escape = (v: string) => v.replace(/[\\%_]/g, (m) => `\\${m}`);
+  const search = raw.length >= 2 ? escape(raw) : null;
+  const amountTyped = raw ? Number(raw.replace(/[£,\s]/g, '')) : NaN;
+  const amount = Number.isFinite(amountTyped) && amountTyped > 0 ? Math.round(amountTyped * 100) / 100 : null;
+  const contractor = check.contractor_name ? escape(String(check.contractor_name).trim().slice(0, 100)) : null;
+  if (!search && !contractor) return [];
+  const r = await query(
+    `SELECT c.id, c.supplier_name, c.description, c.invoice_number,
+            to_char(c.cost_date, 'YYYY-MM-DD') AS cost_date,
+            c.amount_net::float8 AS amount_net, c.amount_gross::float8 AS amount_gross
+       FROM costs c
+      WHERE ($1::text IS NULL AND c.supplier_name ILIKE '%' || $2::text || '%')
+         OR ($1::text IS NOT NULL AND (
+              c.supplier_name ILIKE '%' || $1::text || '%'
+              OR c.description ILIKE '%' || $1::text || '%'
+              OR c.invoice_number ILIKE '%' || $1::text || '%'
+              OR ($3::numeric IS NOT NULL AND (ABS(c.amount_gross - $3::numeric) < 0.005 OR ABS(c.amount_net - $3::numeric) < 0.005))))
+      ORDER BY c.cost_date DESC NULLS LAST, c.created_at DESC
+      LIMIT 40`,
+    [search, contractor, amount]);
+  return r.rows;
+}
+
+/** Point a record at its bill in Costs, or take the link off (null). Anyone who can see the check. */
+export async function linkCost(recordId: string, costId: string | null, caller: Caller) {
+  const checkId = await checkForRecord(recordId, caller.role);
+  if (costId) {
+    const c = await query(`SELECT 1 FROM costs WHERE id = $1`, [costId]);
+    if (!c.rows.length) throw new PremisesError('That bill isn’t in Costs any more');
+  }
+  await query(`UPDATE premises_records SET cost_id = $2 WHERE id = $1`, [recordId, costId]);
+  return { check_id: checkId };
 }
 
 // ── Places and headings (admins) ────────────────────────────────────────────

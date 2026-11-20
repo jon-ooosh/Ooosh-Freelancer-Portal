@@ -23,6 +23,21 @@
  *   POST   /files/:id/archive            take a file off (manager or whoever added it)
  *   POST   /places | /headings           { name } (admin)
  *   PATCH  /places/:id | /headings/:id   { name?, sort_order?, retired? } (admin)
+ *
+ * Phase 3a (spec §15):
+ *   POST   /records/:id/advisories       { texts: [...] } add advisories to a record
+ *   POST   /advisories/:id/task          make it a To Do
+ *   POST   /advisories/:id/done          { done } tick it off (or back on)
+ *   GET    /checks/:id/linkable-costs?search=   bills in Costs to link a record to
+ *   POST   /records/:id/cost             { cost_id | null } link / unlink the bill
+ *   GET    /library                      folders and documents I can see
+ *   POST   /documents                    add a document (manager)
+ *   PATCH  /documents/:id                change it (manager)
+ *   POST   /documents/:id/archive        archive it (manager)
+ *   POST   /documents/:id/files          multipart `file` — a new version (manager)
+ *   GET    /folders                      every folder, retired too (admin)
+ *   POST   /folders                      { name, visibility } (admin)
+ *   PATCH  /folders/:id                  { name?, visibility?, sort_order?, retired? } (admin)
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
@@ -36,7 +51,12 @@ import {
   PremisesError, PREMISES_PREFIX, addFile, addPastRecords, addTaxonomy, archiveFile, checkForRecord, checkReading,
   createCheck, deleteCheck, getCheck, getMeta, listChecks, listMeters, previewNextDue, recordCheck, removeRecord,
   retireCheck, unretireCheck, updateCheck, updateTaxonomy,
+  addAdvisories, makeAdvisoryTask, setAdvisoryDone, linkableCosts, linkCost,
 } from '../services/premises';
+import {
+  getLibrary, listFolders, createDocument, updateDocument, archiveDocument, documentForUpload, addDocumentFile,
+  addFolder, updateFolder,
+} from '../services/premises-library';
 
 const router = Router();
 router.use(authenticate);
@@ -152,6 +172,7 @@ const recordSchema = z.object({
   reading_value: z.number().finite().nullable().optional(),
   meter_replaced: z.boolean().optional(),
   point: optText(80),
+  advisories: z.array(z.string().max(500)).max(30).nullable().optional(),
 });
 
 const toRecordInput = (b: z.infer<typeof recordSchema>) => ({
@@ -163,6 +184,7 @@ const toRecordInput = (b: z.infer<typeof recordSchema>) => ({
   reading_value: b.reading_value ?? null,
   meter_replaced: b.meter_replaced ?? false,
   point: b.point ?? null,
+  advisories: b.advisories ?? null,
 });
 
 router.post('/checks/:id/records', validate(idParam, 'params'), validate(recordSchema), async (req: AuthRequest, res: Response) => {
@@ -188,7 +210,8 @@ router.post('/records/:id/remove', validate(idParam, 'params'), validate(reasonS
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024, files: 1 } });
 
-router.post('/records/:id/files', validate(idParam, 'params'), (req: AuthRequest, res: Response, next) => {
+/** One file from a multipart body, with a plain answer when it's too big. */
+function oneFile(req: AuthRequest, res: Response, next: () => void) {
   upload.single('file')(req, res, (err: unknown) => {
     if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
       res.status(413).json({ error: 'That file is over 20 MB' });
@@ -197,7 +220,9 @@ router.post('/records/:id/files', validate(idParam, 'params'), (req: AuthRequest
     if (err) { fail(res, 'upload parse', err); return; }
     next();
   });
-}, async (req: AuthRequest, res: Response) => {
+}
+
+router.post('/records/:id/files', validate(idParam, 'params'), oneFile, async (req: AuthRequest, res: Response) => {
   try {
     if (!isR2Configured()) { res.status(503).json({ error: 'File storage not configured' }); return; }
     const file = req.file;
@@ -217,6 +242,96 @@ router.post('/records/:id/files', validate(idParam, 'params'), (req: AuthRequest
 
 router.post('/files/:id/archive', validate(idParam, 'params'), async (req: AuthRequest, res: Response) => {
   try { await archiveFile(String(req.params.id), caller(req)); res.json({ data: { archived: true } }); } catch (err) { fail(res, 'archive file', err); }
+});
+
+// ── Advisories and the bill (phase 3a) ───────────────────────────────────────
+
+router.post('/records/:id/advisories', validate(idParam, 'params'),
+  validate(z.object({ texts: z.array(z.string().max(500)).min(1).max(30) })), async (req: AuthRequest, res: Response) => {
+    try { res.status(201).json({ data: await addAdvisories(String(req.params.id), req.body.texts, caller(req)) }); } catch (err) { fail(res, 'add advisories', err); }
+  });
+
+router.post('/advisories/:id/task', validate(idParam, 'params'), async (req: AuthRequest, res: Response) => {
+  try { res.status(201).json({ data: await makeAdvisoryTask(String(req.params.id), caller(req)) }); } catch (err) { fail(res, 'advisory task', err); }
+});
+
+router.post('/advisories/:id/done', validate(idParam, 'params'), validate(z.object({ done: z.boolean() })), async (req: AuthRequest, res: Response) => {
+  try { await setAdvisoryDone(String(req.params.id), req.body.done, caller(req)); res.json({ data: { ok: true } }); } catch (err) { fail(res, 'advisory done', err); }
+});
+
+router.get('/checks/:id/linkable-costs', validate(idParam, 'params'), async (req: AuthRequest, res: Response) => {
+  try {
+    res.json({ data: await linkableCosts(String(req.params.id), String(req.query.search || ''), req.user!.role) });
+  } catch (err) { fail(res, 'linkable costs', err); }
+});
+
+router.post('/records/:id/cost', validate(idParam, 'params'), validate(z.object({ cost_id: z.string().guid().nullable() })), async (req: AuthRequest, res: Response) => {
+  try { res.json({ data: await linkCost(String(req.params.id), req.body.cost_id, caller(req)) }); } catch (err) { fail(res, 'link cost', err); }
+});
+
+// ── The documents library (phase 3a) ─────────────────────────────────────────
+
+router.get('/library', async (req: AuthRequest, res: Response) => {
+  try { res.json({ data: await getLibrary(req.user!.role) }); } catch (err) { fail(res, 'library', err); }
+});
+
+const documentSchema = z.object({
+  folder_id: z.string().guid(),
+  title: z.string().min(1).max(200),
+  visibility: z.enum(['all', 'managers', 'admins']).nullable(),
+  place_id: z.string().guid().nullable(),
+  notes: optText(4000),
+});
+
+router.post('/documents', validate(documentSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const b = req.body as z.infer<typeof documentSchema>;
+    res.status(201).json({ data: await createDocument({ ...b, notes: b.notes ?? null }, caller(req)) });
+  } catch (err) { fail(res, 'add document', err); }
+});
+
+router.patch('/documents/:id', validate(idParam, 'params'), validate(partialForUpdate(documentSchema)), async (req: AuthRequest, res: Response) => {
+  try { await updateDocument(String(req.params.id), req.body, caller(req)); res.json({ data: { ok: true } }); } catch (err) { fail(res, 'change document', err); }
+});
+
+router.post('/documents/:id/archive', validate(idParam, 'params'), async (req: AuthRequest, res: Response) => {
+  try { await archiveDocument(String(req.params.id), caller(req)); res.json({ data: { archived: true } }); } catch (err) { fail(res, 'archive document', err); }
+});
+
+router.post('/documents/:id/files', validate(idParam, 'params'), oneFile, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!isR2Configured()) { res.status(503).json({ error: 'File storage not configured' }); return; }
+    const file = req.file;
+    if (!file) { res.status(400).json({ error: 'No file provided' }); return; }
+    const documentId = String(req.params.id);
+    await documentForUpload(documentId, caller(req));
+    const ext = (path.extname(file.originalname) || '').toLowerCase().replace(/[^.a-z0-9]/g, '').slice(0, 10);
+    const fileId = randomUUID();
+    const key = `${PREMISES_PREFIX}library/${documentId}/${fileId}${ext}`;
+    await uploadToR2(key, file.buffer, file.mimetype || 'application/octet-stream');
+    await addDocumentFile(documentId, {
+      id: fileId, r2Key: key, filename: file.originalname || `file${ext}`, contentType: file.mimetype || null, size: file.size,
+    }, caller(req));
+    res.status(201).json({ data: { id: fileId, r2_key: key } });
+  } catch (err) { fail(res, 'upload version', err); }
+});
+
+router.get('/folders', async (req: AuthRequest, res: Response) => {
+  try { res.json({ data: await listFolders(req.user!.role) }); } catch (err) { fail(res, 'folders', err); }
+});
+
+router.post('/folders', validate(z.object({ name: z.string().min(1).max(100), visibility: z.enum(['all', 'managers', 'admins']) })),
+  async (req: AuthRequest, res: Response) => {
+    try { res.status(201).json({ data: await addFolder(req.body.name, req.body.visibility, caller(req)) }); } catch (err) { fail(res, 'add folder', err); }
+  });
+
+router.patch('/folders/:id', validate(idParam, 'params'), validate(z.object({
+  name: z.string().min(1).max(100).optional(),
+  visibility: z.enum(['all', 'managers', 'admins']).optional(),
+  sort_order: z.number().int().optional(),
+  retired: z.boolean().optional(),
+})), async (req: AuthRequest, res: Response) => {
+  try { await updateFolder(String(req.params.id), req.body, caller(req)); res.json({ data: { ok: true } }); } catch (err) { fail(res, 'change folder', err); }
 });
 
 // ── Places and headings (admin) ──────────────────────────────────────────────
