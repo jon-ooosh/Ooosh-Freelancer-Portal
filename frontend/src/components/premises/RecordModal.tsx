@@ -49,6 +49,8 @@ export default function RecordModal({ check, onClose, onSaved }: {
   const [doneBy, setDoneBy] = useState<PickerOption | null>(
     check.contractor_org_id ? { value: check.contractor_org_id, label: check.contractor_name ?? 'Contractor' } : null);
   const [notes, setNotes] = useState('');
+  // The engineer's advisories, one per line — each becomes its own line on the record (spec §15).
+  const [advisories, setAdvisories] = useState('');
   const [files, setFiles] = useState<File[]>([]);
   const [preview, setPreview] = useState<{ next_due: string | null; moves: boolean } | null>(null);
   const [nextDue, setNextDue] = useState('');
@@ -109,6 +111,7 @@ export default function RecordModal({ check, onClose, onSaved }: {
         outcome: needsOutcome ? outcome : null,
         done_by_org_id: check.kind === 'visit' ? doneBy?.value ?? null : null,
         notes: notes.trim() || null,
+        advisories: check.kind === 'visit' ? advisories.split('\n').map(a => a.trim()).filter(Boolean) : [],
         next_due: certificateDate,
         reading_value: check.kind === 'reading' ? readingValue : null,
         meter_replaced: check.kind === 'reading' ? replaced : false,
@@ -265,10 +268,18 @@ export default function RecordModal({ check, onClose, onSaved }: {
             </div>
           )}
 
+          {check.kind === 'visit' && (
+            <div>
+              <label className={label} htmlFor="pr-advisories">Advisories — one per line</label>
+              <textarea id="pr-advisories" value={advisories} onChange={e => setAdvisories(e.target.value)} rows={2}
+                placeholder="e.g. Replace the condensate trap at the next service" className={input} />
+              <p className="text-xs text-gray-500 mt-1">Each can be turned into a To Do or ticked off on the check's page.</p>
+            </div>
+          )}
           <div>
-            <label className={label} htmlFor="pr-notes">{check.kind === 'visit' ? 'Notes or advisories' : 'Notes'}</label>
-            <textarea id="pr-notes" value={notes} onChange={e => setNotes(e.target.value)} rows={3} maxLength={4000}
-              placeholder={check.kind === 'visit' ? 'Anything the engineer flagged…' : ''} className={input} />
+            <label className={label} htmlFor="pr-notes">Notes</label>
+            <textarea id="pr-notes" value={notes} onChange={e => setNotes(e.target.value)} rows={check.kind === 'visit' ? 2 : 3} maxLength={4000}
+              className={input} />
           </div>
         </div>
 

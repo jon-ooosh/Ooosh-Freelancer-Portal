@@ -17,6 +17,7 @@ import { openR2Key } from '../lib/openAuthedFile';
 import CheckFormModal from '../components/premises/CheckFormModal';
 import PlacesHeadingsModal from '../components/premises/PlacesHeadingsModal';
 import UsageChart from '../components/premises/UsageChart';
+import DocumentsPanel from '../components/premises/DocumentsPanel';
 import {
   Meter, PremisesCheck, PremisesMeta, STATUS_ORDER, VISIBILITY_LABEL, fmtDate, fmtNumber, statusPill,
 } from '../components/premises/premisesCopy';
@@ -113,7 +114,8 @@ function compare(a: PremisesCheck, b: PremisesCheck, key: SortKey, dir: 1 | -1):
 export default function PremisesPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab: 'checks' | 'meters' = searchParams.get('tab') === 'meters' ? 'meters' : 'checks';
+  const rawTab = searchParams.get('tab');
+  const tab: 'checks' | 'meters' | 'documents' = rawTab === 'meters' || rawTab === 'documents' ? rawTab : 'checks';
   const [meta, setMeta] = useState<PremisesMeta | null>(null);
   const [checks, setChecks] = useState<PremisesCheck[]>([]);
   const [loading, setLoading] = useState(true);
@@ -219,7 +221,7 @@ export default function PremisesPage() {
       </div>
 
       <div className="flex gap-1 border-b border-gray-200 mb-4">
-        {([['checks', 'Checks'], ['meters', 'Meter readings']] as const).map(([id, label]) => (
+        {([['checks', 'Checks'], ['meters', 'Meter readings'], ['documents', 'Documents']] as const).map(([id, label]) => (
           <button key={id} type="button" onClick={() => setSearchParams(id === 'checks' ? {} : { tab: id }, { replace: true })}
             className={`px-3 py-2 text-sm border-b-2 -mb-px ${tab === id ? 'border-ooosh-600 text-ooosh-700 font-semibold' : 'border-transparent text-gray-500 hover:text-gray-800'}`}>
             {label}
@@ -227,7 +229,9 @@ export default function PremisesPage() {
         ))}
       </div>
 
-      {tab === 'meters' ? <MetersPanel /> : (<>
+      {tab === 'meters' ? <MetersPanel /> : tab === 'documents' ? (
+        meta ? <DocumentsPanel meta={meta} /> : <p className="text-sm text-gray-500">Loading…</p>
+      ) : (<>
       {/* Places */}
       <div className="flex flex-wrap gap-2 mb-3">
         {[{ id: 'all', name: 'All' }, ...activePlaces].map(p => (

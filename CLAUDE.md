@@ -407,7 +407,10 @@ first.** **Phase S BUILT (§13):** pure Supplier orgs are left out of the two "w
 match · show"), organisations take "Also" types (`also_types`, mig 356, `services/org-types.ts`). **Phase 2 BUILT
 (§14):** meter readings (`/operations/premises/readings`, each checked against its history — warn, never refuse),
 the fire alarm call-point rotation, and "Add past records" (one batch moves the date once, from the newest; never a
-"Get it fixed" To Do). Not built: documents library, calendar visits, Costs links.
+"Get it fixed" To Do). **Phase 3a BUILT (§15):** the Documents library (`services/premises-library.ts` — a document
+may be tighter than its folder, never looser: `effectiveVisibility()`; files are versions, under `premises/library/`),
+advisories → To Do (`source_type = 'premises_advisory'`), and the bill in Costs (`premises_records.cost_id`,
+ON DELETE SET NULL). Not built (3b): calendar visits, the supplier's Premises line, the Staff Document link.
 
 **PARKED, Oct 2026:** `docs/AI-QUOTING-SPEC.md` — Claude drafts quotes (vans first) and the
 reply; a person always sends. **HireHop forbids generating its document PDFs via the API**

@@ -38,7 +38,68 @@ export interface PremisesRecord {
   done_by_org_name: string | null;
   recorded_by_name: string | null;
   files: PremisesFile[];
+  /** The contractor's bill in Money › Costs, if linked (spec §15). */
+  cost_id: string | null;
+  cost: LinkedCost | null;
+  /** The engineer's advisories — each can become a To Do or be ticked off. */
+  advisories: Advisory[];
 }
+
+export interface LinkedCost {
+  id: string;
+  supplier_name: string | null;
+  invoice_number: string | null;
+  cost_date: string | null;
+  amount_net: number | null;
+  amount_gross: number | null;
+}
+
+export interface Advisory {
+  id: string;
+  text: string;
+  done_at: string | null;
+  task_id: string | null;
+  task_status: 'open' | 'done' | 'cancelled' | null;
+  task_owner: string | null;
+}
+
+/** An advisory is done when ticked off, or when its To Do was. */
+export function advisoryDone(a: Advisory): boolean {
+  return !!a.done_at || a.task_status === 'done';
+}
+
+/** "£186.00" */
+export function fmtMoney(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return '—';
+  return n.toLocaleString('en-GB', { style: 'currency', currency: 'GBP' });
+}
+
+// ── The documents library ───────────────────────────────────────────────────
+
+export interface LibraryFile extends PremisesFile { created_at: string }
+export interface LibraryDocument {
+  id: string;
+  folder_id: string;
+  title: string;
+  /** Its own setting (null = the folder's) and what it comes to. */
+  visibility: Visibility | null;
+  effective_visibility: Visibility;
+  place_id: string | null;
+  place_name: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Newest first — the first is the current version. */
+  files: LibraryFile[];
+}
+export interface LibraryFolder {
+  id: string;
+  name: string;
+  visibility: Visibility;
+  sort_order: number;
+  documents: LibraryDocument[];
+}
+export interface FolderRow { id: string; name: string; visibility: Visibility; sort_order: number; retired_at: string | null }
 
 export interface PremisesCheck {
   id: string;
@@ -85,6 +146,8 @@ export interface PremisesCheck {
   usage?: UsageInterval[];
   /** The call point the next test should try (check page). */
   next_point?: string | null;
+  /** What it has cost, by year, from the linked bills (check page). */
+  cost_by_year?: { year: number; net: number; bills: number }[];
 }
 
 export interface UsageInterval { from: string; to: string; days: number; used: number; per_week: number }
