@@ -16,6 +16,11 @@
  * number" brings in one that neither caught — it waits here, never recorded on its
  * own (services/wise-api-incoming.ts). The panel shows for anyone the list loads for
  * (admin + managers), even with nothing waiting, so that box is always there.
+ *
+ * "Split across jobs": one transfer paying several jobs (services/incoming-split.ts).
+ * Lines must add up to the penny; each records like Record, or LINKS to a payment
+ * someone already recorded by hand (the 409 names it per line). Once part of a
+ * transfer is split, only the split can finish it.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -39,6 +44,21 @@ interface ExistingPayment {
   hirehop_deposit_id: number | null;
   recorded_by_name: string | null;
 }
+
+/** One line of a transfer split across jobs (incoming_bank_payment_splits). */
+interface SplitDone {
+  id: string;
+  job_id: string | null;
+  hh_job_number: number | null;
+  payment_type: 'deposit' | 'balance' | 'excess';
+  amount: number | string;
+  status: 'recording' | 'recorded' | 'linked' | 'failed';
+  hh_push_error: string | null;
+  error: string | null;
+}
+
+/** Statuses that count towards the transfer — 'failed' never does. */
+const SPLIT_COUNTING = ['recording', 'recorded', 'linked'];
 
 interface IncomingRow {
   id: string;
@@ -68,11 +88,16 @@ interface IncomingRow {
   xero_invoice_number: string | null;
   xero_payment_id: string | null;
   xero_invoices: Array<{ invoice_id: string; invoice_number: string; contact_name: string | null; status: string; amount_due: number }> | null;
+  splits: SplitDone[] | null;
 }
 
 const money = (v: string | number | null | undefined) => `£${(parseFloat(String(v ?? 0)) || 0).toFixed(2)}`;
 const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 const via = (source: IncomingRow['source']) => (source === 'wise_api' ? 'via Wise API' : 'via email');
+/** Whole pence — 33.33 * 3 is not 99.99 in floating point. */
+const toPence = (v: string | number | null | undefined) => Math.round((parseFloat(String(v ?? 0)) || 0) * 100);
+const fromPence = (p: number) => `£${(p / 100).toFixed(2)}`;
+const kindLabel = (t: string) => (t === 'excess' ? 'excess' : 'hire');
 
 export default function IncomingPaymentsPanel() {
   const [rows, setRows] = useState<IncomingRow[]>([]);
@@ -158,7 +183,20 @@ export default function IncomingPaymentsPanel() {
                     <td className="py-1 pr-2 text-right font-medium whitespace-nowrap">{money(r.amount)}</td>
                     <td className="py-1 pr-2 text-gray-500 truncate max-w-[16rem]" title={r.reference || ''}>{r.reference || ''}</td>
                     <td className="py-1 pr-2">
-                      {r.status === 'recorded' && r.matched_job_id ? (
+                      {r.status === 'recorded' && r.match_method === 'split' ? (
+                        <span className="text-gray-700">
+                          split:{' '}
+                          {(r.splits || []).filter(sp => SPLIT_COUNTING.includes(sp.status)).map((sp, i) => (
+                            <span key={sp.id}>
+                              {i > 0 && ', '}
+                              {sp.job_id
+                                ? <Link to={`/jobs/${sp.job_id}`} className="text-ooosh-600 hover:underline">#{sp.hh_job_number}</Link>
+                                : `#${sp.hh_job_number}`}{' '}
+                              {kindLabel(sp.payment_type)} {money(sp.amount)}{sp.status === 'linked' ? ' (linked)' : ''}
+                            </span>
+                          ))}
+                        </span>
+                      ) : r.status === 'recorded' && r.matched_job_id ? (
                         <Link to={`/jobs/${r.matched_job_id}`} className="text-ooosh-600 hover:underline">
                           #{r.matched_hh_job_number} {r.payment_type === 'excess' ? 'excess' : 'hire'}{r.match_method === 'linked_existing' ? ' (already recorded, linked)' : ''}
                         </Link>
@@ -255,6 +293,9 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
   const [notice, setNotice] = useState('');
   const candidates = Array.isArray(row.candidates) ? row.candidates : [];
   const unparsed = row.match_method === 'unparsed';
+  // Once part of it is split, only the split can finish it (the server refuses the rest).
+  const splitStarted = (row.splits || []).some(sp => SPLIT_COUNTING.includes(sp.status));
+  const [splitOpen, setSplitOpen] = useState(false);
 
   const record = async (allowDuplicate = false) => {
     const n = parseInt(hhNumber, 10);
@@ -375,7 +416,7 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
         </div>
       )}
 
-      {!unparsed && (
+      {!unparsed && !splitStarted && !splitOpen && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <input
             type="text"
@@ -413,6 +454,17 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
                 : 'Xero-only invoice(s), not a HireHop job'}
             >
               Record in Xero against {xeroLabel} ({money(xeroDue)} due)
+            </button>
+          )}
+          {row.currency === 'GBP' && !splitOpen && (
+            <button
+              type="button"
+              onClick={() => { setSplitOpen(true); setExisting(null); setError(''); }}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm text-ooosh-700 hover:text-ooosh-900 underline disabled:opacity-50"
+              title="One transfer paying for several jobs"
+            >
+              Split across jobs
             </button>
           )}
           <button
@@ -464,8 +516,189 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
           </div>
         </div>
       )}
+      {!unparsed && (splitOpen || splitStarted) && (
+        <SplitEditor row={row} onDone={onDone} onClose={splitStarted ? undefined : () => setSplitOpen(false)} />
+      )}
       {error && <div className="mt-1 text-xs text-red-600">{error}</div>}
       {notice && <div className="mt-1 text-xs text-amber-700">{notice}</div>}
+    </div>
+  );
+}
+
+interface DraftLine {
+  key: number;
+  hh: string;
+  type: 'deposit' | 'balance' | 'excess';
+  amount: string;
+  /** Set once the server said this money looks already on the job. */
+  conflict?: { message: string; payment: ExistingPayment };
+  decision?: 'link' | 'record_anyway';
+}
+
+let draftKey = 0;
+const blankLine = (): DraftLine => ({ key: ++draftKey, hh: '', type: 'deposit', amount: '' });
+
+/**
+ * Split one transfer across several jobs. Lines already done (an earlier, part-finished
+ * split) are shown read-only; the new lines must make up exactly what is left.
+ */
+function SplitEditor({ row, onDone, onClose }: { row: IncomingRow; onDone: () => void; onClose?: () => void }) {
+  const doneLines = row.splits || [];
+  const totalP = toPence(row.amount);
+  const doneP = doneLines.filter(sp => SPLIT_COUNTING.includes(sp.status)).reduce((s, sp) => s + toPence(sp.amount), 0);
+  const [lines, setLines] = useState<DraftLine[]>(() => (doneP > 0 ? [blankLine()] : [blankLine(), blankLine()]));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const newP = lines.reduce((s, l) => s + toPence(l.amount), 0);
+  const leftP = totalP - doneP - newP;
+  const badAmount = lines.some(l => l.amount.trim() !== '' && !/^\d+(\.\d{1,2})?$/.test(l.amount.trim()));
+  const ready = !busy && !badAmount && leftP === 0 && lines.length > 0
+    && lines.every(l => parseInt(l.hh, 10) > 0 && toPence(l.amount) > 0);
+
+  const update = (key: number, patch: Partial<DraftLine>) =>
+    setLines(ls => ls.map(l => (l.key === key ? { ...l, ...patch } : l)));
+  // Changing a line's job or amount means its "already recorded" answer no longer applies.
+  const edit = (key: number, patch: Partial<DraftLine>) => update(key, { ...patch, conflict: undefined, decision: undefined });
+
+  const submit = async () => {
+    setBusy(true); setError('');
+    try {
+      const r = await api.post<{ data: { complete: boolean } }>(`/money/incoming-payments/${row.id}/split`, {
+        lines: lines.map(l => ({
+          hh_job_number: parseInt(l.hh, 10),
+          payment_type: l.type,
+          amount: toPence(l.amount) / 100,
+          ...(l.decision === 'link' && l.conflict ? { decision: 'link', link_payment_id: l.conflict.payment.id } : {}),
+          ...(l.decision === 'record_anyway' ? { decision: 'record_anyway' } : {}),
+        })),
+      });
+      if (!r.data.complete) setError('Saved, but the split is not finished yet.');
+      onDone();
+    } catch (e: unknown) {
+      const err = e as { status?: number; body?: { conflicts?: Array<{ index: number; message: string; existing: ExistingPayment }>; lines?: Array<{ index: number; status: string }> } };
+      const msg = e instanceof Error ? e.message : 'Failed to split';
+      if (err.status === 409 && err.body?.conflicts?.length) {
+        const byIndex = new Map(err.body.conflicts.map(c => [c.index, c]));
+        setLines(ls => ls.map((l, i) => {
+          const c = byIndex.get(i);
+          return c ? { ...l, conflict: { message: c.message, payment: c.existing }, decision: 'link' } : l;
+        }));
+        setError('Some of this money looks already recorded. Choose for each marked line, then press Record split again.');
+      } else if (err.body?.lines) {
+        // Part-done: drop the lines that were recorded (they now show above as done).
+        const doneIdx = new Set(err.body.lines.filter(l => l.status === 'recorded' || l.status === 'linked').map(l => l.index));
+        setLines(ls => ls.filter((_, i) => !doneIdx.has(i)));
+        setError(msg);
+        onDone();
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-2 p-3 rounded border border-gray-200 bg-gray-50 text-sm">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="font-medium text-gray-900">Split {money(row.amount)} across jobs</span>
+        {onClose && <button type="button" onClick={onClose} className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>}
+      </div>
+
+      {doneLines.length > 0 && (
+        <ul className="mt-2 space-y-0.5 text-xs">
+          {doneLines.map(sp => (
+            <li key={sp.id} className={sp.status === 'failed' ? 'text-red-700' : 'text-gray-700'}>
+              {sp.status === 'failed' ? '✗' : sp.status === 'recording' ? '…' : '✓'} #{sp.hh_job_number} {kindLabel(sp.payment_type)} {money(sp.amount)}
+              {' '}— {sp.status === 'linked' ? 'already recorded, linked' : sp.status === 'recording' ? 'being recorded' : sp.status}
+              {sp.status === 'failed' && sp.error ? `: ${sp.error}` : ''}
+              {sp.hh_push_error && <span className="text-amber-700"> (HireHop push failed: {sp.hh_push_error})</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="mt-2 space-y-2">
+        {lines.map(l => (
+          <div key={l.key}>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                inputMode="numeric"
+                value={l.hh}
+                onChange={e => edit(l.key, { hh: e.target.value.replace(/\D/g, '') })}
+                placeholder="HireHop job no."
+                aria-label="HireHop job number"
+                className="w-32 px-2 py-1 text-sm border border-gray-300 rounded"
+              />
+              <select
+                value={l.type}
+                onChange={e => update(l.key, { type: e.target.value as DraftLine['type'] })}
+                aria-label="Hire or excess"
+                className="px-2 py-1 text-sm border border-gray-300 rounded"
+              >
+                <option value="deposit">Hire payment (deposit)</option>
+                <option value="balance">Hire payment (balance)</option>
+                <option value="excess">Insurance excess</option>
+              </select>
+              <span className="text-gray-500">£</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={l.amount}
+                onChange={e => edit(l.key, { amount: e.target.value.replace(/[^\d.]/g, '') })}
+                placeholder="0.00"
+                aria-label="Amount"
+                className="w-28 px-2 py-1 text-sm border border-gray-300 rounded"
+              />
+              {lines.length > 1 && (
+                <button type="button" onClick={() => setLines(ls => ls.filter(x => x.key !== l.key))} className="text-xs text-gray-500 hover:text-red-600">
+                  Remove
+                </button>
+              )}
+            </div>
+            {l.conflict && (
+              <div className="mt-1 ml-1 p-2 rounded border border-amber-300 bg-amber-50 text-xs text-amber-900">
+                <div>{l.conflict.message}.</div>
+                <label className="mr-3 inline-flex items-center gap-1">
+                  <input type="radio" checked={l.decision === 'link'} onChange={() => update(l.key, { decision: 'link' })} />
+                  It's that payment — link to it (nothing recorded again)
+                </label>
+                <label className="inline-flex items-center gap-1">
+                  <input type="radio" checked={l.decision === 'record_anyway'} onChange={() => update(l.key, { decision: 'record_anyway' })} />
+                  Record anyway (a second payment)
+                </label>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-3">
+        {lines.length + doneLines.filter(sp => SPLIT_COUNTING.includes(sp.status)).length < 10 && (
+          <button type="button" onClick={() => setLines(ls => [...ls, blankLine()])} className="text-xs text-ooosh-600 hover:text-ooosh-700 underline">
+            + Add a line
+          </button>
+        )}
+        <span className={`text-xs ${leftP === 0 ? 'text-green-700' : 'text-amber-700'}`}>
+          {leftP === 0 ? 'Adds up' : leftP > 0 ? `${fromPence(leftP)} still to split` : `${fromPence(-leftP)} too much`}
+          {doneP > 0 ? ` · ${fromPence(doneP)} already done` : ''}
+        </span>
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={!ready}
+          className="ml-auto px-3 py-1.5 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded disabled:opacity-50"
+          title={badAmount ? 'Amounts are pounds and pence, like 787.88' : ''}
+        >
+          {busy ? 'Recording…' : 'Record split'}
+        </button>
+      </div>
+      <div className="mt-1 text-xs text-gray-500">
+        Each line is recorded like Record: a HireHop payment on the Wise bank and the client's email, per job.
+      </div>
+      {error && <div className="mt-1 text-xs text-red-600">{error}</div>}
     </div>
   );
 }

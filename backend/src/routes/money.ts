@@ -50,8 +50,9 @@ import { getFrontendUrl } from '../config/app-urls';
 import { getPaymentPortalLink } from '../services/payment-portal-link';
 import { recordPayment } from '../services/record-payment';
 import { newPaymentMethodAllowed, ADMIN_ONLY_METHOD_MESSAGE } from '../services/payment-methods';
-import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment, rematchIncomingPayment, linkIncomingToExistingPayment } from '../services/wise-incoming';
+import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment, rematchIncomingPayment, linkIncomingToExistingPayment, splitStartedMessage } from '../services/wise-incoming';
 import { addWiseTransferByNumber } from '../services/wise-api-incoming';
+import { splitIncomingPayment } from '../services/incoming-split';
 import { indexJobInvoices } from '../services/hh-invoice-index';
 import { ukToday } from '../services/uk-date';
 import { fireArrivalHook } from '../services/close-out-arrival';
@@ -1251,6 +1252,11 @@ router.get('/incoming-payments', authorize('admin', 'manager'), async (_req: Aut
               i.matched_job_id, i.payment_type, i.hh_deposit_id, i.hh_push_error, i.resolved_at,
               i.xero_invoice_id, i.xero_invoice_number, i.xero_payment_id, i.xero_invoices,
               j.hh_job_number AS matched_hh_job_number, j.job_name AS matched_job_name,
+              (SELECT COALESCE(json_agg(json_build_object(
+                        'id', s.id, 'job_id', s.job_id, 'hh_job_number', s.hh_job_number, 'payment_type', s.payment_type,
+                        'amount', s.amount, 'status', s.status, 'hh_push_error', s.hh_push_error, 'error', s.error)
+                        ORDER BY s.created_at), '[]'::json)
+                 FROM incoming_bank_payment_splits s WHERE s.incoming_id = i.id) AS splits,
               COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS resolved_by_name
          FROM incoming_bank_payments i
          LEFT JOIN jobs j ON j.id = i.matched_job_id
@@ -1405,10 +1411,44 @@ router.post('/incoming-payments/add-from-wise', authorize('admin', 'manager'), v
   }
 });
 
+// One transfer split across several jobs (services/incoming-split.ts). Every line is
+// checked before anything is written; 409 + `conflicts` when a line's money looks
+// already recorded on its job (the panel offers link / record anyway per line).
+const incomingSplitSchema = z.object({
+  lines: z.array(z.object({
+    hh_job_number: z.number().int().positive(),
+    payment_type: z.enum(['deposit', 'balance', 'excess']),
+    amount: z.number().positive(),
+    decision: z.enum(['record', 'record_anyway', 'link']).optional(),
+    link_payment_id: z.string().guid().optional(),
+  })).min(1).max(10),
+});
+
+router.post('/incoming-payments/:id/split', authorize('admin', 'manager'), validate(incomingSplitSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await splitIncomingPayment(req.params.id as string, req.body.lines, {
+      id: req.user!.id, label: req.user!.email || req.user!.id,
+    });
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error, conflicts: result.conflicts, lines: result.lines });
+      return;
+    }
+    res.json({ data: { complete: result.complete, lines: result.lines } });
+  } catch (err) {
+    console.error('[money] incoming-payments split failed:', err);
+    res.status(500).json({ error: 'Failed to split the payment' });
+  }
+});
+
 const incomingIgnoreSchema = z.object({ note: z.string().min(1).max(500) });
 
 router.post('/incoming-payments/:id/ignore', authorize('admin', 'manager'), validate(incomingIgnoreSchema), async (req: AuthRequest, res: Response) => {
   try {
+    const splitMsg = await splitStartedMessage(req.params.id as string);
+    if (splitMsg) {
+      res.status(400).json({ error: splitMsg });
+      return;
+    }
     await ignoreIncomingPayment(req.params.id as string, req.user!.id, req.body.note);
     res.json({ data: { ok: true } });
   } catch (err) {
