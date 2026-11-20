@@ -892,7 +892,7 @@ skipped that email too** — two misses in three days.
 
 **20 Nov 2026 — "Split across jobs".** One transfer paying several jobs (O I B RE's "MUTATIONS X 3") could only
 be recorded onto ONE job. `services/incoming-split.ts` (`POST /money/incoming-payments/:id/split`, admin /
-manager; pure rules `incoming-split-rules.ts`; lines in `incoming_bank_payment_splits`, migration 360): a person
+manager; pure rules `incoming-split-rules.ts`; lines in `incoming_bank_payment_splits`, migration 361): a person
 enters lines (job number, hire deposit / balance / excess, amount) that add up to the transfer **to the penny**.
 **Every line is checked before anything is written** — totals, every job exists, every link is a real free
 payment of that amount on that job, and money already on the job (`findAlreadyRecordedPayment()` per line);

@@ -132,6 +132,12 @@ const SELECT_TASKS = `
                        ELSE '/operations/premises/checks/' || pc.id END
              FROM premises_checks pc WHERE pc.id = t.source_id
          )
+         -- An advisory made into a To Do → the check its record belongs to.
+         WHEN t.source_type = 'premises_advisory' THEN (
+           SELECT '/operations/premises/checks/' || pr.check_id
+             FROM premises_advisories pa JOIN premises_records pr ON pr.id = pa.record_id
+            WHERE pa.id = t.source_id
+         )
          WHEN t.source_type = 'premises_fix' THEN (
            SELECT '/operations/premises/checks/' || pr.check_id
              FROM premises_records pr WHERE pr.id = t.source_id

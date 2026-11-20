@@ -399,7 +399,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '357_premises_readings_points_history.sql',
         '358_hire_agreement_dates.sql',
         '359_wise_api_incoming_setting.sql',
-        '360_incoming_payment_splits.sql',
+        '360_premises_library_advisories_costs.sql',
+        '361_incoming_payment_splits.sql',
       ];
 
       for (const migration of migrations) {

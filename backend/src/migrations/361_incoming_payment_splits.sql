@@ -1,4 +1,4 @@
--- 360: one Wise transfer split across several jobs (services/incoming-split.ts).
+-- 361: one Wise transfer split across several jobs (services/incoming-split.ts).
 -- Born from #2501093374: £2,363.64 from O I B RE, reference "MUTATIONS X 3" — one
 -- payment for three jobs, which the queue could only record onto ONE job.
 --

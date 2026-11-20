@@ -694,6 +694,7 @@ const SOURCE_LABEL: Record<string, string> = {
   // Premises & compliance: a check's reminder, and "get it fixed" after a failed one.
   premises_check: 'Premises',
   premises_fix: 'Premises',
+  premises_advisory: 'Premises',
 };
 
 const SERIES = 'staff_task_series';
