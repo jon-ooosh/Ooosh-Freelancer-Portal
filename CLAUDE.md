@@ -612,7 +612,7 @@ existing definition:
 | A social post, its owner's To Do, the content library, hashtag sets | `services/marketing-content.ts` — `syncPostReminder()` keeps ONE open To Do per post (call it after any write); words and colours `frontend/src/components/marketing/contentCopy.ts`. OP never posts to Meta |
 | Jon's review email — who, when, why not, the "don't send" tick, opt-outs | `services/review-requests.ts` — one `review_requests` row per job, written before the send; `reviewDecision()` is every rule |
 | Recording a payment OP takes itself (staff click, Wise matcher) | `services/record-payment.ts` `recordPayment()` — OP row, HH deposit, excess update, Booked push, client email, hooks. The route is a thin wrapper; never re-implement the chain |
-| A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated), matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee. Record refuses (409) when the same money is already on the job by hand — "Link to that payment" or "Record anyway" |
+| A bank transfer that arrived in Wise — which job, hire or excess? | `services/wise-api-incoming.ts` (Wise API every 5 min, the main source — money in only when the activity is positive AND the transfer has no source account, `wise-api-incoming-rules.ts`; off until `wise_api_incoming_enabled`) and `services/wise-incoming.ts` — detector in the Gmail loop (DKIM-gated, the backup), both into `storeAndMatchIncoming()`; matcher (job number → HH invoice → payer name as evidence), `incoming_bank_payments` queue on the Money overview. Amount = what the client SENT; Xero owns the fee. Record refuses (409) when the same money is already on the job by hand — "Link to that payment" or "Record anyway" |
 | Which job does a HireHop invoice number (`OT-INV-12345`) belong to? | `services/hh-invoice-index.ts` (`hh_invoice_index`, mig 326) — filled from the Money tab summary's own billing read, HireHop's `invoice.*` webhooks and the matcher; never a sweep across jobs to answer it |
 
 Frontend display helpers with the same status: `lib/roles.ts`, `lib/driverStatus.ts`,
@@ -744,7 +744,7 @@ pre-auth expiry 09:40 · staff records 09:45 (repeating to-do repair, to-dos, li
 HireHop sync every 30 min · sanity scanners every 15 min · goodwill read-back hourly :50 (stored lines, no HireHop calls) + billing 07:40 (`goodwill-check.ts`) · notification escalation
 every 15 min · shop balance check every 15 min · shop drain every 2 min · shop stock mirror every 15 min ·
 shop auto-close + email Mon 08:55 · shop contact check 06:40 · DVSA MOT refresh daily 07:30 ·
-Gmail ingestion every 10 min · card-reader receipt sweep every 5 min (a reader payment unanswered for 15 min gets its email) · bell sweep every 5 min (retires bells whose thing is done, `bell-rules.ts`; also runs before each escalation).
+Gmail ingestion every 10 min · Wise API incoming payments every 5 min (off until `wise_api_incoming_enabled`) · card-reader receipt sweep every 5 min (a reader payment unanswered for 15 min gets its email) · bell sweep every 5 min (retires bells whose thing is done, `bell-rules.ts`; also runs before each escalation).
 
 Adding one? Gate it on the lost/cancelled + `keep_after_close` rule and the
 `is_internal` rule (see `jobs-pipeline-dashboard.md`).

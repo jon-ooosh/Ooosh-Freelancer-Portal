@@ -10,6 +10,12 @@
  * If the same money is already on the job (someone recorded it from the Money tab),
  * Record is refused with a 409 and the row offers "Link to that payment" (nothing is
  * recorded again) or "Record anyway" for a genuine second payment of the same amount.
+ *
+ * Payments come from the Wise API (every 5 minutes) and Wise's "Money received"
+ * emails (the backup); `source` says which saw it first. "Add a Wise transfer by
+ * number" brings in one that neither caught — it waits here, never recorded on its
+ * own (services/wise-api-incoming.ts). The panel shows for anyone the list loads for
+ * (admin + managers), even with nothing waiting, so that box is always there.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -37,6 +43,8 @@ interface ExistingPayment {
 interface IncomingRow {
   id: string;
   status: 'unmatched' | 'recorded' | 'ignored';
+  /** Which saw it first: the Wise API poll or Wise's "Money received" email. */
+  source: 'wise_api' | 'wise_email' | null;
   received_at: string;
   payer_name: string | null;
   amount: string;
@@ -64,24 +72,39 @@ interface IncomingRow {
 
 const money = (v: string | number | null | undefined) => `£${(parseFloat(String(v ?? 0)) || 0).toFixed(2)}`;
 const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const via = (source: IncomingRow['source']) => (source === 'wise_api' ? 'via Wise API' : 'via email');
 
 export default function IncomingPaymentsPanel() {
   const [rows, setRows] = useState<IncomingRow[]>([]);
   const [loading, setLoading] = useState(true);
+  /** The list loaded — admin / manager. Staff get a 403 and see no panel. */
+  const [allowed, setAllowed] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const highlightId = searchParams.get('incoming');
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<IncomingRow[]> => {
     try {
       const r = await api.get<{ data: IncomingRow[] }>('/money/incoming-payments');
-      setRows(r.data || []);
+      const list = r.data || [];
+      setRows(list);
+      setAllowed(true);
+      return list;
     } catch {
       setRows([]);
+      return [];
     } finally {
       setLoading(false);
     }
   }, []);
+
+  /** After "Add a Wise transfer": reload, then point at its row (opening the history if it's settled). */
+  const showAdded = useCallback(async (id: string) => {
+    const list = await load();
+    const row = list.find(r => r.id === id);
+    if (row && row.status !== 'unmatched') setShowHistory(true);
+    setSearchParams(prev => { const next = new URLSearchParams(prev); next.set('incoming', id); return next; }, { replace: true });
+  }, [load, setSearchParams]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -94,8 +117,7 @@ export default function IncomingPaymentsPanel() {
   const unmatched = rows.filter(r => r.status === 'unmatched');
   const history = rows.filter(r => r.status !== 'unmatched');
 
-  if (loading) return null;
-  if (unmatched.length === 0 && history.length === 0) return null;
+  if (loading || !allowed) return null;
 
   return (
     <div className="mb-6 bg-white rounded-xl shadow-sm border border-gray-200">
@@ -103,7 +125,7 @@ export default function IncomingPaymentsPanel() {
         <div>
           <h2 className="text-base font-semibold text-gray-900">Incoming bank payments</h2>
           <p className="text-xs text-gray-500">
-            From Wise's "Money received" emails. Matched ones are recorded automatically; these need a decision.
+            Money into Wise, from the Wise API and Wise's emails. Matched ones are recorded automatically; these need a decision.
           </p>
         </div>
         <span className={`text-sm font-semibold px-2 py-0.5 rounded-full ${unmatched.length ? 'bg-amber-100 text-amber-800' : 'bg-green-100 text-green-800'}`}>
@@ -114,10 +136,12 @@ export default function IncomingPaymentsPanel() {
       {unmatched.length > 0 && (
         <div className="divide-y divide-gray-100">
           {unmatched.map(row => (
-            <UnmatchedRow key={row.id} row={row} highlighted={row.id === highlightId} onDone={load} />
+            <UnmatchedRow key={row.id} row={row} highlighted={row.id === highlightId} onDone={() => { void load(); }} />
           ))}
         </div>
       )}
+
+      <AddFromWise onAdded={showAdded} />
 
       {history.length > 0 && (
         <div className="px-4 py-2 border-t border-gray-100">
@@ -129,7 +153,7 @@ export default function IncomingPaymentsPanel() {
               <tbody>
                 {history.map(r => (
                   <tr key={r.id} id={`incoming-${r.id}`} className={`border-t border-gray-50 ${r.id === highlightId ? 'bg-amber-50' : ''}`}>
-                    <td className="py-1 pr-2 text-gray-500 whitespace-nowrap">{when(r.received_at)}</td>
+                    <td className="py-1 pr-2 text-gray-500 whitespace-nowrap" title={via(r.source)}>{when(r.received_at)}</td>
                     <td className="py-1 pr-2">{r.payer_name || '-'}</td>
                     <td className="py-1 pr-2 text-right font-medium whitespace-nowrap">{money(r.amount)}</td>
                     <td className="py-1 pr-2 text-gray-500 truncate max-w-[16rem]" title={r.reference || ''}>{r.reference || ''}</td>
@@ -151,6 +175,70 @@ export default function IncomingPaymentsPanel() {
               </tbody>
             </table>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Money Wise shows but OP never saw (Wise skipped its email, or the poll was off):
+ * type Wise's transfer number and it lands in the queue above for matching as usual.
+ */
+function AddFromWise({ onAdded }: { onAdded: (id: string) => void | Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [number, setNumber] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const add = async () => {
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const r = await api.post<{ data: { id: string; already: boolean } }>('/money/incoming-payments/add-from-wise', { transfer_number: number.trim() });
+      setNotice(r.data.already ? 'Already in OP — highlighted.' : 'Added — match it above.');
+      setNumber('');
+      await onAdded(r.data.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not add that transfer');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="px-4 py-2 border-t border-gray-100 text-xs">
+      {!open ? (
+        <button type="button" onClick={() => setOpen(true)} className="text-ooosh-600 hover:text-ooosh-700 underline">
+          Money in Wise that isn't here? Add a Wise transfer by number
+        </button>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor="add-wise-transfer" className="text-gray-600">Wise transfer number</label>
+          <input
+            id="add-wise-transfer"
+            type="text"
+            inputMode="numeric"
+            value={number}
+            onChange={e => setNumber(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && number.trim() && !busy) void add(); }}
+            placeholder="2501093374"
+            className="w-36 rounded border border-gray-300 px-2 py-1 font-mono text-xs"
+          />
+          <button
+            type="button"
+            onClick={() => void add()}
+            disabled={busy || !number.trim()}
+            className="rounded bg-ooosh-600 px-2.5 py-1 font-medium text-white hover:bg-ooosh-700 disabled:opacity-50"
+          >
+            {busy ? 'Checking Wise…' : 'Add'}
+          </button>
+          <button type="button" onClick={() => { setOpen(false); setError(''); setNotice(''); }} className="text-gray-500 hover:text-gray-700">
+            Cancel
+          </button>
+          <span className="w-full text-gray-500">On the payment in Wise, under "Transfer number". It waits here to be matched — nothing is recorded until you press Record.</span>
+          {error && <span className="w-full text-red-600">{error}</span>}
+          {notice && <span className="w-full text-green-700">{notice}</span>}
         </div>
       )}
     </div>
@@ -259,7 +347,7 @@ function UnmatchedRow({ row, highlighted, onDone }: { row: IncomingRow; highligh
         <div className="min-w-0">
           <span className="text-sm font-semibold text-gray-900">{unparsed ? 'Unreadable Wise email' : money(row.amount)}</span>
           <span className="text-sm text-gray-700"> from {row.payer_name || 'unknown'}</span>
-          <span className="text-xs text-gray-500"> · {when(row.received_at)}{row.transfer_number ? ` · Wise #${row.transfer_number}` : ''}</span>
+          <span className="text-xs text-gray-500"> · {when(row.received_at)}{row.transfer_number ? ` · Wise #${row.transfer_number}` : ''} · {via(row.source)}</span>
           {row.fee && (
             <span className="text-xs text-gray-500"> · fee {money(row.fee)}, {money(row.amount_credited || row.amount)} landed</span>
           )}

@@ -171,3 +171,75 @@ export async function getWiseBalances(): Promise<WiseBalance[]> {
     value: Number(r.amount?.value) || 0,
   }));
 }
+
+/** The business profile id: WISE_PROFILE_ID, else discovered from the token's profiles. */
+export async function getWiseBusinessProfileId(): Promise<number> {
+  if (process.env.WISE_PROFILE_ID) return Number(process.env.WISE_PROFILE_ID);
+  const business = (await getWiseProfiles()).find((p) => String(p.type).toLowerCase() === 'business');
+  if (!business) throw new WiseApiError(404, 'This Wise token has no business profile.');
+  return business.id;
+}
+
+/** One row of the profile's activity feed — every movement on the account, in or out. */
+export interface WiseActivity {
+  id: string;
+  type: string;
+  resource?: { type?: string; id?: string } | null;
+  /** Counterparty name, wrapped in HTML (`<strong>O I B RE LTD SW</strong>`). */
+  title?: string | null;
+  description?: string | null;
+  /** `<positive>+ 2,363.64 GBP</positive>` for money in; `810 GBP` for money out. */
+  primaryAmount?: string | null;
+  status?: string | null;
+  createdOn?: string | null;
+}
+
+/**
+ * The profile's activity feed between two times, every page (`cursor` → `nextCursor`,
+ * 100 a page). Read-only, allowed on a personal token — unlike balance STATEMENTS,
+ * which need PSD2 extra authentication (tested on the live account, 20 Nov 2026).
+ * Wise doesn't say which order the pages come in, so callers must not assume one.
+ */
+export async function listWiseActivities(profileId: number, since: Date, until: Date, maxPages = 20): Promise<WiseActivity[]> {
+  const out: WiseActivity[] = [];
+  const seen = new Set<string>();
+  let cursor: string | null = null;
+  for (let page = 0; page < maxPages; page++) {
+    const q: Record<string, string | number> = { since: since.toISOString(), until: until.toISOString(), size: 100 };
+    if (cursor) q.nextCursor = cursor;
+    const res = await wiseFetch<{ cursor?: string | null; activities?: WiseActivity[] }>(
+      'GET', `/v1/profiles/${profileId}/activities`, { query: q },
+    );
+    let added = 0;
+    for (const a of res?.activities || []) {
+      if (!a?.id || seen.has(a.id)) continue;
+      seen.add(a.id);
+      out.push(a);
+      added++;
+    }
+    cursor = res?.cursor || null;
+    // A page with nothing new means the cursor isn't moving — stop rather than loop.
+    if (!cursor || added === 0) break;
+  }
+  return out;
+}
+
+/** A transfer as `GET /v1/transfers/{id}` returns it (the fields OP reads). */
+export interface WiseTransfer {
+  id: number;
+  /** null on money IN (it didn't come from one of our balances); set on money we sent. */
+  sourceAccount?: number | null;
+  targetAccount?: number | null;
+  reference?: string | null;
+  details?: { reference?: string | null } | null;
+  sourceCurrency?: string | null;
+  sourceValue?: number | null;
+  targetCurrency?: string | null;
+  targetValue?: number | null;
+  created?: string | null;
+}
+
+/** One transfer by Wise's number — incoming ones too (that is where the reference lives). */
+export async function getWiseTransfer(transferId: string | number): Promise<WiseTransfer> {
+  return wiseFetch<WiseTransfer>('GET', `/v1/transfers/${encodeURIComponent(String(transferId))}`);
+}

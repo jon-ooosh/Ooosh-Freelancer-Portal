@@ -51,6 +51,7 @@ import { getPaymentPortalLink } from '../services/payment-portal-link';
 import { recordPayment } from '../services/record-payment';
 import { newPaymentMethodAllowed, ADMIN_ONLY_METHOD_MESSAGE } from '../services/payment-methods';
 import { recordIncomingPaymentOnJob, recordIncomingPaymentInXero, ignoreIncomingPayment, rematchIncomingPayment, linkIncomingToExistingPayment } from '../services/wise-incoming';
+import { addWiseTransferByNumber } from '../services/wise-api-incoming';
 import { indexJobInvoices } from '../services/hh-invoice-index';
 import { ukToday } from '../services/uk-date';
 import { fireArrivalHook } from '../services/close-out-arrival';
@@ -1245,7 +1246,7 @@ router.get('/:jobId/vat-adjustment', async (req: AuthRequest, res: Response) => 
 router.get('/incoming-payments', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
   try {
     const r = await query(
-      `SELECT i.id, i.status, i.received_at, i.payer_name, i.amount, i.currency, i.fee, i.amount_credited,
+      `SELECT i.id, i.status, i.source, i.received_at, i.payer_name, i.amount, i.currency, i.fee, i.amount_credited,
               i.reference, i.transfer_number, i.match_method, i.match_notes, i.candidates,
               i.matched_job_id, i.payment_type, i.hh_deposit_id, i.hh_push_error, i.resolved_at,
               i.xero_invoice_id, i.xero_invoice_number, i.xero_payment_id, i.xero_invoices,
@@ -1382,6 +1383,25 @@ router.post('/incoming-payments/:id/link-existing', authorize('admin', 'manager'
   } catch (err) {
     console.error('[money] incoming-payments link-existing failed:', err);
     res.status(500).json({ error: 'Failed to link the incoming payment' });
+  }
+});
+
+// A transfer Wise shows but OP never saw (Wise skipped its email — #2501093374, Nov 2026):
+// bring it into the queue by Wise's number. Checked like the API poll, never recorded
+// on its own — the person then matches it as usual. services/wise-api-incoming.ts.
+const incomingAddFromWiseSchema = z.object({ transfer_number: z.string().min(1).max(30) });
+
+router.post('/incoming-payments/add-from-wise', authorize('admin', 'manager'), validate(incomingAddFromWiseSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await addWiseTransferByNumber(req.body.transfer_number, req.user!.email || req.user!.id);
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error });
+      return;
+    }
+    res.json({ data: { id: result.id, already: result.already } });
+  } catch (err) {
+    console.error('[money] incoming-payments add-from-wise failed:', err);
+    res.status(500).json({ error: 'Failed to add the Wise transfer' });
   }
 });
 

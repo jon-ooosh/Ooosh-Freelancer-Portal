@@ -229,6 +229,21 @@ export function startScheduler() {
   });
   console.log('Scheduler: card-reader receipt sweep scheduled every 5 minutes');
 
+  // Wise incoming payments from the Wise API (services/wise-api-incoming.ts): the last
+  // 48 hours of the account's activity, every transfer IN OP has no row for → the same
+  // matcher as the "Money received" email. Does nothing until
+  // system_settings.wise_api_incoming_enabled is 'true' (migration 359) or without a token.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const { pollWiseIncoming } = await import('../services/wise-api-incoming');
+      const r = await pollWiseIncoming();
+      if (r && (r.stored || r.skipped)) console.log(`Scheduler: Wise API — ${r.stored} new payment(s) stored, ${r.skipped} skipped`);
+    } catch (err) {
+      console.error('Scheduler: Wise API poll failed:', err instanceof Error ? err.message : err);
+    }
+  });
+  console.log('Scheduler: Wise API incoming poll scheduled every 5 minutes (off until its setting is on)');
+
   // Goodwill read-back (docs/GOODWILL-CREDIT-SPEC.md §6, §15). Hourly at :50, after the line sync,
   // from the lines that sync has already stored — no HireHop calls. Credit notes: the Money tab's
   // own billing read, plus one billing read a day per invoice credit still waiting (07:40).

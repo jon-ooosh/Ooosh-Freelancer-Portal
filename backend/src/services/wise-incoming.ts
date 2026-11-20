@@ -2,11 +2,17 @@
  * Wise incoming payments — bank transfers noticed from Wise's "Money received from …"
  * emails and matched to jobs.
  *
- * Why email, not the Wise API: a personal API token on a Wise Business account cannot
- * read balance statements or receive incoming-payment webhooks (UK accounts, Oct 2026),
- * but Wise emails jon@ for every credit. Those emails are already flowing through the
- * Gmail ingestion loop (jon@ is a manager mailbox), so this is a detector in that loop
- * plus a matcher, not a new integration.
+ * Why email first: a personal API token on a Wise Business account cannot read balance
+ * statements or receive incoming-payment webhooks (UK accounts, Oct 2026), but Wise
+ * emails jon@ for every credit. Those emails are already flowing through the Gmail
+ * ingestion loop (jon@ is a manager mailbox), so this is a detector in that loop plus a
+ * matcher, not a new integration.
+ *
+ * Nov 2026: Wise skipped the email for transfer #2501093374 and the payment was missed,
+ * so the Wise API is now the MAIN source (services/wise-api-incoming.ts): the same token
+ * CAN read the activity feed and each transfer, which is all this needs. Both feed
+ * `storeAndMatchIncoming()` below; this email detector stays as the backup, and Wise's
+ * transfer number keeps one row per payment whichever sees it first.
  *
  * Trust: an email is not money. We only accept mail from noreply@wise.com whose DKIM
  * signature Gmail reports as passing for wise.com (`Authentication-Results`), and whose
@@ -197,7 +203,7 @@ export function parseWiseMoneyReceived(body: string, subject: string | null): Pa
 
 // ── Matching ───────────────────────────────────────────────────────────────
 
-function normaliseName(s: string | null | undefined): string {
+export function normaliseName(s: string | null | undefined): string {
   return (s || '')
     .toUpperCase()
     .replace(/\b(LTD|LIMITED|LLP|LLC|INC|PLC|T\/A|THE)\b/g, ' ')
@@ -760,7 +766,7 @@ function wisePaymentReference(row: { transfer_number: string | null; reference: 
 // ── Already recorded by hand? ──────────────────────────────────────────────
 
 /** The bank-transfer methods a hand-recorded Wise payment could have been entered as. */
-const BANK_METHODS = ['wise_bacs', 'lloyds_bank', 'bank_transfer'];
+export const BANK_METHODS = ['wise_bacs', 'lloyds_bank', 'bank_transfer'];
 
 export interface ExistingJobPayment {
   id: string;
@@ -895,7 +901,9 @@ export async function recordIncomingPaymentOnJob(opts: {
       amount,
       payment_method: 'wise_bacs',
       payment_reference: wisePaymentReference(row),
-      notes: opts.actorUserId ? 'Recorded from the Wise incoming-payments queue' : 'Recorded automatically from the Wise "Money received" email',
+      notes: opts.actorUserId ? 'Recorded from the Wise incoming-payments queue'
+        : row.source === 'wise_api' ? 'Recorded automatically from the Wise API (payment seen on the account)'
+        : 'Recorded automatically from the Wise "Money received" email',
       push_to_hirehop: true,
     },
     { userId: opts.actorUserId || SYSTEM_SERVICE_USER_ID, isServiceAccount: !opts.actorUserId },
@@ -1114,63 +1122,102 @@ export async function handleWiseEmail(input: WiseEmailInput): Promise<'stored' |
       return 'unparsed';
     }
 
-    const ins = await query(
-      `INSERT INTO incoming_bank_payments
-         (gmail_message_id, mailbox, received_at, payer_name, amount, currency, fee, amount_credited, reference, transfer_number, email_subject)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       ON CONFLICT (gmail_message_id) DO NOTHING RETURNING id`,
-      [input.rfcMessageId, input.mailbox, receivedAt, parsed.payerName, parsed.amount, parsed.currency, parsed.fee,
-       parsed.amountCredited, parsed.reference, parsed.transferNumber, input.subject],
-    );
-    const id: string | undefined = ins.rows[0]?.id;
-    if (!id) return 'duplicate';
-
-    const outcome = await matchIncomingPayment(parsed);
-    const xi = outcome.xeroInvoices || [];
-    await query(
-      `UPDATE incoming_bank_payments
-          SET match_method = $2, match_notes = $3, candidates = $4,
-              xero_invoice_id = $5, xero_invoice_number = $6, xero_invoices = $7
-        WHERE id = $1`,
-      [id, outcome.method, outcome.notes, JSON.stringify(outcome.candidates),
-       xi[0]?.invoice_id ?? null, xi.map(i => i.invoice_number).join(' + ') || null, JSON.stringify(xi)],
-    );
-
-    if (outcome.kind === 'confident_xero' && xi.length > 0) {
-      const rec = await recordIncomingPaymentInXero({
-        incomingId: id, invoices: xi, actorUserId: null, matchMethod: outcome.method, matchNotes: outcome.notes,
-      });
-      if (rec.ok) {
-        console.log(`[wise-incoming] recorded £${parsed.amount} from ${parsed.payerName} in Xero against ${xi.map(i => i.invoice_number).join(' + ')}`);
-        return 'stored';
-      }
-      console.error(`[wise-incoming] Xero auto-record failed for ${id}: ${rec.error}`);
-    }
-
-    if (outcome.kind === 'ignored') {
-      await query(`UPDATE incoming_bank_payments SET status = 'ignored', resolved_at = NOW() WHERE id = $1`, [id]);
-      console.log(`[wise-incoming] ignored £${parsed.amount} from ${parsed.payerName}: ${outcome.notes}`);
-      return 'stored';
-    }
-
-    if (outcome.kind === 'confident' && outcome.job && outcome.paymentType) {
-      const rec = await recordIncomingPaymentOnJob({
-        incomingId: id, jobId: outcome.job.id, paymentType: outcome.paymentType,
-        actorUserId: null, matchMethod: outcome.method, matchNotes: outcome.notes,
-      });
-      if (rec.ok) {
-        console.log(`[wise-incoming] recorded £${parsed.amount} from ${parsed.payerName} as ${outcome.paymentType} on HH#${outcome.job.hh_job_number}`);
-        if (rec.hh_push_error) await sendHhPushFailedAlert(id, rec.hh_push_error);
-        return 'stored';
-      }
-      // Recording failed → fall through to the queue + alert so a human picks it up
-      console.error(`[wise-incoming] auto-record failed for ${id}: ${rec.error}`);
-    }
-
-    await sendUnmatchedIncomingAlert(id);
-    return 'stored';
+    return await storeAndMatchIncoming(parsed, {
+      key: input.rfcMessageId, source: 'wise_email', mailbox: input.mailbox, receivedAt, subject: input.subject,
+    });
   } catch (err) {
     console.error(`[wise-incoming] failed to handle Wise email ${input.rfcMessageId}:`, err);
     return 'rejected';
   }
+}
+
+export interface IncomingSourceMeta {
+  /** Unique key for the row: the email's Message-ID, or `wise-api:<transfer number>`. */
+  key: string;
+  source: 'wise_email' | 'wise_api';
+  mailbox: string | null;
+  receivedAt: Date;
+  subject: string | null;
+  /**
+   * Store and match, but never record and never email: the row waits in the queue
+   * for the person who added it ("Add a Wise transfer by number").
+   */
+  queueOnly?: boolean;
+  /** Put before the matcher's note (e.g. who added it by hand). */
+  notePrefix?: string;
+}
+
+/**
+ * Store one incoming Wise payment, run the matcher, and either record it (confident
+ * job or Xero match), mark it ignored (own transfer), or queue it with ONE alert to
+ * info@. Shared by the "Money received" email and the Wise API poll
+ * (services/wise-api-incoming.ts) — the same rules whichever saw it first.
+ * Returns 'duplicate' when a row for the transfer already exists. Throws on a
+ * database error; callers catch.
+ */
+export async function storeAndMatchIncoming(parsed: ParsedWisePayment, meta: IncomingSourceMeta): Promise<'stored' | 'duplicate'> {
+  // ON CONFLICT with no target: the Message-ID key AND the transfer-number index
+  // (migration 275) — the email and the Wise API seeing the same transfer at the
+  // same moment can only ever make one row.
+  const ins = await query(
+    `INSERT INTO incoming_bank_payments
+       (source, gmail_message_id, mailbox, received_at, payer_name, amount, currency, fee, amount_credited, reference, transfer_number, email_subject)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     ON CONFLICT DO NOTHING RETURNING id`,
+    [meta.source, meta.key, meta.mailbox, meta.receivedAt, parsed.payerName, parsed.amount, parsed.currency, parsed.fee,
+     parsed.amountCredited, parsed.reference, parsed.transferNumber, meta.subject],
+  );
+  const id: string | undefined = ins.rows[0]?.id;
+  if (!id) return 'duplicate';
+
+  const outcome = await matchIncomingPayment(parsed);
+  const xi = outcome.xeroInvoices || [];
+  const confident = outcome.kind === 'confident' || outcome.kind === 'confident_xero';
+  const notes = `${meta.notePrefix ? `${meta.notePrefix}; ` : ''}${outcome.notes}`
+    + (meta.queueOnly && confident ? ' (would match automatically — press Record to confirm)' : '');
+  await query(
+    `UPDATE incoming_bank_payments
+        SET match_method = $2, match_notes = $3, candidates = $4,
+            xero_invoice_id = $5, xero_invoice_number = $6, xero_invoices = $7
+      WHERE id = $1`,
+    [id, outcome.method, notes, JSON.stringify(outcome.candidates),
+     xi[0]?.invoice_id ?? null, xi.map(i => i.invoice_number).join(' + ') || null, JSON.stringify(xi)],
+  );
+
+  // Added by hand: the person is already looking at it — no recording, no alert.
+  if (meta.queueOnly) return 'stored';
+
+  if (outcome.kind === 'confident_xero' && xi.length > 0) {
+    const rec = await recordIncomingPaymentInXero({
+      incomingId: id, invoices: xi, actorUserId: null, matchMethod: outcome.method, matchNotes: outcome.notes,
+    });
+    if (rec.ok) {
+      console.log(`[wise-incoming] recorded £${parsed.amount} from ${parsed.payerName} in Xero against ${xi.map(i => i.invoice_number).join(' + ')}`);
+      return 'stored';
+    }
+    console.error(`[wise-incoming] Xero auto-record failed for ${id}: ${rec.error}`);
+  }
+
+  if (outcome.kind === 'ignored') {
+    await query(`UPDATE incoming_bank_payments SET status = 'ignored', resolved_at = NOW() WHERE id = $1`, [id]);
+    console.log(`[wise-incoming] ignored £${parsed.amount} from ${parsed.payerName}: ${outcome.notes}`);
+    return 'stored';
+  }
+
+  if (outcome.kind === 'confident' && outcome.job && outcome.paymentType) {
+    const rec = await recordIncomingPaymentOnJob({
+      incomingId: id, jobId: outcome.job.id, paymentType: outcome.paymentType,
+      actorUserId: null, matchMethod: outcome.method, matchNotes: outcome.notes,
+    });
+    if (rec.ok) {
+      console.log(`[wise-incoming] recorded £${parsed.amount} from ${parsed.payerName} as ${outcome.paymentType} on HH#${outcome.job.hh_job_number}`);
+      if (rec.hh_push_error) await sendHhPushFailedAlert(id, rec.hh_push_error);
+      return 'stored';
+    }
+    // Recording failed → fall through to the queue + alert so a human picks it up
+    console.error(`[wise-incoming] auto-record failed for ${id}: ${rec.error}`);
+  }
+
+  await sendUnmatchedIncomingAlert(id);
+  return 'stored';
 }
