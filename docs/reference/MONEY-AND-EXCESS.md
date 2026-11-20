@@ -861,6 +861,32 @@ HireHop deposit and Xero payment): `findAlreadyRecordedPayment()` now refuses Re
 the payment, and the panel offers "Link to that payment" (`POST /incoming-payments/:id/link-existing`,
 nothing recorded) or "Record anyway" for a genuine second payment of the same amount.
 
+**20 Nov 2026 — the Wise API becomes the main source.** Transfer #2501093374 (£2,363.64 from O I B RE LTD
+SW, ref "MUTATIONS X 3", 17 Nov — one payment for three Mutations jobs) never reached OP: **Wise sent no
+"Money received" email for it** (checked in every folder of the jonwood@ mailbox; Wise's other emails that
+day arrived, and O I B RE's earlier payments all had one). The email was the only signal, so nothing
+alerted. Two read-only probes on the server with the cash forecast's token showed the API covers it:
+`GET /v1/profiles/{id}/activities` (every movement; money in is a TRANSFER with
+`<positive>+ 2,363.64 GBP</positive>`, money out reads `810 GBP` / "Sent by …") and `GET /v1/transfers/{id}`,
+which answers for incoming transfers too and carries the reference; `sourceAccount` is `null` on money in
+and set on money we sent. Balance statements still need PSD2 extra authentication (403), and creating a
+webhook subscription needs a user token, not a personal one (Wise docs), so OP polls.
+`services/wise-api-incoming.ts` runs every 5 minutes once `system_settings.wise_api_incoming_enabled` is
+`'true'` (migration 359, ships OFF): the last 48 hours of activity → each completed transfer IN with no row
+→ its transfer record → `storeAndMatchIncoming()` in `wise-incoming.ts`, the email path's own back half (one
+matcher, one recording path, one alert). **Money in only when BOTH say so** — the activity is positive AND
+the transfer has no source account — and the two amounts agree (`wise-api-incoming-rules.ts`; Wise's
+transfer `status` reads "outgoing_payment_sent" on money in — the sender's view — so it is never used for
+direction). Rows are `source = 'wise_api'`, keyed `wise-api:<number>`; the insert is `ON CONFLICT DO
+NOTHING` with no target, so the transfer-number index (migration 275) keeps one row whether the email or the
+API sees it first. The email detector stays as the backup. An email row that never got a transfer number is
+adopted (same amount, same payer, within a day) rather than duplicated. **"Add a Wise transfer by number"**
+on the panel (`POST /money/incoming-payments/add-from-wise`) brings one in by hand: checked the same way,
+matched for suggestions, never recorded or emailed (`queueOnly`). The panel now shows for admin / managers
+even when the queue is empty, and each row says "via Wise API" or "via email". Read-only report of what OP
+never saw: `npx tsx src/scripts/wise-missed-payments.ts [--since YYYY-MM-DD]` (default 6 Oct 2026, with
+"possibly recorded by hand" hints). Next: "split across jobs" for one transfer covering several jobs.
+
 **`services/record-payment.ts`** is the staff "Record Payment" route's 330 lines lifted into a
 service (route = validate + relay, same HTTP contract) so the matcher — and the planned
 Stripe Terminal module — record through one chain.
