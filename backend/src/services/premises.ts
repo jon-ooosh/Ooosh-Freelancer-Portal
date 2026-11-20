@@ -979,7 +979,7 @@ export async function syncCheckReminder(checkId: string): Promise<void> {
     }
     if (open.length === 1 && open[0].person_id === plan.person && open[0].title === plan.title) return;
     // Ticked (or dropped) by hand for this same due date or booking: don't make it again.
-    // (Before mig 361 only the due date was kept — still honoured.)
+    // (Before mig 362 only the due date was kept — still honoured.)
     const lastKey = c!.reminded_key ?? (c!.reminded_for_due ? `due:${c!.reminded_for_due}` : null);
     if (open.length === 0 && lastKey === plan.key) return;
     for (const t of open) await cancelTask(t.id, SYSTEM_USER_ID, 'admin');

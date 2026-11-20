@@ -1,5 +1,5 @@
 -- ============================================================================
--- 361: Premises & compliance — phase 3b (docs/PREMISES-COMPLIANCE-SPEC.md §16)
+-- 362: Premises & compliance — phase 3b (docs/PREMISES-COMPLIANCE-SPEC.md §16)
 -- ============================================================================
 --   * A BOOKED VISIT: "Northside are coming on 14 Dec at 10:00, Sam letting
 --     them in". At most one live booking per check (unique index). It turns
